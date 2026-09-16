@@ -7,13 +7,16 @@ import {
   type ConfirmOptions,
 } from "./components/ConfirmDialog";
 import { ConfigDrawer } from "./components/ConfigDrawer";
+import { SyncProgressModal, type SyncProgressInfo } from "./components/SyncProgressModal";
+import { SharedListModal } from "./components/SharedListModal";
+import { NotesConfigureModal } from "./components/NotesConfigureModal";
+import { NotesGraphModal } from "./components/NotesGraphModal";
 import {
   FolderContextMenu,
   type ContextMenuState,
   type FileMenuAction,
   type FolderMenuAction,
 } from "./components/FolderContextMenu";
-import { GraphView } from "./components/GraphView";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import {
   AppearanceIcon,
@@ -25,12 +28,26 @@ import {
   PlusFolderIcon,
   SearchIcon,
   SettingsIcon,
+  ShareListIcon,
+  SyncIcon,
+  ViewIcon,
 } from "./components/Icons";
 import { useTheme } from "./hooks/useTheme";
 import type { Theme } from "./theme";
+import {
+  getPinnedPaths,
+  removePinnedPaths,
+  rewritePinnedPaths,
+  setPinnedPaths as persistPinnedPaths,
+  togglePinnedPath,
+} from "./pinSettings";
+import {
+  getShowImages,
+  isImageFileName,
+  setShowImages as persistShowImages,
+} from "./viewSettings";
 import type {
   FilePayload,
-  GraphPayload,
   OpenTab,
   PanelMode,
   SearchHit,
@@ -39,6 +56,8 @@ import type {
 } from "./types";
 
 const THEME_OPTIONS = ["Light", "Dark"] as const;
+const VIEW_OPTIONS = ["Images"] as const;
+const GRAPH_OPTIONS = ["Sync", "Rebuild", "Graph", "Configure"] as const;
 
 function themeToLabel(theme: Theme): string {
   return theme === "light" ? "Light" : "Dark";
@@ -46,6 +65,19 @@ function themeToLabel(theme: Theme): string {
 
 function labelToTheme(label: string): Theme {
   return label === "Light" ? "light" : "dark";
+}
+
+function filterTreeForView(nodes: TreeNode[], showImages: boolean): TreeNode[] {
+  return nodes
+    .map((n) => {
+      if (n.type !== "folder") return n;
+      return { ...n, children: filterTreeForView(n.children || [], showImages) };
+    })
+    .filter((n) => {
+      if (n.type === "folder") return true;
+      if (showImages) return true;
+      return !isImageFileName(n.name);
+    });
 }
 
 const SKIP_CONFIRM_PREFIX = "ob-docs:skip-confirm:";
@@ -166,6 +198,17 @@ function flattenAllPaths(nodes: TreeNode[]): string[] {
   return out;
 }
 
+function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
+  for (const n of nodes) {
+    if (n.path === path) return n;
+    if (n.children?.length) {
+      const hit = findTreeNode(n.children, path);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
 function extFromImageMime(mime: string): string {
   const map: Record<string, string> = {
     "image/png": "png",
@@ -208,7 +251,6 @@ export default function App() {
   const [dirty, setDirty] = useState(false);
   const [searchQ, setSearchQ] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
-  const [graph, setGraph] = useState<GraphPayload | null>(null);
   const [saving, setSaving] = useState(false);
   const [draftFolder, setDraftFolder] = useState<{ parentPath: string } | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
@@ -224,12 +266,33 @@ export default function App() {
   } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const [viewOpen, setViewOpen] = useState(false);
+  const [graphMenuOpen, setGraphMenuOpen] = useState(false);
+  const [sharedListOpen, setSharedListOpen] = useState(false);
+  const [notesGraphOpen, setNotesGraphOpen] = useState(false);
+  const [notesConfigureOpen, setNotesConfigureOpen] = useState(false);
+  const [notesSyncBusy, setNotesSyncBusy] = useState(false);
+  const [notesSyncPopupOpen, setNotesSyncPopupOpen] = useState(false);
+  const [notesSyncTitle, setNotesSyncTitle] = useState("Notes Sync");
+  const [notesSyncMsg, setNotesSyncMsg] = useState<string | null>(null);
+  const [notesSyncProgress, setNotesSyncProgress] = useState<SyncProgressInfo | null>(
+    null,
+  );
+  const [syncing, setSyncing] = useState(false);
+  const [syncPopupOpen, setSyncPopupOpen] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const [syncProgress, setSyncProgress] = useState<SyncProgressInfo | null>(null);
+  const [pendingSync, setPendingSync] = useState(0);
+  const [showImages, setShowImages] = useState(() => getShowImages());
+  const [pinnedPaths, setPinnedPathsState] = useState<string[]>(() => getPinnedPaths());
   const [settingsFlyoutPos, setSettingsFlyoutPos] = useState<{ left: number; bottom: number } | null>(
     null,
   );
   const [pastingImage, setPastingImage] = useState(false);
   const settingsBtnRef = useRef<HTMLButtonElement>(null);
   const appearanceBtnRef = useRef<HTMLButtonElement>(null);
+  const viewBtnRef = useRef<HTMLButtonElement>(null);
+  const graphBtnRef = useRef<HTMLButtonElement>(null);
   const settingsFlyoutRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const renameInFlight = useRef(false);
@@ -240,6 +303,11 @@ export default function App() {
   draftRef.current = draft;
   activePathRef.current = activePath;
   treeRef.current = tree;
+
+  const updatePinnedPaths = useCallback((next: string[]) => {
+    setPinnedPathsState(next);
+    persistPinnedPaths(next);
+  }, []);
 
   const syncFilenameToH1 = useCallback(
     async (path: string, content: string, currentTree: TreeNode[]): Promise<string> => {
@@ -302,12 +370,110 @@ export default function App() {
     void bootstrap();
   }, [bootstrap]);
 
+  const refreshTree = useCallback(async () => {
+    const t = await api.getTree();
+    setTree(t.children);
+  }, []);
+
+  const refreshSyncStatus = useCallback(async () => {
+    try {
+      const s = await api.getSyncStatus();
+      setPendingSync(s.pending || 0);
+      const busy = Boolean(s.busy) || s.status === "queued" || s.status === "running";
+      setSyncing(busy);
+      if (s.progress) setSyncProgress(s.progress);
+      if (s.message) setSyncMsg(s.message);
+      else if (s.error) setSyncMsg(s.error);
+      return s;
+    } catch {
+      setPendingSync(0);
+      return null;
+    }
+  }, []);
+
+  const runVaultSync = useCallback(async () => {
+    if (syncing) {
+      setSyncPopupOpen(true);
+      return;
+    }
+    setSyncPopupOpen(true);
+    setSyncing(true);
+    setSyncMsg("Vault 동기화를 시작합니다…");
+    setSyncProgress({ pct: 0, phase: "queued" });
+    try {
+      const result = await api.syncVault();
+      if (result.status === "error" || result.ok === false) {
+        setSyncing(false);
+        setSyncMsg(result.message || "Sync 실패");
+        await refreshSyncStatus();
+        return;
+      }
+      setSyncMsg(result.message || "Vault 동기화를 백그라운드에서 실행 중입니다.");
+      setSyncing(true);
+    } catch (e) {
+      setSyncing(false);
+      setSyncMsg(e instanceof Error ? e.message : "Sync 실패");
+    }
+  }, [refreshSyncStatus, syncing]);
+
+  useEffect(() => {
+    if (!syncing && !syncPopupOpen) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function poll() {
+      try {
+        const next = await api.getSyncStatus();
+        if (cancelled) return;
+        const busy =
+          Boolean(next.busy) ||
+          next.status === "queued" ||
+          next.status === "running";
+        setPendingSync(next.pending || 0);
+        setSyncing(busy);
+        if (next.progress) setSyncProgress(next.progress);
+        if (busy) {
+          setSyncMsg(next.message || "Vault 동기화를 진행하고 있습니다…");
+          timer = setTimeout(poll, 800);
+          return;
+        }
+        if (next.status === "ready") {
+          setSyncMsg(next.message || "동기화가 완료되었습니다.");
+          void refreshTree();
+          if (activePathRef.current) {
+            try {
+              const file = await api.readFile(activePathRef.current);
+              setDraft(file.content);
+              setDirty(false);
+            } catch {
+              /* remote may have removed the note */
+            }
+          }
+        } else if (next.status === "error") {
+          setSyncMsg(next.error || next.message || "동기화에 실패했습니다.");
+        }
+      } catch {
+        if (cancelled) return;
+        if (syncing) timer = setTimeout(poll, 2000);
+      }
+    }
+
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [syncing, syncPopupOpen, refreshTree]);
+
   useEffect(() => {
     if (!settingsOpen) {
       setAppearanceOpen(false);
+      setViewOpen(false);
+      setGraphMenuOpen(false);
       setSettingsFlyoutPos(null);
       return;
     }
+    void refreshSyncStatus();
 
     function updatePos() {
       const btn = settingsBtnRef.current;
@@ -327,6 +493,9 @@ export default function App() {
       if (settingsBtnRef.current?.contains(target)) return;
       if (settingsFlyoutRef.current?.contains(target)) return;
       if ((target as Element).closest?.(".config-popover")) return;
+      if ((target as Element).closest?.(".knowledge-graph-modal, .notes-configure-modal")) {
+        return;
+      }
       setSettingsOpen(false);
     }
 
@@ -341,12 +510,7 @@ export default function App() {
       document.removeEventListener("mousedown", onPointerDown);
       window.removeEventListener("keydown", onKey);
     };
-  }, [settingsOpen]);
-
-  const refreshTree = useCallback(async () => {
-    const t = await api.getTree();
-    setTree(t.children);
-  }, []);
+  }, [settingsOpen, refreshSyncStatus]);
 
   const askConfirm = useCallback((options: ConfirmOptions) => {
     if (options.dontAskAgainKey && shouldSkipConfirm(options.dontAskAgainKey)) {
@@ -385,6 +549,8 @@ export default function App() {
 
   const openFile = useCallback(
     async (path: string) => {
+      // Notes only — images/binaries are moved via drag-and-drop, not opened as markdown
+      if (!/\.md$/i.test(path)) return;
       if (activePath && path !== activePath && dirty && draft !== file?.content) {
         try {
           await persistNote(activePath, draft);
@@ -544,10 +710,114 @@ export default function App() {
     return () => clearTimeout(t);
   }, [panel, searchQ]);
 
+  const startNotesSync = useCallback(async (full: boolean) => {
+    const label = full ? "Rebuild" : "동기화";
+    setNotesSyncTitle(full ? "Notes Rebuild" : "Notes Sync");
+    setNotesSyncPopupOpen(true);
+    setNotesSyncBusy(true);
+    setNotesSyncProgress(null);
+    setNotesSyncMsg(
+      full ? "Notes 전체 재빌드를 시작합니다…" : "Notes 동기화를 시작합니다…",
+    );
+    try {
+      const result = await api.syncNotesGraph(full);
+      if (result.status === "error") {
+        setNotesSyncBusy(false);
+        setNotesSyncMsg(result.error || `Notes ${label}에 실패했습니다.`);
+        return;
+      }
+      if (result.status === "ready" || result.status === "unchanged") {
+        setNotesSyncBusy(false);
+        setNotesSyncMsg(
+          result.message ||
+            (result.status === "unchanged"
+              ? "변경된 파일이 없습니다."
+              : `Notes ${label}가 완료되었습니다.`),
+        );
+        return;
+      }
+      setNotesSyncBusy(true);
+      setNotesSyncMsg(
+        result.message ||
+          (full
+            ? "Notes 전체 재빌드를 백그라운드에서 실행 중입니다."
+            : "Notes 동기화를 백그라운드에서 실행 중입니다."),
+      );
+    } catch (err) {
+      setNotesSyncBusy(false);
+      setNotesSyncMsg(
+        err instanceof Error ? err.message : `Notes ${label}에 실패했습니다.`,
+      );
+    }
+  }, []);
+
+  const handleGraphAction = useCallback(
+    (choice: string) => {
+      setGraphMenuOpen(false);
+      if (choice === "Graph") {
+        setNotesGraphOpen(true);
+        return;
+      }
+      if (choice === "Configure") {
+        setNotesConfigureOpen(true);
+        return;
+      }
+      if (choice === "Sync") {
+        void startNotesSync(false);
+        return;
+      }
+      if (choice === "Rebuild") {
+        void startNotesSync(true);
+      }
+    },
+    [startNotesSync],
+  );
+
   useEffect(() => {
-    if (panel !== "graph") return;
-    void api.getGraph().then(setGraph);
-  }, [panel]);
+    if (!notesSyncBusy) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function pollNotesSync() {
+      try {
+        const next = await api.getNotesGraphStatus();
+        if (cancelled) return;
+        const busy = next.status === "queued" || next.status === "running";
+        setNotesSyncBusy(busy);
+        if (next.progress) {
+          setNotesSyncProgress(next.progress);
+        }
+        if (busy) {
+          setNotesSyncMsg(
+            next.message || "Notes 동기화를 백그라운드에서 실행 중입니다.",
+          );
+          timer = setTimeout(pollNotesSync, 1500);
+          return;
+        }
+        if (next.status === "ready" || next.status === "unchanged") {
+          setNotesSyncMsg(
+            next.message ||
+              (next.status === "unchanged"
+                ? "변경된 파일이 없습니다."
+                : "Notes 동기화가 완료되었습니다."),
+          );
+        } else if (next.status === "error") {
+          setNotesSyncMsg(next.error || "Notes 동기화에 실패했습니다.");
+        }
+      } catch {
+        if (cancelled) return;
+        if (notesSyncBusy) {
+          timer = setTimeout(pollNotesSync, 4000);
+        }
+      }
+    }
+
+    void pollNotesSync();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [notesSyncBusy]);
 
   const onWikiClick = useCallback(
     async (target: string) => {
@@ -678,6 +948,7 @@ export default function App() {
       if (to === path) return;
       try {
         await api.rename(path, to);
+        updatePinnedPaths(rewritePinnedPaths(pinnedPaths, path, to));
         if (selectedFolder === path) setSelectedFolder(to);
         if (activePath === path) {
           setActivePath(to);
@@ -711,13 +982,127 @@ export default function App() {
         void showAlert(err instanceof Error ? err.message : String(err));
       }
     },
-    [activePath, refreshTree, selectedFolder, showAlert],
+    [activePath, pinnedPaths, refreshTree, selectedFolder, showAlert, updatePinnedPaths],
+  );
+
+  const movePath = useCallback(
+    async (fromPath: string, toParentPath: string) => {
+      const base = fromPath.split("/").pop() || fromPath;
+      const to = toParentPath ? `${toParentPath}/${base}` : base;
+      if (to === fromPath) return;
+      const fromParent = fromPath.includes("/")
+        ? fromPath.slice(0, fromPath.lastIndexOf("/"))
+        : "";
+      if (fromParent === toParentPath) return;
+      if (toParentPath === fromPath || toParentPath.startsWith(fromPath + "/")) {
+        void showAlert("폴더를 자기 자신이나 하위로 옮길 수 없습니다.", "Move failed");
+        return;
+      }
+      try {
+        await api.rename(fromPath, to);
+        updatePinnedPaths(rewritePinnedPaths(pinnedPaths, fromPath, to));
+        const rewrite = (p: string) =>
+          p === fromPath ? to : p.startsWith(fromPath + "/") ? to + p.slice(fromPath.length) : p;
+
+        if (selectedFolder === fromPath || selectedFolder?.startsWith(fromPath + "/")) {
+          setSelectedFolder(selectedFolder === fromPath ? to : rewrite(selectedFolder!));
+        } else if (toParentPath) {
+          setSelectedFolder(toParentPath);
+        }
+
+        setTabs((prev) =>
+          prev.map((t) => {
+            const next = rewrite(t.path);
+            if (next === t.path) return t;
+            return {
+              ...t,
+              path: next,
+              title: next.split("/").pop()?.replace(/\.md$/i, "") || t.title,
+            };
+          }),
+        );
+
+        if (activePath === fromPath || activePath?.startsWith(fromPath + "/")) {
+          const nextActive = rewrite(activePath!);
+          setActivePath(nextActive);
+          writeLastNotePath(nextActive);
+          if (activePath === fromPath && /\.md$/i.test(nextActive)) {
+            try {
+              const payload = await api.readFile(nextActive);
+              setFile(payload);
+              setDraft(payload.content);
+              setDirty(false);
+            } catch {
+              /* ignore */
+            }
+          } else if (file?.path === fromPath || file?.path.startsWith(fromPath + "/")) {
+            setFile((prev) => (prev ? { ...prev, path: rewrite(prev.path) } : prev));
+          }
+        }
+
+        await refreshTree();
+      } catch (err) {
+        void showAlert(err instanceof Error ? err.message : String(err), "Move failed");
+      }
+    },
+    [activePath, file?.path, pinnedPaths, refreshTree, selectedFolder, showAlert, updatePinnedPaths],
+  );
+
+  const uploadFilesToFolder = useCallback(
+    async (parentPath: string, files: File[]) => {
+      const images = files.filter(
+        (f) => f.type.startsWith("image/") || isImageFileName(f.name),
+      );
+      if (!images.length) {
+        void showAlert("이미지 파일만 폴더로 끌어다 놓을 수 있습니다.", "Upload");
+        return;
+      }
+      try {
+        for (const file of images) {
+          const ext =
+            extFromImageMime(file.type) ||
+            (file.name.includes(".") ? file.name.split(".").pop()!.toLowerCase() : "png");
+          const vaultPath = uniqueImagePath(parentPath, ext, treeRef.current);
+          const fileName = vaultPath.split("/").pop() || file.name;
+          await api.uploadFile(vaultPath, file, fileName);
+        }
+        if (!showImages) {
+          persistShowImages(true);
+          setShowImages(true);
+        }
+        await refreshTree();
+      } catch (err) {
+        void showAlert(err instanceof Error ? err.message : String(err), "Upload failed");
+      }
+    },
+    [refreshTree, showAlert, showImages],
   );
 
   const onFileMenuAction = useCallback(
     async (action: FileMenuAction, path: string) => {
       if (action === "open-tab") {
         await openFile(path);
+        return;
+      }
+      if (action === "pin") {
+        updatePinnedPaths(togglePinnedPath(path, pinnedPaths));
+        return;
+      }
+      if (action === "share") {
+        if (!/\.md$/i.test(path)) {
+          void showAlert("Markdown 노트만 공개 링크로 공유할 수 있습니다.", "Share");
+          return;
+        }
+        try {
+          const res = await api.createShare(path);
+          const url =
+            (res.url && res.url.startsWith("http")
+              ? res.url
+              : `${window.location.origin}${res.url_path}`);
+          window.open(url, "_blank", "noopener,noreferrer");
+        } catch (err) {
+          void showAlert(err instanceof Error ? err.message : String(err), "Share failed");
+        }
         return;
       }
       if (action === "duplicate") {
@@ -749,6 +1134,7 @@ export default function App() {
         if (!ok) return;
         try {
           await api.deletePath(path);
+          updatePinnedPaths(removePinnedPaths(pinnedPaths, path));
           setTabs((prev) => prev.filter((t) => t.path !== path));
           if (activePath === path) {
             setActivePath(null);
@@ -761,7 +1147,7 @@ export default function App() {
         }
       }
     },
-    [activePath, askConfirm, openFile, refreshTree, showAlert],
+    [activePath, askConfirm, openFile, pinnedPaths, refreshTree, showAlert, updatePinnedPaths],
   );
 
   const onFolderMenuAction = useCallback(
@@ -773,6 +1159,10 @@ export default function App() {
       }
       if (action === "new-folder") {
         startCreateFolder(path);
+        return;
+      }
+      if (action === "pin") {
+        updatePinnedPaths(togglePinnedPath(path, pinnedPaths));
         return;
       }
       if (action === "duplicate") {
@@ -804,6 +1194,7 @@ export default function App() {
         if (!ok) return;
         try {
           await api.deletePath(path);
+          updatePinnedPaths(removePinnedPaths(pinnedPaths, path));
           if (selectedFolder === path) setSelectedFolder(null);
           if (activePath?.startsWith(path + "/")) {
             setActivePath(null);
@@ -817,7 +1208,17 @@ export default function App() {
         }
       }
     },
-    [activePath, askConfirm, createNoteIn, refreshTree, selectedFolder, showAlert, startCreateFolder],
+    [
+      activePath,
+      askConfirm,
+      createNoteIn,
+      pinnedPaths,
+      refreshTree,
+      selectedFolder,
+      showAlert,
+      startCreateFolder,
+      updatePinnedPaths,
+    ],
   );
 
   const crumbs = useMemo(() => {
@@ -829,6 +1230,40 @@ export default function App() {
       : parts[parts.length - 1].replace(/\.md$/i, "");
     return [...parts.slice(0, -1), last];
   }, [activePath, draft]);
+
+  const visibleTree = useMemo(
+    () => filterTreeForView(tree, showImages),
+    [tree, showImages],
+  );
+
+  const pinnedPathSet = useMemo(() => new Set(pinnedPaths), [pinnedPaths]);
+
+  const pinnedNodes = useMemo(() => {
+    const existing = new Set(flattenAllPaths(tree));
+    const nodes: TreeNode[] = [];
+    for (const path of pinnedPaths) {
+      if (!existing.has(path)) continue;
+      const node = findTreeNode(tree, path);
+      if (!node) continue;
+      if (node.type === "folder") {
+        const filtered = filterTreeForView([node], showImages)[0];
+        if (filtered) nodes.push(filtered);
+      } else if (showImages || !isImageFileName(node.name)) {
+        nodes.push(node);
+      }
+    }
+    return nodes;
+  }, [pinnedPaths, showImages, tree]);
+
+  // Drop stale pins when files disappear from the vault
+  useEffect(() => {
+    if (!tree.length) return;
+    const existing = new Set(flattenAllPaths(tree));
+    const next = pinnedPaths.filter((p) => existing.has(p));
+    if (next.length !== pinnedPaths.length) {
+      updatePinnedPaths(next);
+    }
+  }, [tree, pinnedPaths, updatePinnedPaths]);
 
   if (!ready) {
     return <div className="empty-state">Loading vault…</div>;
@@ -853,6 +1288,7 @@ export default function App() {
       {ctxMenu && (
         <FolderContextMenu
           menu={ctxMenu}
+          pinned={pinnedPathSet.has(ctxMenu.path)}
           onFolderAction={(action, path) => void onFolderMenuAction(action, path)}
           onFileAction={(action, path) => void onFileMenuAction(action, path)}
           onClose={() => setCtxMenu(null)}
@@ -876,10 +1312,19 @@ export default function App() {
           <SearchIcon />
         </button>
         <button
+          ref={graphBtnRef}
           type="button"
-          className={`rail-btn${panel === "graph" ? " active" : ""}`}
-          title="Graph"
-          onClick={() => setPanel("graph")}
+          className={`rail-btn${graphMenuOpen || notesSyncBusy || notesGraphOpen ? " active" : ""}`}
+          title={notesSyncMsg ?? "Graph"}
+          aria-label="Graph"
+          aria-expanded={graphMenuOpen}
+          aria-haspopup="dialog"
+          onClick={() => {
+            setSettingsOpen(false);
+            setAppearanceOpen(false);
+            setViewOpen(false);
+            setGraphMenuOpen((v) => !v);
+          }}
         >
           <GraphIcon />
         </button>
@@ -891,7 +1336,10 @@ export default function App() {
           title="Settings"
           aria-label="Settings"
           aria-expanded={settingsOpen}
-          onClick={() => setSettingsOpen((v) => !v)}
+          onClick={() => {
+            setGraphMenuOpen(false);
+            setSettingsOpen((v) => !v);
+          }}
         >
           <SettingsIcon />
         </button>
@@ -904,17 +1352,112 @@ export default function App() {
           style={{ left: settingsFlyoutPos.left, bottom: settingsFlyoutPos.bottom }}
         >
           <button
+            type="button"
+            className={`rail-settings-btn${syncing ? " is-active" : ""}`}
+            title={
+              pendingSync
+                ? `대기 업로드 ${pendingSync}건을 먼저 반영한 뒤 S3에서 가져옵니다`
+                : "S3 vault와 동기화 (변경분만)"
+            }
+            onClick={() => {
+              setAppearanceOpen(false);
+              setViewOpen(false);
+              void runVaultSync();
+            }}
+          >
+            <SyncIcon />
+            <span>
+              {syncing
+                ? "Sync (Syncing…)"
+                : pendingSync
+                  ? `Sync (${pendingSync} pending)`
+                  : "Sync"}
+            </span>
+          </button>
+          <button
+            type="button"
+            className={`rail-settings-btn${sharedListOpen ? " is-active" : ""}`}
+            onClick={() => {
+              setAppearanceOpen(false);
+              setViewOpen(false);
+              setSettingsOpen(false);
+              setSharedListOpen(true);
+            }}
+          >
+            <ShareListIcon />
+            <span>Shared List</span>
+          </button>
+          <button
+            ref={viewBtnRef}
+            type="button"
+            className={`rail-settings-btn${viewOpen ? " is-active" : ""}`}
+            aria-expanded={viewOpen}
+            aria-haspopup="dialog"
+            onClick={() => {
+              setAppearanceOpen(false);
+              setViewOpen((v) => !v);
+            }}
+          >
+            <ViewIcon />
+            <span>View{showImages ? " (Images)" : ""}</span>
+          </button>
+          <button
             ref={appearanceBtnRef}
             type="button"
             className={`rail-settings-btn${appearanceOpen ? " is-active" : ""}`}
             aria-expanded={appearanceOpen}
             aria-haspopup="dialog"
-            onClick={() => setAppearanceOpen((v) => !v)}
+            onClick={() => {
+              setViewOpen(false);
+              setAppearanceOpen((v) => !v);
+            }}
           >
             <AppearanceIcon />
             <span>Appearance ({themeToLabel(theme)})</span>
           </button>
         </div>
+      )}
+      {syncPopupOpen && (
+        <SyncProgressModal
+          title="Vault Sync"
+          busy={syncing}
+          message={syncMsg}
+          progress={syncProgress}
+          onClose={() => setSyncPopupOpen(false)}
+        />
+      )}
+      {notesSyncPopupOpen && (
+        <SyncProgressModal
+          title={notesSyncTitle}
+          busy={notesSyncBusy}
+          message={notesSyncMsg}
+          progress={notesSyncProgress}
+          onClose={() => setNotesSyncPopupOpen(false)}
+        />
+      )}
+      <SharedListModal open={sharedListOpen} onClose={() => setSharedListOpen(false)} />
+      {notesGraphOpen && (
+        <NotesGraphModal
+          onClose={() => setNotesGraphOpen(false)}
+          onOpenNote={(path) => void openFile(path)}
+        />
+      )}
+      {notesConfigureOpen && (
+        <NotesConfigureModal onClose={() => setNotesConfigureOpen(false)} />
+      )}
+      {graphMenuOpen && (
+        <ConfigDrawer
+          title="Graph"
+          options={[...GRAPH_OPTIONS]}
+          selected={[]}
+          mode="single"
+          placement="end"
+          anchorEl={graphBtnRef.current}
+          onChange={(next) => {
+            if (next[0]) handleGraphAction(next[0]);
+          }}
+          onClose={() => setGraphMenuOpen(false)}
+        />
       )}
       {appearanceOpen && (
         <ConfigDrawer
@@ -927,6 +1470,21 @@ export default function App() {
             if (next[0]) setTheme(labelToTheme(next[0]));
           }}
           onClose={() => setAppearanceOpen(false)}
+        />
+      )}
+      {viewOpen && (
+        <ConfigDrawer
+          title="View"
+          options={[...VIEW_OPTIONS]}
+          selected={showImages ? ["Images"] : []}
+          mode="multi"
+          anchorEl={viewBtnRef.current}
+          onChange={(next) => {
+            const on = next.includes("Images");
+            persistShowImages(on);
+            setShowImages(on);
+          }}
+          onClose={() => setViewOpen(false)}
         />
       )}
 
@@ -956,12 +1514,44 @@ export default function App() {
               </div>
             </div>
             <div className="sidebar-body">
+              {pinnedNodes.length > 0 && (
+                <div className="tree-section">
+                  <div className="section-label">Pinned</div>
+                  <FileTree
+                    nodes={pinnedNodes}
+                    activePath={activePath}
+                    selectedFolder={selectedFolder}
+                    pinnedPaths={pinnedPathSet}
+                    hidePinBadge
+                    onOpen={(p) => void openFile(p)}
+                    onSelectFolder={setSelectedFolder}
+                    onMove={(from, toParent) => void movePath(from, toParent)}
+                    onUploadFiles={(parent, files) => void uploadFilesToFolder(parent, files)}
+                    onFolderContextMenu={(path, x, y) =>
+                      setCtxMenu({ kind: "folder", path, x, y })
+                    }
+                    onFileContextMenu={(path, x, y) =>
+                      setCtxMenu({ kind: "file", path, x, y })
+                    }
+                    draftFolder={draftFolder}
+                    onDraftConfirm={(name) => void confirmCreateFolder(name)}
+                    onDraftCancel={cancelCreateFolder}
+                    renamingPath={renamingPath}
+                    onRenameConfirm={(path, name) => void confirmRename(path, name)}
+                    onRenameCancel={() => setRenamingPath(null)}
+                  />
+                </div>
+              )}
+              {pinnedNodes.length > 0 && <div className="section-label">Vaults</div>}
               <FileTree
-                nodes={tree}
+                nodes={visibleTree}
                 activePath={activePath}
                 selectedFolder={selectedFolder}
+                pinnedPaths={pinnedPathSet}
                 onOpen={(p) => void openFile(p)}
                 onSelectFolder={setSelectedFolder}
+                onMove={(from, toParent) => void movePath(from, toParent)}
+                onUploadFiles={(parent, files) => void uploadFilesToFolder(parent, files)}
                 onFolderContextMenu={(path, x, y) =>
                   setCtxMenu({ kind: "folder", path, x, y })
                 }
@@ -1002,32 +1592,9 @@ export default function App() {
             </div>
           </>
         )}
-        {panel === "graph" && (
-          <>
-            <div className="sidebar-header">
-              <span>Graph</span>
-            </div>
-            <div className="sidebar-body" style={{ padding: 12, color: "var(--text-muted)", fontSize: 13 }}>
-              위키링크 기반 관계 그래프입니다. 메인 영역에서 노드를 클릭하면 노트가 열립니다.
-              <div style={{ marginTop: 10 }}>
-                nodes: {graph?.nodes.length ?? "…"} · edges: {graph?.edges.length ?? "…"}
-              </div>
-            </div>
-          </>
-        )}
       </aside>
 
       <main className="main">
-        {panel === "graph" ? (
-          <GraphView
-            graph={graph}
-            onOpen={(p) => void openFile(p)}
-            onRebuild={() => {
-              void api.rebuildGraph().then(() => api.getGraph().then(setGraph));
-            }}
-          />
-        ) : (
-          <>
             <div className="tabs">
               {tabs.map((t) => (
                 <div
@@ -1141,8 +1708,6 @@ export default function App() {
                 <span style={{ fontSize: 12 }}>Local-first · .md SoT · .vault settings</span>
               </div>
             )}
-          </>
-        )}
       </main>
 
       <ConfirmDialog

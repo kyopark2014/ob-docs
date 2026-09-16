@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from application.api.routes_auth import require_user_id
-from application import vault_backend, vault_index
+from application import vault_backend, vault_index, vault_share, vault_sync
 
 router = APIRouter(prefix="/vault/api/files", tags=["files"])
 
@@ -181,11 +181,8 @@ def read_file(request: Request, path: str) -> dict:
 @router.get("/raw")
 def raw_file(request: Request, path: str) -> Response:
     require_user_id(request)
-    try:
-        target = vault_backend.resolve_vault_path(path)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    if not target.is_file():
+    target = vault_backend.find_vault_file(path)
+    if target is None or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     media, _ = mimetypes.guess_type(str(target))
     return FileResponse(target, media_type=media or "application/octet-stream")
@@ -322,6 +319,10 @@ def rename(request: Request, body: RenameBody) -> dict:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if not src.exists():
         raise HTTPException(status_code=404, detail="Source not found")
+    was_file = src.is_file()
+    if vault_backend.backend_mode() == "s3":
+        # Queue deletes for old keys before the local move.
+        vault_sync.enqueue_delete_tree(body.from_path)
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
     if body.from_path.endswith(".md"):
@@ -329,8 +330,28 @@ def rename(request: Request, body: RenameBody) -> dict:
     if body.to_path.endswith(".md"):
         vault_index.update_note(body.to_path)
     vault_index.rebuild_index()
+    # Keep public shares pointing at the new path and republish content to S3.
+    vault_share.rewrite_share_paths(body.from_path, body.to_path)
+    try:
+        if was_file:
+            vault_share.publish_vault_file_to_s3(body.to_path)
+            vault_share.delete_vault_from_s3(body.from_path)
+        else:
+            vault_share.delete_vault_tree_from_s3(body.from_path)
+            if vault_backend.backend_mode() == "s3":
+                vault_sync.enqueue_put_tree(body.to_path)
+            else:
+                root = vault_backend.vault_root()
+                target = vault_backend.resolve_vault_path(body.to_path)
+                if target.is_dir():
+                    for p in target.rglob("*.md"):
+                        rel = p.resolve().relative_to(root.resolve()).as_posix()
+                        vault_share.publish_vault_file_to_s3(rel)
+    except Exception:
+        pass
     if vault_backend.backend_mode() == "s3":
-        vault_backend.sync_to_s3()
+        vault_sync.enqueue_put_tree(body.to_path)
+        vault_sync.flush_pending_to_s3()
     return {"ok": True, "from": body.from_path, "to": body.to_path}
 
 
@@ -343,6 +364,17 @@ def delete_path(request: Request, body: DeleteBody) -> dict:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if not target.exists():
         raise HTTPException(status_code=404, detail="Not found")
+    # Revoke public shares before removing the note so Shared List / CloudFront
+    # cannot keep a dangling token → "Shared note no longer exists".
+    vault_share.remove_shares_for_path(body.path)
+    if vault_backend.backend_mode() == "s3":
+        vault_sync.enqueue_delete_tree(body.path)
+    else:
+        # Mount/local with bucket: still drop S3 objects so share fallback cannot resurrect.
+        try:
+            vault_share.delete_vault_tree_from_s3(body.path)
+        except Exception:
+            pass
     if target.is_dir():
         shutil.rmtree(target)
     else:
@@ -351,20 +383,25 @@ def delete_path(request: Request, body: DeleteBody) -> dict:
             vault_index.remove_note(body.path)
     vault_index.rebuild_index()
     if vault_backend.backend_mode() == "s3":
-        vault_backend.sync_to_s3()
+        vault_sync.flush_pending_to_s3()
     return {"ok": True, "path": body.path}
 
 
 def _unique_copy_path(src: Path) -> Path:
-    """Return sibling path like 'name copy' / 'name copy 2'."""
+    """Return sibling path like 'Name 2.md' / 'Name 3' (folders)."""
     parent = src.parent
-    stem = src.name
-    candidate = parent / f"{stem} copy"
+    if src.is_dir():
+        base = src.name
+        suffix = ""
+    else:
+        base = src.stem
+        suffix = src.suffix
     n = 2
-    while candidate.exists():
-        candidate = parent / f"{stem} copy {n}"
+    while True:
+        candidate = parent / f"{base} {n}{suffix}"
+        if not candidate.exists():
+            return candidate
         n += 1
-    return candidate
 
 
 @router.post("/duplicate")
@@ -385,10 +422,36 @@ def duplicate_path(request: Request, body: DuplicateBody) -> dict:
     else:
         shutil.copy2(src, dst)
     vault_index.rebuild_index()
-    if vault_backend.backend_mode() == "s3":
-        vault_backend.sync_to_s3()
     rel = dst.relative_to(root).as_posix()
+    if vault_backend.backend_mode() == "s3":
+        vault_sync.enqueue_put_tree(rel)
+        vault_sync.flush_pending_to_s3()
     return {"ok": True, "from": body.path, "to": rel}
+
+
+@router.get("/sync")
+def sync_status(request: Request) -> dict:
+    """Pending outbound ops + background sync job status (for SyncProgressModal)."""
+    require_user_id(request)
+    return vault_sync.get_sync_status()
+
+
+@router.post("/sync")
+def sync_from_remote(request: Request) -> dict:
+    """Start background sync: flush pending local→S3, then incremental pull."""
+    require_user_id(request)
+    if vault_backend.backend_mode() != "s3":
+        return {
+            "ok": False,
+            "status": "error",
+            "busy": False,
+            "mode": vault_backend.backend_mode(),
+            "message": (
+                "로컬 모드에서는 S3 동기화를 사용할 수 없습니다. "
+                "VAULT_S3_ENABLE=1 로 실행한 뒤 다시 시도하세요."
+            ),
+        }
+    return vault_sync.start_sync_job(force_download=False)
 
 
 @router.get("/settings/{name}")

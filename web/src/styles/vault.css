@@ -19,11 +19,12 @@ html:not([data-theme]) {
   --border: #333333;
   --text: #dadada;
   --text-muted: #999999;
-  --accent: #10a37f;
-  --accent-soft: rgba(16, 163, 127, 0.18);
-  --accent-hover: #0d8c6d;
+  --accent: #58a6ff;
+  --accent-soft: rgba(88, 166, 255, 0.18);
+  --accent-hover: #4493f8;
   --danger: #e25555;
-  --link: #10a37f;
+  --danger-soft: rgba(226, 85, 85, 0.16);
+  --link: #58a6ff;
   --popover-bg: #212121;
   --popover-hover: rgba(255, 255, 255, 0.06);
   --popover-selected: rgba(255, 255, 255, 0.08);
@@ -42,11 +43,12 @@ html[data-theme="light"] {
   --border: #e5e5e5;
   --text: #0d0d0d;
   --text-muted: #8e8e8e;
-  --accent: #0d8c6d;
-  --accent-soft: rgba(13, 140, 109, 0.14);
-  --accent-hover: #0a7359;
+  --accent: #4493f8;
+  --accent-soft: rgba(68, 147, 248, 0.16);
+  --accent-hover: #3b82f6;
   --danger: #e03131;
-  --link: #0d8c6d;
+  --danger-soft: rgba(224, 49, 49, 0.12);
+  --link: #4493f8;
   --popover-bg: #ececf1;
   --popover-hover: rgba(0, 0, 0, 0.04);
   --popover-selected: rgba(0, 0, 0, 0.07);
@@ -138,8 +140,13 @@ button {
   z-index: 900;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  min-width: 200px;
+  min-width: 220px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--menu-btn-bg);
+  box-shadow: 0 8px 24px var(--shadow);
+  gap: 0;
 }
 
 .rail-settings-btn {
@@ -148,14 +155,14 @@ button {
   gap: 10px;
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--menu-btn-bg);
+  border: none;
+  border-radius: 10px;
+  background: transparent;
   color: var(--text);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  box-shadow: 0 8px 24px var(--shadow);
+  box-shadow: none;
   text-align: left;
 }
 
@@ -167,6 +174,157 @@ button {
 .rail-settings-btn svg {
   flex-shrink: 0;
   color: var(--text-muted);
+}
+
+.rail-settings-btn:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.sync-progress-overlay {
+  z-index: 1100;
+}
+
+.sync-progress-modal {
+  width: min(420px, 92vw);
+  padding: 20px 22px 18px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--popover-bg, var(--menu-btn-bg));
+  box-shadow: 0 20px 48px var(--shadow);
+  color: var(--text);
+}
+
+.sync-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.sync-progress-header h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.sync-progress-close {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.sync-progress-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+  padding: 8px 4px 4px;
+}
+
+.sync-progress-spinner {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 3px solid color-mix(in srgb, var(--accent, #10a37f) 20%, transparent);
+  border-top-color: var(--accent, #10a37f);
+  animation: sync-progress-spin 0.8s linear infinite;
+}
+
+.sync-progress-done {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--accent, #10a37f) 18%, transparent);
+  color: var(--accent, #10a37f);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+@keyframes sync-progress-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.sync-progress-file {
+  margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sync-progress-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.sync-progress-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+  overflow: hidden;
+}
+
+.sync-progress-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent, #10a37f);
+  transition: width 0.25s ease;
+}
+
+.sync-progress-message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.sync-progress-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.sync-progress-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.sync-progress-btn {
+  border: none;
+  border-radius: 10px;
+  padding: 8px 14px;
+  background: var(--accent, #10a37f);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sync-progress-btn.is-secondary {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.sync-progress-btn:hover {
+  filter: brightness(1.05);
 }
 
 /* agentic-work style config popover */
@@ -182,6 +340,10 @@ button {
   box-shadow: 0 12px 32px var(--shadow);
   z-index: 1000;
   overflow: hidden;
+}
+
+.config-popover-end {
+  transform: none;
 }
 
 .config-popover-header {
@@ -245,6 +407,20 @@ button.config-popover-choice.is-selected {
   flex-shrink: 0;
   color: var(--accent);
   font-size: 12px;
+}
+
+.config-popover-toggle {
+  justify-content: space-between;
+  cursor: pointer;
+}
+
+.config-popover-toggle input {
+  accent-color: var(--accent);
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
 }
 
 .sidebar {
@@ -334,6 +510,30 @@ button.config-popover-choice.is-selected {
   padding: 6px 0;
 }
 
+.tree-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-bottom: 4px;
+}
+
+.section-label {
+  padding: 6px 12px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.tree-pin-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  margin-right: -2px;
+}
+
 .tree-item {
   display: flex;
   align-items: center;
@@ -356,19 +556,35 @@ button.config-popover-choice.is-selected {
 
 .tree-item.selected {
   background: var(--bg-active);
-  outline: 1px solid rgba(16, 163, 127, 0.35);
+  outline: 1px solid rgba(88, 166, 255, 0.35);
   outline-offset: -1px;
   border-radius: 4px;
+}
+
+.tree-item.drop-over,
+.file-tree.drop-target {
+  background: var(--accent-soft);
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+  border-radius: 4px;
+}
+
+.tree-item[draggable="true"] {
+  cursor: grab;
+}
+
+.tree-item[draggable="true"]:active {
+  cursor: grabbing;
 }
 
 .ctx-menu {
   position: fixed;
   z-index: 1000;
   min-width: 180px;
-  padding: 6px 0;
+  padding: 4px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   box-shadow: 0 8px 28px var(--shadow);
 }
 
@@ -382,15 +598,21 @@ button.config-popover-choice.is-selected {
   background: transparent;
   border: none;
   cursor: pointer;
+  border-radius: 6px;
 }
 
 .ctx-item:hover {
-  background: var(--accent);
-  color: #fff;
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.ctx-item.danger {
+  color: var(--danger);
 }
 
 .ctx-item.danger:hover {
-  background: #c92a2a;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .ctx-sep {
@@ -702,7 +924,7 @@ button.config-popover-choice.is-selected {
   width: 100%;
   height: 100%;
   background:
-    radial-gradient(circle at 30% 20%, rgba(16, 163, 127, 0.08), transparent 40%),
+    radial-gradient(circle at 30% 20%, rgba(88, 166, 255, 0.08), transparent 40%),
     var(--bg);
 }
 
@@ -814,10 +1036,11 @@ button.config-popover-choice.is-selected {
 
 .modal-card {
   width: min(100%, 420px);
-  background: #f5f5f5;
-  color: #1a1a1a;
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 16px 48px var(--shadow);
   padding: 18px 20px 16px;
 }
 
@@ -834,7 +1057,7 @@ button.config-popover-choice.is-selected {
   font-size: 16px;
   font-weight: 700;
   line-height: 1.3;
-  color: #111;
+  color: var(--text);
 }
 
 .modal-close {
@@ -848,13 +1071,13 @@ button.config-popover-choice.is-selected {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: #888;
+  color: var(--text-muted);
   cursor: pointer;
 }
 
 .modal-close:hover {
-  background: rgba(0, 0, 0, 0.06);
-  color: #333;
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .modal-body {
@@ -866,12 +1089,12 @@ button.config-popover-choice.is-selected {
   margin: 0;
   font-size: 13.5px;
   line-height: 1.45;
-  color: #333;
+  color: var(--text);
 }
 
 .modal-detail {
   margin-top: 6px;
-  color: #666;
+  color: var(--text-muted);
 }
 
 .modal-footer {
@@ -886,7 +1109,7 @@ button.config-popover-choice.is-selected {
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: #333;
+  color: var(--text);
   cursor: pointer;
   user-select: none;
 }
@@ -916,12 +1139,12 @@ button.config-popover-choice.is-selected {
 }
 
 .modal-btn-cancel {
-  background: #e4e4e4;
-  color: #222;
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .modal-btn-cancel:hover {
-  background: #d8d8d8;
+  background: var(--bg-active);
 }
 
 .modal-btn-confirm {
@@ -934,9 +1157,289 @@ button.config-popover-choice.is-selected {
 }
 
 .modal-btn-confirm.danger {
-  background: #e03131;
+  background: var(--danger);
 }
 
 .modal-btn-confirm.danger:hover {
-  background: #c92a2a;
+  filter: brightness(0.92);
+}
+
+.share-list-modal {
+  width: min(640px, 94vw);
+  max-width: 640px;
+}
+
+.share-list-body {
+  margin-bottom: 12px;
+}
+
+.share-list-muted {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.share-list-error {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--danger);
+}
+
+.share-doc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-sidebar);
+  max-height: min(52vh, 420px);
+  overflow: auto;
+}
+
+.share-doc-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.share-doc-list-item:last-child {
+  border-bottom: none;
+}
+
+.share-doc-list-meta {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.share-doc-list-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-doc-list-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-doc-list-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.share-doc-list-btn {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.share-doc-list-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.share-doc-list-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.share-doc-list-btn-success {
+  color: #3fb950;
+  border-color: rgba(63, 185, 80, 0.45);
+}
+
+.share-doc-list-btn-success:hover:not(:disabled) {
+  border-color: #3fb950;
+  color: #56d364;
+  background: rgba(63, 185, 80, 0.08);
+}
+
+.share-doc-list-btn-danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.share-doc-list-btn-danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+/* Notes Graph modal (Wiki Graph UX) */
+.knowledge-graph-modal {
+  padding: 24px 16px;
+  z-index: 1100;
+}
+
+.knowledge-graph-panel {
+  position: relative;
+  width: min(1280px, 96vw);
+  height: min(900px, 92vh);
+  display: flex;
+  flex-direction: column;
+  background: #151922;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.knowledge-graph-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  background: rgba(33, 38, 45, 0.92);
+  color: #8b949e;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.knowledge-graph-close:hover {
+  background: #30363d;
+  color: #e6edf3;
+}
+
+.knowledge-graph-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #0d1117;
+}
+
+.knowledge-graph-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 48px 32px;
+  text-align: center;
+  color: #e6edf3;
+}
+
+.knowledge-graph-placeholder-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.knowledge-graph-placeholder-body {
+  margin: 0;
+  max-width: 28rem;
+  color: #8b949e;
+  line-height: 1.5;
+  font-size: 0.95rem;
+}
+
+.knowledge-graph-banner {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(33, 38, 45, 0.92);
+  border: 1px solid #30363d;
+  color: #e6edf3;
+  font-size: 0.85rem;
+}
+
+.notes-configure-modal {
+  width: min(480px, 94vw);
+}
+
+.notes-configure-muted {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.notes-configure-section-label {
+  margin: 14px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.notes-configure-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  font-size: 14px;
+}
+
+.notes-configure-toggle input {
+  width: 16px;
+  height: 16px;
+}
+
+.notes-configure-folder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.notes-configure-folder-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.notes-configure-folder-list li:last-child .notes-configure-folder-item {
+  border-bottom: none;
+}
+
+.notes-configure-folder-item:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.08));
+}
+
+.notes-configure-success {
+  margin: 12px 0 0;
+  color: var(--accent, #58a6ff);
+  font-size: 13px;
+  line-height: 1.4;
 }

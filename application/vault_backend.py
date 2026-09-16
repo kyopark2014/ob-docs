@@ -130,6 +130,31 @@ def resolve_vault_path(rel: str) -> Path:
     return target
 
 
+def find_vault_file(rel: str) -> Optional[Path]:
+    """Resolve an existing file; fall back to unique basename match (Obsidian-style)."""
+    try:
+        target = resolve_vault_path(rel)
+    except ValueError:
+        return None
+    if target.is_file():
+        return target
+    name = Path((rel or "").replace("\\", "/")).name
+    if not name or name in {".", ".."}:
+        return None
+    root = vault_root()
+    matches: list[Path] = []
+    for path in root.rglob(name):
+        if not path.is_file():
+            continue
+        if ".vault" in path.parts:
+            continue
+        matches.append(path)
+    if not matches:
+        return None
+    matches.sort(key=lambda p: (len(p.relative_to(root).parts), str(p).lower()))
+    return matches[0]
+
+
 def settings_dir() -> Path:
     return vault_root() / ".vault"
 
@@ -145,61 +170,47 @@ def _s3_client(region: str):
 
 
 def sync_from_s3(*, force: bool = False) -> dict:
-    """Download vault/ objects into local working copy (s3 mode only)."""
+    """Download vault/ objects into local working copy (s3 mode only).
+
+    Delegates to vault_sync: never pulls while pending local→S3 ops remain.
+    Prefer incremental unless ``force=True``.
+    """
     global _last_sync_at
-    if backend_mode() != "s3":
-        return {"ok": False, "reason": f"backend={backend_mode()}"}
-    now = time.time()
-    with _sync_lock:
-        if not force and (now - _last_sync_at) < _SYNC_INTERVAL_SECONDS:
-            return {"ok": True, "skipped": True, "last_sync_at": _last_sync_at}
-        bucket, region = s3_bucket_and_region()
-        if not bucket:
-            return {"ok": False, "reason": "no bucket"}
-        prefix = s3_prefix()
-        root = local_dir()
-        root.mkdir(parents=True, exist_ok=True)
-        client = _s3_client(region)
-        downloaded = 0
-        paginator = client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for obj in page.get("Contents") or []:
-                key = obj["Key"]
-                if key.endswith("/"):
-                    continue
-                rel = key[len(prefix) :] if key.startswith(prefix) else key
-                dest = root / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                client.download_file(bucket, key, str(dest))
-                downloaded += 1
-        _last_sync_at = time.time()
-        logger.info("Vault sync from s3://%s/%s (%d files)", bucket, prefix, downloaded)
-        return {"ok": True, "downloaded": downloaded, "last_sync_at": _last_sync_at}
+    from application import vault_sync
+
+    # Always try to finish outbound ops first so a pull cannot clobber them.
+    flush = vault_sync.flush_pending_to_s3()
+    if not flush.get("ok") and flush.get("remaining"):
+        return {
+            "ok": False,
+            "reason": "pending_uploads",
+            "flush": flush,
+            "skipped": True,
+        }
+    if not force:
+        now = time.time()
+        with _sync_lock:
+            if (now - _last_sync_at) < _SYNC_INTERVAL_SECONDS and _last_sync_at > 0:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "flush": flush,
+                    "last_sync_at": _last_sync_at,
+                }
+    return vault_sync.sync_from_s3_incremental(force=force)
 
 
 def sync_to_s3(rel_path: Optional[str] = None) -> dict:
-    """Upload local vault file(s) to S3 (s3 mode only)."""
+    """Upload local vault file(s) to S3 via durable pending queue + flush."""
+    from application import vault_sync
+
     if backend_mode() != "s3":
         return {"ok": False, "reason": f"backend={backend_mode()}"}
-    bucket, region = s3_bucket_and_region()
-    if not bucket:
-        return {"ok": False, "reason": "no bucket"}
-    prefix = s3_prefix()
-    root = local_dir()
-    client = _s3_client(region)
-    uploaded = 0
     if rel_path:
-        paths = [resolve_vault_path(rel_path)]
+        vault_sync.enqueue_put(rel_path)
     else:
-        paths = [p for p in root.rglob("*") if p.is_file()]
-    for path in paths:
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root).as_posix()
-        key = prefix + rel
-        client.upload_file(str(path), bucket, key)
-        uploaded += 1
-    return {"ok": True, "uploaded": uploaded}
+        vault_sync.enqueue_put_tree("")
+    return vault_sync.flush_pending_to_s3()
 
 
 def ensure_seed_vault() -> None:

@@ -1,5 +1,51 @@
 import type { FilePayload, GraphPayload, SearchHit, TreeNode } from "./types";
 
+export type ShareEntry = {
+  token: string;
+  path: string;
+  title: string;
+  created_at: number;
+  url_path: string;
+  url?: string;
+};
+
+export type GraphPattern = "pattern1" | "pattern2" | "pattern3";
+
+export type NotesFolderOption = {
+  name: string;
+  path: string;
+};
+
+export type NotesGraphStatus = {
+  notes_dir: string;
+  folders?: string[];
+  include_missing?: boolean;
+  available_folders?: NotesFolderOption[];
+  exists: boolean;
+  path?: string | null;
+  storage?: string;
+  status: string;
+  pattern?: GraphPattern | string;
+  error?: string | null;
+  message?: string | null;
+  last_success_at?: string | null;
+  progress?: {
+    file?: string | null;
+    file_i?: number | null;
+    file_n?: number | null;
+    pct?: number | null;
+    phase?: string | null;
+  } | null;
+};
+
+export type NotesSourcesConfig = {
+  notes_dir: string;
+  folders: string[];
+  include_missing: boolean;
+  available_folders: NotesFolderOption[];
+  max_sources: number;
+};
+
 const BASE = "/vault/api";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -18,16 +64,34 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       detail = await res.text();
     }
-    const err = new Error(
-      typeof detail === "object" && detail && "detail" in detail
-        ? JSON.stringify((detail as { detail: unknown }).detail)
-        : `HTTP ${res.status}`,
-    ) as Error & { status?: number; detail?: unknown };
+    const message = formatApiError(detail, res.status);
+    const err = new Error(message) as Error & { status?: number; detail?: unknown };
     err.status = res.status;
     err.detail = detail;
     throw err;
   }
   return res.json() as Promise<T>;
+}
+
+function formatApiError(detail: unknown, status: number): string {
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (detail && typeof detail === "object") {
+    const root = detail as { detail?: unknown; message?: unknown; error?: unknown };
+    const inner = root.detail !== undefined ? root.detail : root;
+    if (typeof inner === "string" && inner.trim()) return inner.trim();
+    if (inner && typeof inner === "object") {
+      const obj = inner as { message?: unknown; error?: unknown; mode?: unknown };
+      if (typeof obj.message === "string" && obj.message.trim()) {
+        if (obj.error === "s3_unavailable" || obj.mode === "local") {
+          return "로컬 모드에서는 S3 동기화를 사용할 수 없습니다. VAULT_S3_ENABLE=1 로 실행하세요.";
+        }
+        return obj.message.trim();
+      }
+      if (typeof obj.error === "string" && obj.error.trim()) return obj.error.trim();
+    }
+    if (typeof root.message === "string" && root.message.trim()) return root.message.trim();
+  }
+  return `HTTP ${status}`;
 }
 
 export const api = {
@@ -63,6 +127,26 @@ export const api = {
     request<{ ok: boolean; from: string; to: string }>("/files/duplicate", {
       method: "POST",
       body: JSON.stringify({ path }),
+    }),
+  createShare: (path: string) =>
+    request<{
+      ok: boolean;
+      token: string;
+      path: string;
+      title: string;
+      created_at?: number;
+      url_path: string;
+      url?: string;
+    }>("/files/share", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+  listShares: () =>
+    request<{ ok: boolean; count: number; shares: ShareEntry[] }>("/files/shares"),
+  deleteShare: (token: string) =>
+    request<{ ok: boolean; token: string }>("/files/share/delete", {
+      method: "POST",
+      body: JSON.stringify({ token }),
     }),
   deletePath: (path: string) =>
     request<{ ok: boolean }>("/files/delete", {
@@ -103,5 +187,53 @@ export const api = {
       `/search?q=${encodeURIComponent(q)}`,
     ),
   getGraph: () => request<GraphPayload>("/graph"),
-  rebuildGraph: () => request<{ ok: boolean; notes: number; links: number }>("/graph/rebuild", { method: "POST" }),
+  getNotesGraphStatus: () => request<NotesGraphStatus>("/graph/status"),
+  syncNotesGraph: (full = false) =>
+    request<NotesGraphStatus>(`/graph/sync${full ? "?full=1" : ""}`, {
+      method: "POST",
+    }),
+  rebuildGraph: () =>
+    request<NotesGraphStatus & { ok?: boolean; notes?: number; links?: number }>(
+      "/graph/rebuild",
+      { method: "POST" },
+    ),
+  setNotesGraphPattern: (pattern: GraphPattern | string) =>
+    request<NotesGraphStatus>("/graph/pattern", {
+      method: "PATCH",
+      body: JSON.stringify({ pattern }),
+    }),
+  getNotesGraphSources: () => request<NotesSourcesConfig>("/graph/sources"),
+  putNotesGraphSources: (body: {
+    folders: string[];
+    include_missing?: boolean;
+  }) =>
+    request<NotesSourcesConfig>("/graph/sources", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  getSyncStatus: () =>
+    request<{
+      mode: string;
+      pending: number;
+      status?: string;
+      busy?: boolean;
+      message?: string | null;
+      error?: string | null;
+      progress?: {
+        file?: string | null;
+        file_i?: number | null;
+        file_n?: number | null;
+        pct?: number | null;
+        phase?: string | null;
+      } | null;
+      ops: Array<{ op: string; path?: string }>;
+    }>("/files/sync"),
+  syncVault: () =>
+    request<{
+      ok?: boolean;
+      status: string;
+      busy?: boolean;
+      message?: string;
+      pending?: number;
+    }>("/files/sync", { method: "POST" }),
 };

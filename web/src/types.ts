@@ -41,5 +41,5 @@ export type OpenTab = {
   dirty?: boolean;
 };
 
-export type PanelMode = "files" | "search" | "graph";
+export type PanelMode = "files" | "search";
 export type ViewMode = "preview" | "edit";

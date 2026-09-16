@@ -24,7 +24,10 @@ CloudFront
 
 - **mount 모드 (ECS)**: `/mnt/vault`에 직접 읽고 씀 (S3 Files가 비동기 동기화)
 - **local 모드**: `data/vault/`만 사용
-- **s3 모드 (옵션)**: `VAULT_S3_ENABLE=1`일 때 로컬 ↔ `s3://{bucket}/vault/` 주기적 sync
+- **s3 모드 (옵션)**: `VAULT_S3_ENABLE=1`일 때 로컬 ↔ `s3://{bucket}/vault/` sync
+  - 저장/삭제 시 pending 큐(`.vault/pending_s3_ops.json`, S3에도 미러)에 쌓은 뒤 flush
+  - Settings **Sync**: pending 업로드를 먼저 끝낸 다음, S3에서 **변경분만** 내려받음
+  - 부팅 시에도 pending flush → incremental pull 순서
 
 ## 빠른 시작 (로컬)
 
@@ -61,11 +64,21 @@ data/vault/                 # 또는 /mnt/vault
 └── .vault/
     ├── app.json            # 환경설정
     ├── workspace.json      # 레이아웃 (gitignore 권장)
+    ├── shares.json         # public 공유 토큰 레지스트리
     ├── graph.json          # 파생 그래프
     └── cache/              # 인덱스 (삭제 후 재생성)
 ```
 
 위키링크 `[[Note]]`, frontmatter(`aliases`, `tags`)를 파싱해 그래프·검색·백링크를 만듭니다.
+
+**좌측 rail → Graph** (agentic-work Wiki 메뉴를 Notes로 이식)
+
+| 메뉴 | 동작 |
+|---|---|
+| Sync | vault markdown 위키링크 인덱스를 갱신하고 Notes Graph HTML 생성 |
+| Rebuild | 캐시를 비우고 전체 재빌드 |
+| Graph | Notes Graph 모달 (agentic-work와 동일한 Force Atlas / Neo4j Explore / Holistic View · 검색·범례) |
+| Configure | 포함할 폴더·미해결 링크 표시 설정 |
 
 ## API
 
@@ -78,12 +91,25 @@ data/vault/                 # 또는 /mnt/vault
 | GET | `/vault/api/files/read?path=` | 노트 읽기 |
 | PUT | `/vault/api/files/write` | 노트 저장(덮어쓰기) |
 | POST | `/vault/api/files/append` | 노트 이어쓰기 |
+| POST | `/vault/api/files/sync` | pending flush 후 S3→로컬 incremental pull |
+| GET | `/vault/api/files/sync` | pending 큐 상태 |
+| POST | `/vault/api/files/share` | 노트 public 공유 링크 생성/재사용 |
+| GET | `/vault/api/files/shares` | 공유 목록 |
+| POST | `/vault/api/files/share/delete` | 공유 토큰 삭제 |
+| GET | `/vault/s/{token}` | **공개** markdown viewer (쿠키 불필요) |
+| GET | `/vault/s/{token}/raw?path=` | **공개** 상대 이미지/첨부 |
 | POST | `/vault/api/files/mkdir` | 폴더 생성 |
 | POST | `/vault/api/files/rename` | 이동/이름변경 |
 | POST | `/vault/api/files/delete` | 삭제 |
 | GET | `/vault/api/search?q=` | 검색 |
-| GET | `/vault/api/graph` | 위키링크 그래프 |
-| POST | `/vault/api/graph/rebuild` | 인덱스 재생성 |
+| GET | `/vault/api/graph` | Notes 위키링크 그래프 JSON |
+| GET | `/vault/api/graph/status` | Notes 그래프 동기화 상태 |
+| POST | `/vault/api/graph/sync` | Notes Sync (`?full=1` = Rebuild) |
+| POST | `/vault/api/graph/rebuild` | Notes 전체 재빌드 |
+| GET | `/vault/api/graph/graph` | Notes Graph HTML (iframe) |
+| PATCH | `/vault/api/graph/pattern` | 그래프 뷰 패턴 전환 |
+| GET/PUT | `/vault/api/graph/sources` | Notes Configure (포함 폴더) |
+| GET | `/vault/api/graph/backlinks` | 백링크 |
 
 인증: `agent_user_id` 쿠키, `Authorization: Bearer <session>`, 또는 AgentCore용 `Authorization: VaultAgent v1.<payload>.<sig>` (`agentic-work/vault-agent-token`).
 
@@ -91,6 +117,64 @@ data/vault/                 # 또는 /mnt/vault
 - Secrets Manager 키: `{sharedProjectName}/vault-agent-token` (my-vaults skill / AgentCore)
 - 또는 환경변수 `SESSION_SIGNING_KEY` / `VAULT_AGENT_TOKEN`
 - 미인증 시 agentic-work 로그인 URL로 안내
+- `/vault/s/*` 공개 viewer만 세션 없이 접근 가능
+
+### 노트의 public 공유
+
+로그인된 사용자가 markdown 노트를 **쿠키 없이** 볼 수 있는 CloudFront URL로 공유합니다. agentic-work markdown viewer와 비슷한 HTML 페이지를 서버가 렌더합니다.
+
+**UI**
+
+1. 노트 우클릭 → **Share public link** → 새 탭에서 공개 페이지 오픈
+2. Settings → **Shared List** → 제목 · 공유 시각 · URL 목록, **Link**(열기) / **삭제**
+
+**노트 삭제·이동**
+
+- 노트(또는 폴더) **삭제** 시 해당 경로의 public share 는 Shared List / `shares.json` 에서 함께 제거되고 S3 레지스트리에 즉시 반영됩니다. 공개 URL은 더 이상 열리지 않습니다.
+- 노트 **이동·이름 변경** 시 share 경로가 새 위치로 갱신되고, 노트 본문도 S3에 다시 올려 CloudFront에서도 이어집니다.
+
+**URL 형식** (`config.json`의 `sharing_url`)
+
+```text
+https://cowork.my-agentic-ai.click/vault/s/{token}
+```
+
+**생성 흐름** (인증 필요)
+
+```text
+POST /vault/api/files/share  { "path": "folder/Note.md" }
+  → .vault/shares.json 에 token 등록 (같은 경로면 기존 token 재사용)
+  → s3 모드면 shares.json 을 S3 vault/ 에도 반영
+  → { url, url_path, token, title, created_at } 반환
+```
+
+레지스트리 예:
+
+```json
+{
+  "shares": {
+    "gvFUVyCeSgTS9g9n-qHC2nTv": {
+      "path": "agent/A2A on AWS AgentCore.md",
+      "title": "A2A on AWS AgentCore",
+      "created_at": 1789570000.0
+    }
+  }
+}
+```
+
+**접속 흐름** (인증 불필요)
+
+```text
+브라우저
+  → CloudFront (sharing_url)
+  → ALB /vault* → ob-docs ECS
+  → GET /vault/s/{token}
+  → shares.json 에서 token → vault 상대경로 조회
+  → .md 를 HTML markdown viewer 로 반환
+```
+
+- 본문 상대 이미지(`![](img.png)`)는 `/vault/s/{token}/raw?path=…` 로 다시 쓰여 공개 제공됩니다.
+- SPA catch-all(`/vault/{path}`)은 `api/`, `s/` 를 제외합니다. 공개 URL이 vault 앱 전체가 보이면 **구버전 배포**이거나 롤아웃 전일 수 있습니다.
 
 ## ECS / ALB 연동 (agentic-work installer 확장)
 

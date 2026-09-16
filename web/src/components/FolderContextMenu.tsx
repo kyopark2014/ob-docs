@@ -5,12 +5,15 @@ export type FolderMenuAction =
   | "new-note"
   | "new-folder"
   | "duplicate"
+  | "pin"
   | "rename"
   | "delete";
 
 export type FileMenuAction =
   | "open-tab"
   | "duplicate"
+  | "share"
+  | "pin"
   | "rename"
   | "delete";
 
@@ -26,38 +29,50 @@ export type FolderContextMenuState = ContextMenuState;
 
 type Props = {
   menu: ContextMenuState;
+  pinned?: boolean;
   onFolderAction: (action: FolderMenuAction, path: string) => void;
   onFileAction: (action: FileMenuAction, path: string) => void;
   onClose: () => void;
 };
 
-const FOLDER_ITEMS: {
-  action: FolderMenuAction;
-  label: string;
-  danger?: boolean;
-  sepBefore?: boolean;
-}[] = [
-  { action: "new-note", label: "New note" },
-  { action: "new-folder", label: "New folder" },
-  { action: "duplicate", label: "Duplicate", sepBefore: true },
-  { action: "rename", label: "Rename...", sepBefore: true },
-  { action: "delete", label: "Delete", danger: true },
-];
+type MenuItem =
+  | {
+      action: FolderMenuAction | FileMenuAction;
+      label: string;
+      danger?: boolean;
+      sepBefore?: boolean;
+    };
 
-const FILE_ITEMS: {
-  action: FileMenuAction;
-  label: string;
-  danger?: boolean;
-  sepBefore?: boolean;
-}[] = [
-  { action: "open-tab", label: "Open in new tab" },
-  { action: "duplicate", label: "Duplicate", sepBefore: true },
-  { action: "rename", label: "Rename...", sepBefore: true },
-  { action: "delete", label: "Delete", danger: true },
-];
+function folderItems(pinned: boolean): MenuItem[] {
+  return [
+    { action: "new-note", label: "New note" },
+    { action: "new-folder", label: "New folder" },
+    { action: "duplicate", label: "Duplicate", sepBefore: true },
+    { action: "pin", label: pinned ? "Unpin" : "Pin", sepBefore: true },
+    { action: "rename", label: "Rename..." },
+    { action: "delete", label: "Delete" },
+  ];
+}
+
+function fileItems(pinned: boolean, canShare: boolean): MenuItem[] {
+  const items: MenuItem[] = [
+    { action: "open-tab", label: "Open in new tab" },
+    { action: "duplicate", label: "Duplicate", sepBefore: true },
+  ];
+  if (canShare) {
+    items.push({ action: "share", label: "Share public link" });
+  }
+  items.push(
+    { action: "pin", label: pinned ? "Unpin" : "Pin", sepBefore: true },
+    { action: "rename", label: "Rename..." },
+    { action: "delete", label: "Delete" },
+  );
+  return items;
+}
 
 export function FolderContextMenu({
   menu,
+  pinned = false,
   onFolderAction,
   onFileAction,
   onClose,
@@ -80,12 +95,15 @@ export function FolderContextMenu({
   }, [onClose]);
 
   const pad = 8;
-  const approxH = 220;
+  const approxH = 260;
   const approxW = 200;
   const left = Math.min(menu.x, window.innerWidth - approxW - pad);
   const top = Math.min(menu.y, window.innerHeight - approxH - pad);
 
-  const items = menu.kind === "folder" ? FOLDER_ITEMS : FILE_ITEMS;
+  const items =
+    menu.kind === "folder"
+      ? folderItems(pinned)
+      : fileItems(pinned, /\.md$/i.test(menu.path));
 
   return createPortal(
     <div

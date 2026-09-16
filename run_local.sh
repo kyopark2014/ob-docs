@@ -28,5 +28,9 @@ echo "==> Starting uvicorn on 0.0.0.0:${PORT}"
 echo "    Open http://localhost:${PORT}/vault"
 export ENABLE_API_DOCS="${ENABLE_API_DOCS:-1}"
 export ALLOW_LOCAL_AUTH_BYPASS="${ALLOW_LOCAL_AUTH_BYPASS:-1}"
+# Opt-in S3 vault sync for local (uses config.json s3_bucket). Set VAULT_S3_DISABLE=1 to force local-only.
+if [[ -z "${VAULT_S3_DISABLE:-}" ]]; then
+  export VAULT_S3_ENABLE="${VAULT_S3_ENABLE:-1}"
+fi
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 exec uvicorn application.server:app --host 0.0.0.0 --port "${PORT}" --no-server-header

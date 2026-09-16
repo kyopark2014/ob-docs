@@ -147,7 +147,9 @@ export function AlertDialog({ open, title = "Notice", message, onClose }: AlertP
           </button>
         </div>
         <div className="modal-body">
-          <p className="modal-message">{message}</p>
+          <p className="modal-message" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+            {message}
+          </p>
         </div>
         <div className="modal-footer">
           <span />

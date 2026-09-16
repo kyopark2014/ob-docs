@@ -1,0 +1,691 @@
+"""Durable pending S3 vault ops + flush / incremental pull.
+
+Pending ops survive process restart via ``.vault/pending_s3_ops.json`` (also
+mirrored to S3 so ECS task replacement can resume). Sync-from-S3 is blocked
+until the pending upload/delete queue is empty.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Optional
+
+from application import vault_backend
+
+logger = logging.getLogger("vault_sync")
+
+_PENDING_NAME = "pending_s3_ops.json"
+_queue_lock = threading.RLock()
+_flush_lock = threading.Lock()
+
+
+def _pending_local_path() -> Path:
+    return vault_backend.settings_dir() / _PENDING_NAME
+
+
+def _pending_s3_key() -> str:
+    return vault_backend.s3_prefix() + ".vault/" + _PENDING_NAME
+
+
+def _empty_queue() -> dict[str, Any]:
+    return {"version": 1, "ops": []}
+
+
+def _load_local_queue() -> dict[str, Any]:
+    path = _pending_local_path()
+    if not path.is_file():
+        return _empty_queue()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("ops"), list):
+            return data
+    except Exception:
+        logger.exception("Failed to read pending queue %s", path)
+    return _empty_queue()
+
+
+def _save_local_queue(data: dict[str, Any]) -> None:
+    path = _pending_local_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    raw = json.dumps(data, ensure_ascii=False, indent=2)
+    tmp.write_text(raw + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _mirror_pending_to_s3(data: dict[str, Any]) -> None:
+    """Best-effort durable mirror of the pending queue itself."""
+    if vault_backend.backend_mode() != "s3":
+        return
+    bucket, region = vault_backend.s3_bucket_and_region()
+    if not bucket:
+        return
+    try:
+        client = vault_backend._s3_client(region)
+        body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        client.put_object(
+            Bucket=bucket,
+            Key=_pending_s3_key(),
+            Body=body,
+            ContentType="application/json",
+        )
+    except Exception:
+        logger.exception("Failed to mirror pending queue to S3")
+
+
+def _load_pending_from_s3() -> dict[str, Any]:
+    if vault_backend.backend_mode() != "s3":
+        return _empty_queue()
+    bucket, region = vault_backend.s3_bucket_and_region()
+    if not bucket:
+        return _empty_queue()
+    try:
+        from botocore.exceptions import ClientError
+
+        client = vault_backend._s3_client(region)
+        obj = client.get_object(Bucket=bucket, Key=_pending_s3_key())
+        raw = obj["Body"].read().decode("utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict) and isinstance(data.get("ops"), list):
+            return data
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in {"NoSuchKey", "404", "NotFound"}:
+            return _empty_queue()
+        logger.debug("Remote pending queue read failed: %s", e)
+    except Exception as e:
+        logger.debug("No remote pending queue (or read failed): %s", e)
+    return _empty_queue()
+
+
+def _merge_ops(a: list[dict[str, Any]], b: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge ops; later ops for the same path win. put_all collapses queue."""
+    by_path: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    put_all: Optional[dict[str, Any]] = None
+    for op in a + b:
+        kind = op.get("op")
+        if kind == "put_all":
+            put_all = op
+            by_path.clear()
+            order.clear()
+            continue
+        path = (op.get("path") or "").strip()
+        if not path or kind not in {"put", "delete"}:
+            continue
+        if path not in by_path:
+            order.append(path)
+        by_path[path] = op
+    ops = [by_path[p] for p in order]
+    if put_all is not None and not ops:
+        return [put_all]
+    if put_all is not None:
+        # explicit path ops after put_all still matter; drop bare put_all
+        return ops
+    return ops
+
+
+def load_queue(*, hydrate_from_s3: bool = False) -> dict[str, Any]:
+    with _queue_lock:
+        local = _load_local_queue()
+        if hydrate_from_s3 and vault_backend.backend_mode() == "s3":
+            remote = _load_pending_from_s3()
+            merged_ops = _merge_ops(remote.get("ops") or [], local.get("ops") or [])
+            data = {"version": 1, "ops": merged_ops}
+            _save_local_queue(data)
+            return data
+        return local
+
+
+def pending_count() -> int:
+    return len(load_queue().get("ops") or [])
+
+
+def _enqueue(op: dict[str, Any]) -> dict[str, Any]:
+    with _queue_lock:
+        data = _load_local_queue()
+        ops = list(data.get("ops") or [])
+        kind = op.get("op")
+        if kind == "put_all":
+            data = {"version": 1, "ops": [op]}
+        else:
+            path = (op.get("path") or "").strip()
+            ops = [o for o in ops if not (o.get("path") == path and o.get("op") in {"put", "delete"})]
+            ops = [o for o in ops if o.get("op") != "put_all"]
+            ops.append(op)
+            data = {"version": 1, "ops": ops}
+        _save_local_queue(data)
+        _mirror_pending_to_s3(data)
+        return data
+
+
+def enqueue_put(rel_path: str) -> dict[str, Any]:
+    rel = (rel_path or "").replace("\\", "/").lstrip("/")
+    if not rel or rel.startswith(".vault/pending"):
+        return load_queue()
+    return _enqueue(
+        {
+            "id": uuid.uuid4().hex[:12],
+            "op": "put",
+            "path": rel,
+            "ts": time.time(),
+        }
+    )
+
+
+def enqueue_delete(rel_path: str) -> dict[str, Any]:
+    rel = (rel_path or "").replace("\\", "/").lstrip("/")
+    if not rel:
+        return load_queue()
+    return _enqueue(
+        {
+            "id": uuid.uuid4().hex[:12],
+            "op": "delete",
+            "path": rel,
+            "ts": time.time(),
+        }
+    )
+
+
+def enqueue_put_tree(rel_dir: str = "") -> dict[str, Any]:
+    """Enqueue put for every file under rel_dir (or whole vault)."""
+    root = vault_backend.local_dir() if vault_backend.backend_mode() == "s3" else vault_backend.vault_root()
+    base = root / rel_dir if rel_dir else root
+    if not base.exists():
+        return load_queue()
+    data = load_queue()
+    if base.is_file():
+        return enqueue_put(base.relative_to(root).as_posix())
+    for path in base.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        if rel == f".vault/{_PENDING_NAME}":
+            continue
+        data = enqueue_put(rel)
+    return data
+
+
+def enqueue_delete_tree(rel_dir: str) -> dict[str, Any]:
+    root = vault_backend.local_dir() if vault_backend.backend_mode() == "s3" else vault_backend.vault_root()
+    base = root / rel_dir
+    if not base.exists():
+        return enqueue_delete(rel_dir)
+    if base.is_file():
+        return enqueue_delete(rel_dir)
+    data = load_queue()
+    for path in base.rglob("*"):
+        if path.is_file():
+            data = enqueue_delete(path.relative_to(root).as_posix())
+    # also mark the directory prefix (no-op on S3 for empty dirs)
+    return data
+
+
+def _upload_file(client, bucket: str, prefix: str, root: Path, rel: str) -> bool:
+    path = root / rel
+    if not path.is_file():
+        logger.warning("Pending put skipped; local missing: %s", rel)
+        return True  # drop from queue
+    if rel == f".vault/{_PENDING_NAME}":
+        return True
+    key = prefix + rel
+    client.upload_file(str(path), bucket, key)
+    return True
+
+
+def _delete_object(client, bucket: str, prefix: str, rel: str) -> bool:
+    key = prefix + rel
+    try:
+        client.delete_object(Bucket=bucket, Key=key)
+    except Exception:
+        logger.exception("Failed to delete s3://%s/%s", bucket, key)
+        return False
+    return True
+
+
+def flush_pending_to_s3(
+    *,
+    on_progress: Optional[Any] = None,
+) -> dict[str, Any]:
+    """Apply all pending put/delete ops to S3. Safe across restarts."""
+    if vault_backend.backend_mode() != "s3":
+        return {"ok": False, "reason": f"backend={vault_backend.backend_mode()}", "flushed": 0}
+
+    with _flush_lock:
+        bucket, region = vault_backend.s3_bucket_and_region()
+        if not bucket:
+            return {"ok": False, "reason": "no bucket", "flushed": 0}
+        prefix = vault_backend.s3_prefix()
+        root = vault_backend.local_dir()
+        client = vault_backend._s3_client(region)
+
+        # Hydrate queue from S3 mirror in case local disk was wiped mid-flight
+        data = load_queue(hydrate_from_s3=True)
+        ops = list(data.get("ops") or [])
+        if not ops:
+            return {"ok": True, "flushed": 0, "remaining": 0}
+
+        total = len(ops)
+        flushed = 0
+        remaining: list[dict[str, Any]] = []
+        for i, op in enumerate(ops, start=1):
+            kind = op.get("op")
+            rel = (op.get("path") or "").strip()
+            label = rel or (kind or "op")
+            if callable(on_progress):
+                on_progress(
+                    {
+                        "phase": "flush",
+                        "file": label,
+                        "file_i": i,
+                        "file_n": total,
+                        "pct": int(round((i - 1) / total * 100)),
+                        "message": f"로컬 변경분을 S3에 업로드 중… ({i}/{total})",
+                    }
+                )
+            try:
+                if kind == "put_all":
+                    files = [
+                        p
+                        for p in root.rglob("*")
+                        if p.is_file()
+                        and p.relative_to(root).as_posix() != f".vault/{_PENDING_NAME}"
+                    ]
+                    for j, path in enumerate(files, start=1):
+                        rel_f = path.relative_to(root).as_posix()
+                        if callable(on_progress):
+                            on_progress(
+                                {
+                                    "phase": "flush",
+                                    "file": rel_f,
+                                    "file_i": j,
+                                    "file_n": len(files),
+                                    "pct": int(round((j - 1) / max(len(files), 1) * 100)),
+                                    "message": f"전체 업로드 중… ({j}/{len(files)})",
+                                }
+                            )
+                        _upload_file(client, bucket, prefix, root, rel_f)
+                        flushed += 1
+                    continue
+                if not rel:
+                    continue
+                if kind == "put":
+                    ok = _upload_file(client, bucket, prefix, root, rel)
+                elif kind == "delete":
+                    ok = _delete_object(client, bucket, prefix, rel)
+                else:
+                    ok = True
+                if ok:
+                    flushed += 1
+                else:
+                    remaining.append(op)
+            except Exception:
+                logger.exception("Pending op failed: %s", op)
+                remaining.append(op)
+
+        new_data = {"version": 1, "ops": remaining}
+        with _queue_lock:
+            _save_local_queue(new_data)
+            _mirror_pending_to_s3(new_data)
+
+        logger.info(
+            "Flushed %d pending S3 ops (%d remaining)", flushed, len(remaining)
+        )
+        return {
+            "ok": len(remaining) == 0,
+            "flushed": flushed,
+            "remaining": len(remaining),
+            "pending": remaining,
+        }
+
+
+def sync_from_s3_incremental(
+    *,
+    force: bool = False,
+    on_progress: Optional[Any] = None,
+) -> dict[str, Any]:
+    """Download only missing / newer S3 objects. Refuses while pending ops exist."""
+    if vault_backend.backend_mode() != "s3":
+        return {"ok": False, "reason": f"backend={vault_backend.backend_mode()}"}
+
+    pending = pending_count()
+    if pending:
+        return {
+            "ok": False,
+            "reason": "pending_uploads",
+            "pending": pending,
+            "message": "Finish local→S3 pending ops before pulling from S3",
+        }
+
+    with vault_backend._sync_lock:
+        bucket, region = vault_backend.s3_bucket_and_region()
+        if not bucket:
+            return {"ok": False, "reason": "no bucket"}
+        prefix = vault_backend.s3_prefix()
+        root = vault_backend.local_dir()
+        root.mkdir(parents=True, exist_ok=True)
+        client = vault_backend._s3_client(region)
+
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents") or []:
+                key = obj["Key"]
+                if key.endswith("/"):
+                    continue
+                rel = key[len(prefix) :] if key.startswith(prefix) else key
+                if rel == f".vault/{_PENDING_NAME}":
+                    continue
+                dest = root / rel
+                s3_size = int(obj.get("Size") or 0)
+                s3_mtime = obj.get("LastModified")
+                s3_ts = s3_mtime.timestamp() if s3_mtime is not None else 0.0
+                if dest.is_file() and not force:
+                    st = dest.stat()
+                    if st.st_size == s3_size and st.st_mtime >= s3_ts - 1.0:
+                        continue
+                candidates.append((rel, obj))
+
+        downloaded = 0
+        skipped = 0
+        total = len(candidates)
+        if total == 0:
+            if callable(on_progress):
+                on_progress(
+                    {
+                        "phase": "pull",
+                        "file": None,
+                        "file_i": 0,
+                        "file_n": 0,
+                        "pct": 100,
+                        "message": "가져올 변경분이 없습니다.",
+                    }
+                )
+            vault_backend._last_sync_at = time.time()
+            return {
+                "ok": True,
+                "downloaded": 0,
+                "skipped": 0,
+                "last_sync_at": vault_backend._last_sync_at,
+            }
+
+        for i, (rel, obj) in enumerate(candidates, start=1):
+            if callable(on_progress):
+                on_progress(
+                    {
+                        "phase": "pull",
+                        "file": rel,
+                        "file_i": i,
+                        "file_n": total,
+                        "pct": int(round((i - 1) / total * 100)),
+                        "message": f"S3에서 변경분 가져오는 중… ({i}/{total})",
+                    }
+                )
+            dest = root / rel
+            s3_mtime = obj.get("LastModified")
+            s3_ts = s3_mtime.timestamp() if s3_mtime is not None else 0.0
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            client.download_file(bucket, obj["Key"], str(dest))
+            if s3_ts:
+                try:
+                    import os
+
+                    os.utime(dest, (s3_ts, s3_ts))
+                except OSError:
+                    pass
+            downloaded += 1
+
+        vault_backend._last_sync_at = time.time()
+        logger.info(
+            "Incremental sync from s3://%s/%s downloaded=%d skipped=%d",
+            bucket,
+            prefix,
+            downloaded,
+            skipped,
+        )
+        return {
+            "ok": True,
+            "downloaded": downloaded,
+            "skipped": skipped,
+            "last_sync_at": vault_backend._last_sync_at,
+        }
+
+
+def sync_now(
+    *,
+    force_download: bool = False,
+    on_progress: Optional[Any] = None,
+) -> dict[str, Any]:
+    """Flush pending local→S3 ops, then pull changed objects from S3."""
+    if vault_backend.backend_mode() != "s3":
+        return {
+            "ok": False,
+            "reason": f"backend={vault_backend.backend_mode()}",
+            "message": "S3 sync only available when VAULT_S3_ENABLE=1",
+        }
+    if callable(on_progress):
+        on_progress(
+            {
+                "phase": "flush",
+                "message": "대기 중인 로컬 변경분을 확인합니다…",
+                "pct": 0,
+            }
+        )
+    flush = flush_pending_to_s3(on_progress=on_progress)
+    if not flush.get("ok"):
+        return {
+            "ok": False,
+            "phase": "flush",
+            "flush": flush,
+            "message": "Pending uploads not fully flushed; pull blocked",
+        }
+    if callable(on_progress):
+        on_progress(
+            {
+                "phase": "pull",
+                "message": "S3 vault 변경분을 확인합니다…",
+                "pct": 0,
+            }
+        )
+    pull = sync_from_s3_incremental(force=force_download, on_progress=on_progress)
+    ok = bool(pull.get("ok"))
+    if ok:
+        downloaded = pull.get("downloaded") or 0
+        skipped = pull.get("skipped") or 0
+        flushed = flush.get("flushed") or 0
+        msg = (
+            f"동기화 완료 · 업로드 {flushed} · 내려받기 {downloaded}"
+            + (f" · 건너뜀 {skipped}" if skipped else "")
+        )
+    else:
+        msg = pull.get("message") or "동기화에 실패했습니다."
+    return {
+        "ok": ok,
+        "phase": "done",
+        "flush": flush,
+        "pull": pull,
+        "message": msg,
+    }
+
+
+def startup_sync() -> dict[str, Any]:
+    """On boot: resume pending uploads, then incremental pull."""
+    return sync_now(force_download=False)
+
+
+def queue_and_flush_put(rel_path: str) -> dict[str, Any]:
+    enqueue_put(rel_path)
+    return flush_pending_to_s3()
+
+
+def queue_and_flush_delete(rel_path: str) -> dict[str, Any]:
+    enqueue_delete(rel_path)
+    return flush_pending_to_s3()
+
+
+# ---------------------------------------------------------------------------
+# Background sync job + status (agentic-work SyncProgressModal compatible)
+# ---------------------------------------------------------------------------
+
+_STATUS_NAME = "sync_status.json"
+_job_lock = threading.Lock()
+_job_thread: Optional[threading.Thread] = None
+_job_state: dict[str, Any] = {
+    "status": "idle",
+    "message": None,
+    "error": None,
+    "progress": None,
+    "result": None,
+    "updated_at": 0.0,
+}
+
+
+def _status_path() -> Path:
+    return vault_backend.settings_dir() / _STATUS_NAME
+
+
+def _persist_job_state() -> None:
+    try:
+        path = _status_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(_job_state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        logger.debug("Failed to persist sync status", exc_info=True)
+
+
+def _set_job(**kwargs: Any) -> None:
+    with _job_lock:
+        _job_state.update(kwargs)
+        _job_state["updated_at"] = time.time()
+        _persist_job_state()
+
+
+def get_sync_status() -> dict[str, Any]:
+    with _job_lock:
+        state = dict(_job_state)
+    state["mode"] = vault_backend.backend_mode()
+    state["pending"] = pending_count()
+    state["ops"] = (load_queue().get("ops") or [])[:50]
+    busy = state.get("status") in {"queued", "running"}
+    state["busy"] = busy
+    return state
+
+
+def _run_sync_job(*, force_download: bool = False) -> None:
+    def on_progress(info: dict[str, Any]) -> None:
+        progress = {
+            "file": info.get("file"),
+            "file_i": info.get("file_i"),
+            "file_n": info.get("file_n"),
+            "pct": info.get("pct"),
+            "phase": info.get("phase"),
+        }
+        _set_job(
+            status="running",
+            message=info.get("message") or "동기화 진행 중…",
+            progress=progress,
+            error=None,
+        )
+
+    try:
+        _set_job(
+            status="running",
+            message="Vault 동기화를 시작합니다…",
+            progress={"pct": 0, "phase": "start"},
+            error=None,
+            result=None,
+        )
+        result = sync_now(force_download=force_download, on_progress=on_progress)
+        if result.get("ok"):
+            _set_job(
+                status="ready",
+                message=result.get("message") or "동기화가 완료되었습니다.",
+                progress={
+                    "pct": 100,
+                    "phase": "done",
+                    "file_i": result.get("pull", {}).get("downloaded"),
+                    "file_n": result.get("pull", {}).get("downloaded"),
+                },
+                result=result,
+                error=None,
+            )
+            try:
+                from application import vault_index
+
+                vault_index.rebuild_index()
+            except Exception:
+                logger.exception("Index rebuild after sync failed")
+        else:
+            _set_job(
+                status="error",
+                message=result.get("message") or "동기화에 실패했습니다.",
+                error=result.get("message") or result.get("reason") or "sync failed",
+                result=result,
+                progress=_job_state.get("progress"),
+            )
+    except Exception as e:
+        logger.exception("Vault sync job failed")
+        _set_job(
+            status="error",
+            message="동기화에 실패했습니다.",
+            error=str(e),
+            result=None,
+        )
+    finally:
+        global _job_thread
+        with _job_lock:
+            _job_thread = None
+
+
+def start_sync_job(*, force_download: bool = False) -> dict[str, Any]:
+    """Queue a background sync job (no-op if already running)."""
+    global _job_thread
+    if vault_backend.backend_mode() != "s3":
+        return {
+            "status": "error",
+            "ok": False,
+            "message": "S3 sync requires VAULT_S3_ENABLE=1",
+            "mode": vault_backend.backend_mode(),
+        }
+    with _job_lock:
+        if _job_thread is not None and _job_thread.is_alive():
+            return {
+                "status": _job_state.get("status") or "running",
+                "ok": True,
+                "message": _job_state.get("message") or "이미 동기화가 진행 중입니다.",
+                "busy": True,
+                "pending": pending_count(),
+            }
+        _job_state.update(
+            {
+                "status": "queued",
+                "message": "Vault 동기화를 백그라운드에서 시작합니다…",
+                "error": None,
+                "progress": {"pct": 0, "phase": "queued"},
+                "result": None,
+                "updated_at": time.time(),
+            }
+        )
+        _persist_job_state()
+        _job_thread = threading.Thread(
+            target=_run_sync_job,
+            kwargs={"force_download": force_download},
+            name="vault-s3-sync",
+            daemon=True,
+        )
+        _job_thread.start()
+    return {
+        "status": "queued",
+        "ok": True,
+        "busy": True,
+        "message": "Vault 동기화를 백그라운드에서 시작합니다…",
+        "pending": pending_count(),
+    }

@@ -16,6 +16,8 @@ from application.api.routes_auth import router as auth_router
 from application.api.routes_files import router as files_router
 from application.api.routes_graph import router as graph_router
 from application.api.routes_search import router as search_router
+from application.api.routes_share import api_router as share_api_router
+from application.api.routes_share import public_router as share_public_router
 from application import vault_backend, vault_index
 
 logging.basicConfig(
@@ -44,7 +46,11 @@ async def lifespan(app: FastAPI):
     logger.info("Vault backend mode: %s root=%s", mode, vault_backend.vault_root())
     if mode == "s3":
         try:
-            vault_backend.sync_from_s3(force=True)
+            from application import vault_sync
+
+            # Resume unfinished local→S3 ops first, then pull changed objects.
+            result = vault_sync.startup_sync()
+            logger.info("Startup vault sync: %s", result)
         except Exception:
             logger.exception("Initial vault S3 sync failed")
     stats = vault_index.rebuild_index()
@@ -63,6 +69,8 @@ app = FastAPI(
 
 app.include_router(auth_router)
 app.include_router(files_router)
+app.include_router(share_api_router)
+app.include_router(share_public_router)
 app.include_router(search_router)
 app.include_router(graph_router)
 
@@ -89,10 +97,13 @@ def root_redirect():
 
 
 @app.get("/favicon.ico")
+@app.get("/vault/favicon.ico")
+@app.get("/vault/favicon.svg")
 def favicon():
+    """Serve under /vault/* so CloudFront (/vault* → ob-docs) can reach it."""
     icon = _WEB_DIST / "favicon.svg"
     if icon.is_file():
-        return FileResponse(icon)
+        return FileResponse(icon, media_type="image/svg+xml")
     return HTMLResponse("", status_code=204)
 
 
@@ -111,7 +122,7 @@ if _WEB_DIST.is_dir():
 
     @app.get("/vault/{full_path:path}")
     def vault_spa(full_path: str):
-        if full_path.startswith("api/"):
+        if full_path.startswith("api/") or full_path.startswith("s/"):
             return HTMLResponse("Not Found", status_code=404)
         # static file from dist
         candidate = _WEB_DIST / full_path

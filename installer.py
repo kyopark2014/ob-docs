@@ -242,53 +242,86 @@ def ensure_target_group(elbv2, vpc_id: str) -> str:
 
 
 def ensure_listener_rule(elbv2, listener_arn: str, tg_arn: str, origin_header: str) -> str:
-    """Path /vault* + origin header → ob-docs TG (priority 5)."""
+    """Path /vault* + origin header → ob-docs TG.
+
+    Must be a *higher* priority (lower number) than the agentic-work catch-all
+    header-only rule, otherwise /vault never reaches ob-docs.
+    """
     rules = elbv2.describe_rules(ListenerArn=listener_arn)["Rules"]
+    vault_rule = None
     for rule in rules:
         if rule.get("Priority") == "default":
             continue
         conds = rule.get("Conditions") or []
-        path_ok = False
         for c in conds:
             if c.get("Field") == "path-pattern":
                 values = c.get("Values") or []
-                if any(v.startswith("/vault") for v in values):
-                    path_ok = True
-        if path_ok:
-            # update action to our TG
-            elbv2.modify_rule(
-                RuleArn=rule["RuleArn"],
-                Actions=[{"Type": "forward", "TargetGroupArn": tg_arn}],
-            )
-            logger.info("Updated existing /vault listener rule %s", rule["RuleArn"])
-            return rule["RuleArn"]
+                if any(str(v).startswith("/vault") for v in values):
+                    vault_rule = rule
+                    break
+        if vault_rule:
+            break
 
-    # find free priority starting at 5
-    used = {int(r["Priority"]) for r in rules if r.get("Priority", "default").isdigit()}
-    priority = 5
-    while priority in used:
-        priority += 1
+    desired_priority = 4
+    used = {
+        int(r["Priority"])
+        for r in rules
+        if r.get("Priority", "default").isdigit() and r is not vault_rule
+    }
+    while desired_priority in used:
+        desired_priority -= 1
+        if desired_priority < 1:
+            desired_priority = 1
+            while desired_priority in used:
+                desired_priority += 1
+            break
+
+    conditions = [
+        {
+            "Field": "path-pattern",
+            "Values": ["/vault", "/vault/*"],
+        },
+        {
+            "Field": "http-header",
+            "HttpHeaderConfig": {
+                "HttpHeaderName": "X-Custom-Header",
+                "Values": [origin_header],
+            },
+        },
+    ]
+    actions = [{"Type": "forward", "TargetGroupArn": tg_arn}]
+
+    if vault_rule:
+        elbv2.modify_rule(
+            RuleArn=vault_rule["RuleArn"],
+            Conditions=conditions,
+            Actions=actions,
+        )
+        current = vault_rule.get("Priority")
+        if str(current) != str(desired_priority):
+            elbv2.set_rule_priorities(
+                RulePriorities=[
+                    {"RuleArn": vault_rule["RuleArn"], "Priority": desired_priority}
+                ]
+            )
+            logger.info(
+                "Updated /vault listener rule %s priority %s → %s",
+                vault_rule["RuleArn"],
+                current,
+                desired_priority,
+            )
+        else:
+            logger.info("Updated existing /vault listener rule %s", vault_rule["RuleArn"])
+        return vault_rule["RuleArn"]
 
     resp = elbv2.create_rule(
         ListenerArn=listener_arn,
-        Priority=priority,
-        Conditions=[
-            {
-                "Field": "path-pattern",
-                "Values": ["/vault", "/vault/*"],
-            },
-            {
-                "Field": "http-header",
-                "HttpHeaderConfig": {
-                    "HttpHeaderName": "X-Custom-Header",
-                    "Values": [origin_header],
-                },
-            },
-        ],
-        Actions=[{"Type": "forward", "TargetGroupArn": tg_arn}],
+        Priority=desired_priority,
+        Conditions=conditions,
+        Actions=actions,
     )
     arn = resp["Rules"][0]["RuleArn"]
-    logger.info("Created listener rule priority=%s → %s", priority, TG_NAME)
+    logger.info("Created listener rule priority=%s → %s", desired_priority, TG_NAME)
     return arn
 
 

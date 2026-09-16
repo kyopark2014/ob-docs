@@ -7,6 +7,8 @@ interface Props {
   selected: string[];
   anchorEl: HTMLElement | null;
   mode?: "multi" | "single";
+  /** above = open upward (default); end = open to the right of the anchor */
+  placement?: "above" | "end";
   onChange: (next: string[]) => void;
   onClose: () => void;
 }
@@ -20,6 +22,7 @@ export function ConfigDrawer({
   selected,
   anchorEl,
   mode = "multi",
+  placement = "above",
   onChange,
   onClose,
 }: Props) {
@@ -48,6 +51,22 @@ export function ConfigDrawer({
     if (!anchorEl) return;
     const rect = anchorEl.getBoundingClientRect();
     const width = Math.max(rect.width, 220);
+    if (placement === "end") {
+      const left = Math.min(
+        Math.max(8, rect.right + MENU_GAP),
+        window.innerWidth - width - 8,
+      );
+      const top = Math.min(
+        Math.max(8, rect.top),
+        window.innerHeight - 80,
+      );
+      const maxHeight = Math.min(
+        MENU_MAX_HEIGHT,
+        Math.max(120, window.innerHeight - top - 8),
+      );
+      setPosition({ left, top, width, maxHeight });
+      return;
+    }
     const left = Math.min(Math.max(8, rect.left), window.innerWidth - width - 8);
     const top = rect.top - MENU_GAP;
     const maxHeight = Math.min(MENU_MAX_HEIGHT, Math.max(120, top - 8));
@@ -56,7 +75,7 @@ export function ConfigDrawer({
 
   useLayoutEffect(() => {
     updatePosition();
-  }, [anchorEl, options.length]);
+  }, [anchorEl, options.length, placement]);
 
   useEffect(() => {
     if (!anchorEl) return;
@@ -84,14 +103,14 @@ export function ConfigDrawer({
       document.removeEventListener("mousedown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [anchorEl, onClose]);
+  }, [anchorEl, onClose, placement]);
 
   if (!position) return null;
 
   return createPortal(
     <div
       ref={menuRef}
-      className="config-popover"
+      className={`config-popover${placement === "end" ? " config-popover-end" : ""}`}
       role="dialog"
       aria-label={title}
       style={{
@@ -125,9 +144,13 @@ export function ConfigDrawer({
             );
           }
           return (
-            <label key={option} className="config-popover-item">
-              <input type="checkbox" checked={isSelected} onChange={() => toggle(option)} />
+            <label key={option} className="config-popover-item config-popover-toggle">
               <span>{option}</span>
+              <input
+                type="checkbox"
+                checked={isSelected}
+                onChange={() => toggle(option)}
+              />
             </label>
           );
         })}

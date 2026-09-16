@@ -59,3 +59,17 @@ def agentic_work_url() -> str:
         (cfg.get("agentic_work_url") or cfg.get("sharing_url") or "").strip()
         or "http://localhost:8501"
     )
+
+
+def sharing_url() -> str:
+    """Public CloudFront (or custom domain) base URL for share links."""
+    cfg = load_config()
+    env = (os.environ.get("SHARING_URL") or "").strip()
+    return (env or cfg.get("sharing_url") or cfg.get("agentic_work_url") or "").strip().rstrip("/")
+
+
+def is_hybrid_graph_search_enabled() -> bool:
+    """Notes graph Ask uses lexical search only (no embeddings by default)."""
+    cfg = load_config()
+    raw = str(cfg.get("hybrid_graph_search") or "").strip().lower()
+    return raw in {"enable", "enabled", "1", "true", "on", "yes"}
