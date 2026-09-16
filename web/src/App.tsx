@@ -1284,7 +1284,7 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app${panel === "hidden" ? " sidebar-collapsed" : ""}`}>
       {ctxMenu && (
         <FolderContextMenu
           menu={ctxMenu}
@@ -1299,7 +1299,8 @@ export default function App() {
           type="button"
           className={`rail-btn${panel === "files" ? " active" : ""}`}
           title="Files"
-          onClick={() => setPanel("files")}
+          aria-pressed={panel === "files"}
+          onClick={() => setPanel((p) => (p === "files" ? "hidden" : "files"))}
         >
           <FilesIcon />
         </button>
@@ -1307,7 +1308,8 @@ export default function App() {
           type="button"
           className={`rail-btn${panel === "search" ? " active" : ""}`}
           title="Search"
-          onClick={() => setPanel("search")}
+          aria-pressed={panel === "search"}
+          onClick={() => setPanel((p) => (p === "search" ? "hidden" : "search"))}
         >
           <SearchIcon />
         </button>
@@ -1488,7 +1490,7 @@ export default function App() {
         />
       )}
 
-      <aside className="sidebar">
+      <aside className={`sidebar${panel === "hidden" ? " collapsed" : ""}`}>
         {panel === "files" && (
           <>
             <div className="sidebar-header">
