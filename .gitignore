@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.DS_Store
+
+# Local vault working copy overrides (keep sample notes tracked)
+data/vault/.vault/workspace.json
+data/vault/.vault/cache/
+application/data/
+*.db
+.venv/
+
+# Frontend
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo
+
+# Session / secrets
+application/data/.session_signing_key
+*.pem

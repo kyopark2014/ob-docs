@@ -1,0 +1,50 @@
+{
+  "nodes": [
+    {
+      "id": "00-Inbox/Welcome.md",
+      "label": "Welcome to ob-docs",
+      "path": "00-Inbox/Welcome.md",
+      "tags": [
+        "inbox",
+        "getting-started"
+      ]
+    },
+    {
+      "id": "notes/Ontology.md",
+      "label": "Ontology mapping",
+      "path": "notes/Ontology.md",
+      "tags": [
+        "ontology",
+        "t-box",
+        "a-box"
+      ]
+    },
+    {
+      "id": "notes/Convention.md",
+      "label": "Vault convention (T-Box)",
+      "path": "notes/Convention.md",
+      "tags": [
+        "convention",
+        "t-box"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "source": "00-Inbox/Welcome.md",
+      "target": "notes/Ontology.md"
+    },
+    {
+      "source": "notes/Ontology.md",
+      "target": "00-Inbox/Welcome.md"
+    },
+    {
+      "source": "notes/Ontology.md",
+      "target": "notes/Convention.md"
+    },
+    {
+      "source": "notes/Convention.md",
+      "target": "00-Inbox/Welcome.md"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+.venv/
+web/node_modules/
+web/dist/
+**/__pycache__/
+*.pyc
+.git/
+.DS_Store
+*.md
+!README.md
+data/vault/.vault/cache/

@@ -1,0 +1,6 @@
+fastapi>=0.134.0
+python-multipart>=0.0.31
+uvicorn[standard]>=0.34.0
+boto3>=1.35.0
+pyyaml>=6.0.2
+markdown>=3.7
