@@ -6,9 +6,8 @@ venv/
 .env
 .DS_Store
 
-# Local vault working copy overrides (keep sample notes tracked)
-data/vault/.vault/workspace.json
-data/vault/.vault/cache/
+# Local vault working copy
+data/
 application/data/
 *.db
 .venv/

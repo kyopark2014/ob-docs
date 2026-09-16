@@ -1,8 +1,0 @@
-{
-  "theme": "dark",
-  "defaultViewMode": "preview",
-  "newFileLocation": "00-Inbox",
-  "attachmentFolderPath": "attachments",
-  "showFrontmatter": true,
-  "readableLineLength": true
-}
