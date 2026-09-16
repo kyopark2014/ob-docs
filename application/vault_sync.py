@@ -22,6 +22,8 @@ logger = logging.getLogger("vault_sync")
 _PENDING_NAME = "pending_s3_ops.json"
 _queue_lock = threading.RLock()
 _flush_lock = threading.Lock()
+# Hide from S3-backed file tree (case-sensitive key listing)
+HIDDEN_SKIP_NAMES = {".git", ".vault"}
 
 
 def _pending_local_path() -> Path:
@@ -226,16 +228,194 @@ def enqueue_delete_tree(rel_dir: str) -> dict[str, Any]:
     return data
 
 
-def _upload_file(client, bucket: str, prefix: str, root: Path, rel: str) -> bool:
+def _upload_file(
+    client,
+    bucket: str,
+    prefix: str,
+    root: Path,
+    rel: str,
+    *,
+    casing_map: Optional[dict[str, str]] = None,
+) -> bool:
+    """Upload local file to S3 using S3's existing folder casing when present."""
     path = root / rel
     if not path.is_file():
-        logger.warning("Pending put skipped; local missing: %s", rel)
-        return True  # drop from queue
+        alt = _find_local_file_ci(root, rel)
+        if alt is None:
+            logger.warning("Pending put skipped; local missing: %s", rel)
+            return True  # drop from queue
+        path = alt
     if rel == f".vault/{_PENDING_NAME}":
         return True
-    key = prefix + rel
+    if casing_map is None:
+        casing_map = _s3_top_level_casing_map(client, bucket, prefix)
+    cleaned = rel.replace("\\", "/").lstrip("/")
+    canon_rel = _remap_rel_to_s3_casing(cleaned, casing_map)
+    key = prefix + canon_rel
     client.upload_file(str(path), bucket, key)
+    # Drop accidental duplicate key with the other casing (Mac rename artifact).
+    if canon_rel != cleaned:
+        try:
+            client.delete_object(Bucket=bucket, Key=prefix + cleaned)
+        except Exception:
+            pass
     return True
+
+
+def _find_local_file_ci(root: Path, rel: str) -> Optional[Path]:
+    parts = [p for p in rel.replace("\\", "/").split("/") if p]
+    cur = root
+    for part in parts:
+        if not cur.exists():
+            return None
+        if cur.is_file():
+            return None
+        hit = None
+        try:
+            for child in cur.iterdir():
+                if child.name.lower() == part.lower():
+                    hit = child
+                    break
+        except OSError:
+            return None
+        if hit is None:
+            return None
+        cur = hit
+    return cur if cur.is_file() else None
+
+
+def _s3_top_level_casing_map(client: Any, bucket: str, prefix: str) -> dict[str, str]:
+    """Map lowercase top-level name → exact casing as stored on S3.
+
+    If both ``agent/`` and ``Agent/`` exist, prefer the casing with the newest object.
+    """
+    scores: dict[str, dict[str, float]] = {}  # low -> {Exact: newest_ts}
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents") or []:
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue
+            rel = key[len(prefix) :] if key.startswith(prefix) else key
+            if not rel or rel.startswith(".vault/"):
+                continue
+            top = rel.split("/", 1)[0]
+            if not top:
+                continue
+            ts = 0.0
+            lm = obj.get("LastModified")
+            if lm is not None:
+                ts = float(lm.timestamp())
+            low = top.lower()
+            prev = scores.setdefault(low, {})
+            prev[top] = max(prev.get(top, 0.0), ts)
+    out: dict[str, str] = {}
+    for low, variants in scores.items():
+        # newest casing wins; tie-break: lexicographic larger (Agent > agent often)
+        best = max(variants.items(), key=lambda kv: (kv[1], kv[0]))
+        out[low] = best[0]
+    return out
+
+
+def _remap_rel_to_s3_casing(rel: str, casing_map: dict[str, str]) -> str:
+    cleaned = (rel or "").replace("\\", "/").lstrip("/")
+    if not cleaned or cleaned.startswith(".vault/"):
+        return cleaned
+    parts = cleaned.split("/")
+    top = parts[0]
+    canon = casing_map.get(top.lower())
+    if canon and canon != top:
+        parts[0] = canon
+        return "/".join(parts)
+    return cleaned
+
+
+def reconcile_s3_folder_casing(
+    *,
+    on_progress: Optional[Any] = None,
+) -> dict[str, Any]:
+    """If S3 has both ``agent/`` and ``Agent/``, keep one casing and merge objects.
+
+    Winner = top-level prefix with the newest object (S3 vault truth after Mac
+    case-insensitive sync artifacts). Loser keys are copied into the winner
+    path when missing, then deleted.
+    """
+    if vault_backend.backend_mode() != "s3":
+        return {"ok": False, "reason": "not s3", "merged": 0, "deleted": 0}
+    bucket, region = vault_backend.s3_bucket_and_region()
+    if not bucket:
+        return {"ok": False, "reason": "no bucket", "merged": 0, "deleted": 0}
+    prefix = vault_backend.s3_prefix()
+    client = vault_backend._s3_client(region)
+
+    if callable(on_progress):
+        on_progress(
+            {
+                "phase": "flush",
+                "message": "S3 폴더명 대소문자를 정리합니다…",
+                "pct": 0,
+            }
+        )
+
+    # Group objects by lowercase top-level folder
+    groups: dict[str, dict[str, list[tuple[str, str, float]]]] = {}
+    # low -> exact_top -> [(rel, key, ts)]
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents") or []:
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue
+            rel = key[len(prefix) :] if key.startswith(prefix) else key
+            if not rel or rel.startswith(".vault/"):
+                continue
+            top = rel.split("/", 1)[0]
+            ts = 0.0
+            lm = obj.get("LastModified")
+            if lm is not None:
+                ts = float(lm.timestamp())
+            groups.setdefault(top.lower(), {}).setdefault(top, []).append((rel, key, ts))
+
+    merged = 0
+    deleted = 0
+    for low, variants in groups.items():
+        if len(variants) < 2:
+            continue
+        scored = []
+        for top, items in variants.items():
+            newest = max(t for _, _, t in items)
+            scored.append((newest, top, items))
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        keep_top = scored[0][1]
+        keep_rels = {rel for rel, _, _ in scored[0][2]}
+        logger.info(
+            "S3 folder casing reconcile: keep %r discard %s",
+            keep_top,
+            [t for _, t, _ in scored[1:]],
+        )
+        for _newest, lose_top, items in scored[1:]:
+            for rel, key, _ts in items:
+                rest = rel[len(lose_top) :]  # includes leading / or empty
+                dest_rel = keep_top + rest
+                dest_key = prefix + dest_rel
+                if dest_rel not in keep_rels:
+                    try:
+                        client.copy_object(
+                            Bucket=bucket,
+                            CopySource={"Bucket": bucket, "Key": key},
+                            Key=dest_key,
+                        )
+                        keep_rels.add(dest_rel)
+                        merged += 1
+                    except Exception:
+                        logger.exception("Failed to merge s3://%s/%s → %s", bucket, key, dest_key)
+                try:
+                    client.delete_object(Bucket=bucket, Key=key)
+                    deleted += 1
+                except Exception:
+                    logger.exception("Failed to delete duplicate-case key %s", key)
+
+    return {"ok": True, "merged": merged, "deleted": deleted}
 
 
 def _delete_object(client, bucket: str, prefix: str, rel: str) -> bool:
@@ -263,6 +443,7 @@ def flush_pending_to_s3(
         prefix = vault_backend.s3_prefix()
         root = vault_backend.local_dir()
         client = vault_backend._s3_client(region)
+        casing_map = _s3_top_level_casing_map(client, bucket, prefix)
 
         # Hydrate queue from S3 mirror in case local disk was wiped mid-flight
         data = load_queue(hydrate_from_s3=True)
@@ -309,15 +490,23 @@ def flush_pending_to_s3(
                                     "message": f"전체 업로드 중… ({j}/{len(files)})",
                                 }
                             )
-                        _upload_file(client, bucket, prefix, root, rel_f)
+                        _upload_file(
+                            client, bucket, prefix, root, rel_f, casing_map=casing_map
+                        )
                         flushed += 1
                     continue
                 if not rel:
                     continue
                 if kind == "put":
-                    ok = _upload_file(client, bucket, prefix, root, rel)
+                    ok = _upload_file(
+                        client, bucket, prefix, root, rel, casing_map=casing_map
+                    )
                 elif kind == "delete":
+                    # Delete requested path and S3-canonical casing of the same path
                     ok = _delete_object(client, bucket, prefix, rel)
+                    canon = _remap_rel_to_s3_casing(rel, casing_map)
+                    if canon != rel.replace("\\", "/").lstrip("/"):
+                        _delete_object(client, bucket, prefix, canon)
                 else:
                     ok = True
                 if ok:
@@ -344,12 +533,115 @@ def flush_pending_to_s3(
         }
 
 
+def list_remote_vault_rels(*, include_vault_meta: bool = False) -> list[str]:
+    """Return case-sensitive vault-relative object keys from S3 (files only)."""
+    if vault_backend.backend_mode() != "s3":
+        return []
+    bucket, region = vault_backend.s3_bucket_and_region()
+    if not bucket:
+        return []
+    prefix = vault_backend.s3_prefix()
+    client = vault_backend._s3_client(region)
+    rels: list[str] = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents") or []:
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue
+            rel = key[len(prefix) :] if key.startswith(prefix) else key
+            if not rel:
+                continue
+            if not include_vault_meta and (
+                rel.startswith(".vault/") or rel.split("/", 1)[0] in HIDDEN_SKIP_NAMES
+            ):
+                continue
+            if rel == f".vault/{_PENDING_NAME}":
+                continue
+            rels.append(rel)
+    return rels
+
+
+def build_tree_from_rels(rels: list[str]) -> list[dict[str, Any]]:
+    """Build nested folder/file nodes from vault-relative keys (case-sensitive).
+
+    Allows ``agent/`` and ``Agent/`` to appear as separate folders even when the
+    local disk is case-insensitive (macOS APFS).
+    """
+    # node: {"name", "path", "type", "children"?: dict[name, node], "ext"?}
+    root: dict[str, Any] = {"children": {}}
+
+    for rel in rels:
+        parts = [p for p in rel.replace("\\", "/").split("/") if p]
+        if not parts:
+            continue
+        if parts[0] in HIDDEN_SKIP_NAMES:
+            continue
+        cur_children: dict[str, Any] = root["children"]
+        path_acc: list[str] = []
+        for i, part in enumerate(parts):
+            path_acc.append(part)
+            path = "/".join(path_acc)
+            is_last = i == len(parts) - 1
+            if is_last:
+                # file
+                cur_children[part] = {
+                    "name": part,
+                    "path": path,
+                    "type": "file",
+                    "ext": Path(part).suffix.lower().lstrip("."),
+                }
+            else:
+                if part not in cur_children or cur_children[part].get("type") != "folder":
+                    cur_children[part] = {
+                        "name": part,
+                        "path": path,
+                        "type": "folder",
+                        "children": {},
+                    }
+                elif "children" not in cur_children[part]:
+                    cur_children[part]["children"] = {}
+                cur_children = cur_children[part]["children"]
+
+    def finalize(children_map: dict[str, Any]) -> list[dict[str, Any]]:
+        nodes = list(children_map.values())
+        nodes.sort(key=lambda n: (n.get("type") != "folder", (n.get("name") or "").lower()))
+        out: list[dict[str, Any]] = []
+        for n in nodes:
+            if n.get("type") == "folder":
+                raw_kids = n.get("children") or {}
+                out.append(
+                    {
+                        "name": n["name"],
+                        "path": n["path"],
+                        "type": "folder",
+                        "children": finalize(raw_kids) if isinstance(raw_kids, dict) else [],
+                    }
+                )
+            else:
+                out.append(
+                    {
+                        "name": n["name"],
+                        "path": n["path"],
+                        "type": "file",
+                        "ext": n.get("ext") or "",
+                    }
+                )
+        return out
+
+    return finalize(root["children"])
+
+
 def sync_from_s3_incremental(
     *,
     force: bool = False,
     on_progress: Optional[Any] = None,
 ) -> dict[str, Any]:
-    """Download only missing / newer S3 objects. Refuses while pending ops exist."""
+    """Make local vault match s3://…/vault/ (download + prune).
+
+    S3 is the source of truth for object contents. Folder-name casing conflicts
+    (``agent/`` vs ``Agent/``) are reconciled in ``sync_now`` before pull.
+    """
     if vault_backend.backend_mode() != "s3":
         return {"ok": False, "reason": f"backend={vault_backend.backend_mode()}"}
 
@@ -371,7 +663,8 @@ def sync_from_s3_incremental(
         root.mkdir(parents=True, exist_ok=True)
         client = vault_backend._s3_client(region)
 
-        candidates: list[tuple[str, dict[str, Any]]] = []
+        # Exact S3 relative paths (case-sensitive). agent/ and Agent/ stay separate.
+        remote: dict[str, dict[str, Any]] = {}
         paginator = client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
             for obj in page.get("Contents") or []:
@@ -379,22 +672,25 @@ def sync_from_s3_incremental(
                 if key.endswith("/"):
                     continue
                 rel = key[len(prefix) :] if key.startswith(prefix) else key
-                if rel == f".vault/{_PENDING_NAME}":
+                if not rel or rel == f".vault/{_PENDING_NAME}":
                     continue
-                dest = root / rel
-                s3_size = int(obj.get("Size") or 0)
-                s3_mtime = obj.get("LastModified")
-                s3_ts = s3_mtime.timestamp() if s3_mtime is not None else 0.0
-                if dest.is_file() and not force:
-                    st = dest.stat()
-                    if st.st_size == s3_size and st.st_mtime >= s3_ts - 1.0:
-                        continue
-                candidates.append((rel, obj))
+                remote[rel] = obj
+
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for rel, obj in remote.items():
+            dest = root / rel
+            s3_size = int(obj.get("Size") or 0)
+            s3_mtime = obj.get("LastModified")
+            s3_ts = s3_mtime.timestamp() if s3_mtime is not None else 0.0
+            if not force and dest.is_file():
+                st = dest.stat()
+                if st.st_size == s3_size and st.st_mtime >= s3_ts - 1.0:
+                    continue
+            candidates.append((rel, obj))
 
         downloaded = 0
-        skipped = 0
-        total = len(candidates)
-        if total == 0:
+        total = max(len(candidates), 1)
+        if not candidates:
             if callable(on_progress):
                 on_progress(
                     {
@@ -402,18 +698,10 @@ def sync_from_s3_incremental(
                         "file": None,
                         "file_i": 0,
                         "file_n": 0,
-                        "pct": 100,
-                        "message": "가져올 변경분이 없습니다.",
+                        "pct": 50,
+                        "message": "원격과 동일한 파일은 건너뛰고 정리합니다…",
                     }
                 )
-            vault_backend._last_sync_at = time.time()
-            return {
-                "ok": True,
-                "downloaded": 0,
-                "skipped": 0,
-                "last_sync_at": vault_backend._last_sync_at,
-            }
-
         for i, (rel, obj) in enumerate(candidates, start=1):
             if callable(on_progress):
                 on_progress(
@@ -421,9 +709,9 @@ def sync_from_s3_incremental(
                         "phase": "pull",
                         "file": rel,
                         "file_i": i,
-                        "file_n": total,
-                        "pct": int(round((i - 1) / total * 100)),
-                        "message": f"S3에서 변경분 가져오는 중… ({i}/{total})",
+                        "file_n": len(candidates),
+                        "pct": int(round((i - 1) / total * 70)),
+                        "message": f"S3 → 로컬 미러링 중… ({i}/{len(candidates)})",
                     }
                 )
             dest = root / rel
@@ -440,20 +728,110 @@ def sync_from_s3_incremental(
                     pass
             downloaded += 1
 
+        if callable(on_progress):
+            on_progress(
+                {
+                    "phase": "pull",
+                    "file": None,
+                    "pct": 90,
+                    "message": "S3에 없는 로컬 파일을 정리합니다…",
+                }
+            )
+        # Prune only paths that have no exact S3 key. Keep case variants separate:
+        # if S3 has Agent/x.md, do not delete local agent/x.md when that exact key
+        # also exists on S3.
+        pruned = _prune_local_not_in_remote(root, set(remote.keys()))
+
         vault_backend._last_sync_at = time.time()
         logger.info(
-            "Incremental sync from s3://%s/%s downloaded=%d skipped=%d",
+            "Mirror sync from s3://%s/%s downloaded=%d pruned=%d remote=%d",
             bucket,
             prefix,
             downloaded,
-            skipped,
+            pruned,
+            len(remote),
         )
+        if callable(on_progress):
+            on_progress(
+                {
+                    "phase": "pull",
+                    "file": None,
+                    "file_i": downloaded,
+                    "file_n": downloaded,
+                    "pct": 100,
+                    "message": (
+                        f"미러 완료 · 내려받기 {downloaded}"
+                        + (f" · 로컬삭제 {pruned}" if pruned else "")
+                    ),
+                }
+            )
         return {
             "ok": True,
             "downloaded": downloaded,
-            "skipped": skipped,
+            "pruned": pruned,
+            "skipped": 0,
             "last_sync_at": vault_backend._last_sync_at,
+            "remote_files": len(remote),
         }
+
+
+def _prune_local_not_in_remote(root: Path, remote_exact: set[str]) -> int:
+    """Delete local vault files that are not present on S3.
+
+    Matching is exact (case-sensitive) first. If the local path only matches an
+    S3 key ignoring case (macOS APFS), keep it so ``agent/`` vs ``Agent/``
+    downloads are not deleted when the volume cannot store both spellings.
+    """
+    pruned = 0
+    protect_exact = {f".vault/{_PENDING_NAME}", f".vault/{_STATUS_NAME}"}
+    remote_lower = {r.lower() for r in remote_exact}
+    files: list[Path] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if rel in protect_exact:
+            continue
+        if rel in remote_exact:
+            continue
+        if rel.lower() in remote_lower:
+            # Case-insensitive volume: S3 has a differently-cased key for this path.
+            continue
+        files.append(path)
+
+    for path in files:
+        try:
+            path.unlink()
+            pruned += 1
+        except OSError:
+            logger.debug("Prune failed: %s", path, exc_info=True)
+
+    # Remove empty directories (bottom-up), never remove root / .vault
+    dirs = sorted(
+        (p for p in root.rglob("*") if p.is_dir()),
+        key=lambda p: len(p.parts),
+        reverse=True,
+    )
+    for d in dirs:
+        try:
+            rel = d.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if rel == ".vault" or rel.startswith(".vault/"):
+            continue
+        try:
+            next(d.iterdir())
+        except StopIteration:
+            try:
+                d.rmdir()
+            except OSError:
+                pass
+        except OSError:
+            pass
+    return pruned
 
 
 def sync_now(
@@ -461,7 +839,7 @@ def sync_now(
     force_download: bool = False,
     on_progress: Optional[Any] = None,
 ) -> dict[str, Any]:
-    """Flush pending local→S3 ops, then pull changed objects from S3."""
+    """Flush pending local→S3 ops, reconcile folder casing, then pull from S3."""
     if vault_backend.backend_mode() != "s3":
         return {
             "ok": False,
@@ -484,11 +862,13 @@ def sync_now(
             "flush": flush,
             "message": "Pending uploads not fully flushed; pull blocked",
         }
+    # Collapse agent/ vs Agent/ (and similar) so S3 has one casing per folder.
+    casing = reconcile_s3_folder_casing(on_progress=on_progress)
     if callable(on_progress):
         on_progress(
             {
                 "phase": "pull",
-                "message": "S3 vault 변경분을 확인합니다…",
+                "message": "S3 vault 기준으로 로컬을 맞춥니다…",
                 "pct": 0,
             }
         )
@@ -496,18 +876,22 @@ def sync_now(
     ok = bool(pull.get("ok"))
     if ok:
         downloaded = pull.get("downloaded") or 0
-        skipped = pull.get("skipped") or 0
+        pruned = pull.get("pruned") or 0
         flushed = flush.get("flushed") or 0
-        msg = (
-            f"동기화 완료 · 업로드 {flushed} · 내려받기 {downloaded}"
-            + (f" · 건너뜀 {skipped}" if skipped else "")
-        )
+        parts = [f"동기화 완료 · 업로드 {flushed} · 내려받기 {downloaded}"]
+        if pruned:
+            parts.append(f"로컬삭제 {pruned}")
+        deleted_case = casing.get("deleted") or 0
+        if deleted_case:
+            parts.append(f"대소문자정리 {deleted_case}")
+        msg = " · ".join(parts)
     else:
         msg = pull.get("message") or "동기화에 실패했습니다."
     return {
         "ok": ok,
         "phase": "done",
         "flush": flush,
+        "casing": casing,
         "pull": pull,
         "message": msg,
     }

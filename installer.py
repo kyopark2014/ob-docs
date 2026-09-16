@@ -246,6 +246,9 @@ def ensure_listener_rule(elbv2, listener_arn: str, tg_arn: str, origin_header: s
 
     Must be a *higher* priority (lower number) than the agentic-work catch-all
     header-only rule, otherwise /vault never reaches ob-docs.
+
+    Prefer priority 1 so agentic-work's header-only rules (often 4/5/10) cannot
+    steal /vault traffic. Also refuse to treat header-only rules as the vault rule.
     """
     rules = elbv2.describe_rules(ListenerArn=listener_arn)["Rules"]
     vault_rule = None
@@ -253,28 +256,28 @@ def ensure_listener_rule(elbv2, listener_arn: str, tg_arn: str, origin_header: s
         if rule.get("Priority") == "default":
             continue
         conds = rule.get("Conditions") or []
+        has_vault_path = False
         for c in conds:
-            if c.get("Field") == "path-pattern":
-                values = c.get("Values") or []
-                if any(str(v).startswith("/vault") for v in values):
-                    vault_rule = rule
-                    break
-        if vault_rule:
+            if c.get("Field") != "path-pattern":
+                continue
+            values = c.get("Values") or []
+            if any(str(v) == "/vault" or str(v).startswith("/vault/") or str(v) == "/vault/*" for v in values):
+                has_vault_path = True
+                break
+        if has_vault_path:
+            vault_rule = rule
             break
 
-    desired_priority = 4
+    desired_priority = 1
     used = {
         int(r["Priority"])
         for r in rules
         if r.get("Priority", "default").isdigit() and r is not vault_rule
     }
     while desired_priority in used:
-        desired_priority -= 1
-        if desired_priority < 1:
-            desired_priority = 1
-            while desired_priority in used:
-                desired_priority += 1
-            break
+        desired_priority += 1
+        if desired_priority > 10:
+            raise RuntimeError("No free ALB listener priority for /vault rule")
 
     conditions = [
         {
@@ -299,17 +302,25 @@ def ensure_listener_rule(elbv2, listener_arn: str, tg_arn: str, origin_header: s
         )
         current = vault_rule.get("Priority")
         if str(current) != str(desired_priority):
-            elbv2.set_rule_priorities(
-                RulePriorities=[
-                    {"RuleArn": vault_rule["RuleArn"], "Priority": desired_priority}
-                ]
-            )
-            logger.info(
-                "Updated /vault listener rule %s priority %s → %s",
-                vault_rule["RuleArn"],
-                current,
-                desired_priority,
-            )
+            try:
+                elbv2.set_rule_priorities(
+                    RulePriorities=[
+                        {"RuleArn": vault_rule["RuleArn"], "Priority": desired_priority}
+                    ]
+                )
+                logger.info(
+                    "Updated /vault listener rule %s priority %s → %s",
+                    vault_rule["RuleArn"],
+                    current,
+                    desired_priority,
+                )
+            except ClientError as e:
+                logger.warning(
+                    "Could not move /vault rule to priority %s (kept %s): %s",
+                    desired_priority,
+                    current,
+                    e,
+                )
         else:
             logger.info("Updated existing /vault listener rule %s", vault_rule["RuleArn"])
         return vault_rule["RuleArn"]

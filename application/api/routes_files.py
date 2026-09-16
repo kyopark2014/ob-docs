@@ -79,8 +79,19 @@ def _tree_node(path: Path, root: Path) -> dict[str, Any]:
 @router.get("/tree")
 def get_tree(request: Request) -> dict:
     require_user_id(request)
-    if vault_backend.backend_mode() == "s3":
+    mode = vault_backend.backend_mode()
+    if mode == "s3":
         vault_backend.sync_from_s3()
+        # Build tree from S3 keys (case-sensitive) so agent/ and Agent/ both show
+        # even on case-insensitive local disks (macOS APFS).
+        rels = vault_sync.list_remote_vault_rels()
+        children = vault_sync.build_tree_from_rels(rels)
+        return {
+            "root": ".",
+            "mode": mode,
+            "source": "s3",
+            "children": children,
+        }
     root = vault_backend.vault_root()
     children = []
     for child in sorted(root.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
@@ -89,7 +100,8 @@ def get_tree(request: Request) -> dict:
         children.append(_tree_node(child, root))
     return {
         "root": ".",
-        "mode": vault_backend.backend_mode(),
+        "mode": mode,
+        "source": "local",
         "children": children,
     }
 
@@ -320,11 +332,21 @@ def rename(request: Request, body: RenameBody) -> dict:
     if not src.exists():
         raise HTTPException(status_code=404, detail="Source not found")
     was_file = src.is_file()
+    from_name = Path(body.from_path).name
+    to_name = Path(body.to_path).name
     if vault_backend.backend_mode() == "s3":
         # Queue deletes for old keys before the local move.
         vault_sync.enqueue_delete_tree(body.from_path)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(dst))
+    # Case-only rename (agent → Agent) needs a temp hop on case-insensitive disks.
+    if from_name.lower() == to_name.lower() and from_name != to_name:
+        import uuid as _uuid
+
+        tmp = src.with_name(f".__rename_{_uuid.uuid4().hex[:10]}")
+        src.rename(tmp)
+        tmp.rename(src.parent / to_name)
+    else:
+        shutil.move(str(src), str(dst))
     if body.from_path.endswith(".md"):
         vault_index.remove_note(body.from_path)
     if body.to_path.endswith(".md"):
@@ -352,6 +374,8 @@ def rename(request: Request, body: RenameBody) -> dict:
     if vault_backend.backend_mode() == "s3":
         vault_sync.enqueue_put_tree(body.to_path)
         vault_sync.flush_pending_to_s3()
+        # Collapse any agent/ + Agent/ duplicates left on S3 after Mac rename.
+        vault_sync.reconcile_s3_folder_casing()
     return {"ok": True, "from": body.from_path, "to": body.to_path}
 
 

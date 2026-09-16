@@ -6,12 +6,16 @@ import {
   useRef,
   useState,
   type DragEvent,
+  type TouchEvent,
 } from "react";
 import type { TreeNode } from "../types";
 import { ChevronIcon, PinIcon } from "./Icons";
 
 const DND_TYPE = "application/x-ob-docs-path";
 const DND_PREFIX = "ob-docs-move|";
+/** Long-press duration for mobile context menu (ms). */
+const LONG_PRESS_MS = 480;
+const LONG_PRESS_MOVE_PX = 12;
 /** "" = vault root drop target */
 type DropTarget = string | null;
 
@@ -117,6 +121,72 @@ function acceptDrop(
     return true;
   }
   return false;
+}
+
+/** Touch long-press → context menu (mobile has no right-click). */
+function useLongPressContextMenu(
+  onOpen: ((x: number, y: number) => void) | undefined,
+  suppressClick: { current: boolean },
+) {
+  const timerRef = useRef<number | null>(null);
+  const startRef = useRef<{ x: number; y: number } | null>(null);
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current != null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    startRef.current = null;
+  }, []);
+
+  useEffect(() => () => clearTimer(), [clearTimer]);
+
+  const onTouchStart = useCallback(
+    (e: TouchEvent) => {
+      if (!onOpen || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      startRef.current = { x: t.clientX, y: t.clientY };
+      clearTimer();
+      timerRef.current = window.setTimeout(() => {
+        timerRef.current = null;
+        const pos = startRef.current;
+        startRef.current = null;
+        if (!pos) return;
+        suppressClick.current = true;
+        onOpen(pos.x, pos.y);
+        window.setTimeout(() => {
+          suppressClick.current = false;
+        }, 400);
+      }, LONG_PRESS_MS);
+    },
+    [clearTimer, onOpen, suppressClick],
+  );
+
+  const onTouchMove = useCallback(
+    (e: TouchEvent) => {
+      const start = startRef.current;
+      if (!start || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const dx = t.clientX - start.x;
+      const dy = t.clientY - start.y;
+      if (dx * dx + dy * dy > LONG_PRESS_MOVE_PX * LONG_PRESS_MOVE_PX) {
+        clearTimer();
+      }
+    },
+    [clearTimer],
+  );
+
+  const onTouchEnd = useCallback(() => {
+    clearTimer();
+  }, [clearTimer]);
+
+  if (!onOpen) return {};
+  return {
+    onTouchStart,
+    onTouchMove,
+    onTouchEnd,
+    onTouchCancel: onTouchEnd,
+  };
 }
 
 export function FileTree(props: Props) {
@@ -248,6 +318,21 @@ function TreeRow({
 }: Props & { node: TreeNode }) {
   const { target, setTarget, clear } = useContext(DropHighlightCtx);
   const suppressClick = useRef(false);
+  const longPress = useLongPressContextMenu(
+    node.type === "folder"
+      ? onFolderContextMenu
+        ? (x, y) => {
+            onSelectFolder?.(node.path);
+            onFolderContextMenu(node.path, x, y);
+          }
+        : undefined
+      : onFileContextMenu
+        ? (x, y) => {
+            onFileContextMenu(node.path, x, y);
+          }
+        : undefined,
+    suppressClick,
+  );
   const shouldForce =
     forceOpenPaths?.has(node.path) ||
     draftFolder?.parentPath === node.path ||
@@ -293,6 +378,7 @@ function TreeRow({
             className={`tree-item${isSelected ? " selected" : ""}${isDropOver ? " drop-over" : ""}`}
             style={{ paddingLeft: 10 + depth * 14 }}
             draggable={!!onMove}
+            {...longPress}
             onDragStart={(e) => {
               if (!onMove) return;
               suppressClick.current = true;
@@ -436,6 +522,7 @@ function TreeRow({
       className={`tree-item${activePath === node.path ? " active" : ""}`}
       style={{ paddingLeft: 10 + depth * 14 + 14 }}
       draggable={!!onMove}
+      {...longPress}
       onDragStart={(e) => {
         if (!onMove) return;
         suppressClick.current = true;
