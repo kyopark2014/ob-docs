@@ -68,7 +68,14 @@ def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
 def _parse_note(rel: str, path: Path) -> NoteMeta:
     text = path.read_text(encoding="utf-8", errors="replace")
     fm, body = _split_frontmatter(text)
-    title = str(fm.get("title") or Path(rel).stem)
+    title = str(fm.get("title") or "").strip()
+    if not title:
+        for line in body.splitlines():
+            if line.startswith("# "):
+                title = line[2:].strip()
+                break
+    if not title:
+        title = Path(rel).stem
     aliases_raw = fm.get("aliases") or []
     if isinstance(aliases_raw, str):
         aliases = [aliases_raw]

@@ -117,19 +117,41 @@ def get_signing_key() -> bytes:
         return _cached_key
 
 
-def sign_session(user_id: str, *, issued_at: Optional[int] = None) -> str:
-    issued = int(issued_at if issued_at is not None else time.time())
-    payload = {"uid": user_id, "iat": issued}
-    payload_b64 = _b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+def sign_session(
+    user_id: str,
+    *,
+    max_age_seconds: Optional[int] = None,
+    issued_at: Optional[int] = None,
+) -> str:
+    """Return an HMAC-signed cookie value compatible with agentic-work.
+
+    Payload: ``{"uid": "...", "exp": <unix>}`` (same as agentic-work).
+    ``issued_at`` is accepted for callers that still pass it; expiry is
+    ``now + max_age`` regardless.
+    """
+    uid = (user_id or "").strip()
+    if not uid:
+        raise ValueError("user_id is required")
+    age = session_max_age_seconds() if max_age_seconds is None else int(max_age_seconds)
+    now = int(time.time()) if issued_at is None else int(issued_at)
+    exp = now + max(age, 1)
+    payload = json.dumps({"uid": uid, "exp": exp}, separators=(",", ":"), ensure_ascii=False)
+    payload_b64 = _b64encode(payload.encode("utf-8"))
     sig = hmac.new(get_signing_key(), payload_b64.encode("ascii"), hashlib.sha256).digest()
     return f"{COOKIE_VERSION}.{payload_b64}.{_b64encode(sig)}"
 
 
 def verify_session(cookie_value: str | None) -> Optional[str]:
-    if not cookie_value or not cookie_value.startswith(f"{COOKIE_VERSION}."):
+    """Return user_id if the signed cookie is valid; otherwise None.
+
+    Accepts agentic-work tokens (``uid``+``exp``) and legacy ob-docs tokens
+    (``uid``+``iat``).
+    """
+    raw = (cookie_value or "").strip()
+    if not raw:
         return None
-    parts = cookie_value.split(".")
-    if len(parts) != 3:
+    parts = raw.split(".")
+    if len(parts) != 3 or parts[0] != COOKIE_VERSION:
         return None
     _, payload_b64, sig_b64 = parts
     try:
@@ -141,11 +163,18 @@ def verify_session(cookie_value: str | None) -> Optional[str]:
             return None
         payload = json.loads(_b64decode(payload_b64).decode("utf-8"))
         user_id = payload.get("uid")
-        iat = int(payload.get("iat") or 0)
         if not isinstance(user_id, str) or not user_id.strip():
             return None
-        if iat and (time.time() - iat) > session_max_age_seconds():
-            return None
+        now = int(time.time())
+        if "exp" in payload:
+            exp = int(payload.get("exp") or 0)
+            if exp < now:
+                return None
+        else:
+            # Legacy iat-based tokens
+            iat = int(payload.get("iat") or 0)
+            if iat and (now - iat) > session_max_age_seconds():
+                return None
         return user_id.strip()
     except Exception:
         return None

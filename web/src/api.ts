@@ -54,11 +54,50 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
+  rename: (from_path: string, to_path: string) =>
+    request<{ ok: boolean; from: string; to: string }>("/files/rename", {
+      method: "POST",
+      body: JSON.stringify({ from_path, to_path }),
+    }),
+  duplicate: (path: string) =>
+    request<{ ok: boolean; from: string; to: string }>("/files/duplicate", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
   deletePath: (path: string) =>
     request<{ ok: boolean }>("/files/delete", {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
+  uploadFile: async (path: string, blob: Blob, filename?: string) => {
+    const fd = new FormData();
+    fd.append("path", path);
+    fd.append("file", blob, filename || path.split("/").pop() || "upload.bin");
+    const res = await fetch(`${BASE}/files/upload`, {
+      method: "POST",
+      credentials: "include",
+      body: fd,
+    });
+    if (!res.ok) {
+      let detail: unknown = null;
+      try {
+        detail = await res.json();
+      } catch {
+        detail = await res.text();
+      }
+      const err = new Error(
+        typeof detail === "object" && detail && "detail" in detail
+          ? JSON.stringify((detail as { detail: unknown }).detail)
+          : `HTTP ${res.status}`,
+      ) as Error & { status?: number; detail?: unknown };
+      err.status = res.status;
+      err.detail = detail;
+      throw err;
+    }
+    return res.json() as Promise<{ ok: boolean; path: string; size: number }>;
+  },
+  rawUrl: (path: string) =>
+    `${BASE}/files/raw?path=${encodeURIComponent(path)}`,
   search: (q: string) =>
     request<{ query: string; results: SearchHit[] }>(
       `/search?q=${encodeURIComponent(q)}`,

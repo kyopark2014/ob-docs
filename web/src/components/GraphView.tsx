@@ -114,7 +114,7 @@ export function GraphView({ graph, onOpen, onRebuild }: Props) {
       }
 
       ctx.clearRect(0, 0, w, h);
-      ctx.strokeStyle = "rgba(127,109,242,0.35)";
+      ctx.strokeStyle = "rgba(16,163,127,0.35)";
       ctx.lineWidth = 1;
       for (const e of edgesRef.current) {
         const a = byId.get(e.source);
@@ -127,7 +127,7 @@ export function GraphView({ graph, onOpen, onRebuild }: Props) {
       }
       for (const n of nodes) {
         ctx.beginPath();
-        ctx.fillStyle = n.missing ? "#e25555" : "#7f6df2";
+        ctx.fillStyle = n.missing ? "#e25555" : "#10a37f";
         ctx.arc(n.x, n.y, n.missing ? 5 : 7, 0, Math.PI * 2);
         ctx.fill();
         ctx.fillStyle = "#dadada";

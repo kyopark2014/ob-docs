@@ -20,3 +20,5 @@ web/tsconfig.tsbuildinfo
 # Session / secrets
 application/data/.session_signing_key
 *.pem
+
+config.json

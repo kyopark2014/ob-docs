@@ -1,4 +1,8 @@
-"""Session auth — shares agent_user_id cookie with agentic-work."""
+"""Session auth — shares agent_user_id cookie with agentic-work.
+
+Also accepts AgentCore ``Authorization: VaultAgent …`` credentials signed with
+the shared ``vault-agent-token`` (runtime is denied session-signing-key).
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,7 @@ import os
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from application import session_cookie, utils
+from application import session_cookie, utils, vault_agent_auth
 
 router = APIRouter(prefix="/vault/api/session", tags=["session"])
 
@@ -42,9 +46,31 @@ def is_loopback_request(request: Request) -> bool:
     return hostname in {"localhost", "127.0.0.1", "::1"}
 
 
-def require_user_id(request: Request) -> str:
+def _token_from_request(request: Request) -> str | None:
+    """Prefer cookie; also accept Bearer / X-Vault-Session for agent scripts."""
     raw = request.cookies.get(session_cookie.COOKIE_NAME)
-    user_id = session_cookie.verify_session(raw)
+    if raw:
+        return raw
+    auth = (request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        if token:
+            return token
+    header = (request.headers.get("x-vault-session") or "").strip()
+    return header or None
+
+
+def _resolve_user_id(request: Request) -> str | None:
+    user_id = session_cookie.verify_session(_token_from_request(request))
+    if user_id:
+        return user_id
+    return vault_agent_auth.verify_vault_agent_authorization(
+        request.headers.get("authorization")
+    )
+
+
+def require_user_id(request: Request) -> str:
+    user_id = _resolve_user_id(request)
     if user_id:
         return user_id
     if _env_bypass_flag() and is_loopback_request(request):
@@ -61,8 +87,7 @@ def require_user_id(request: Request) -> str:
 
 @router.get("", response_model=SessionResponse)
 def get_session(request: Request) -> SessionResponse:
-    raw = request.cookies.get(session_cookie.COOKIE_NAME)
-    user_id = session_cookie.verify_session(raw)
+    user_id = _resolve_user_id(request)
     if user_id:
         return SessionResponse(
             user_id=user_id,

@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ob-docs</title>
+    <script>
+      try {
+        var t = localStorage.getItem("ob-docs-theme");
+        document.documentElement.setAttribute(
+          "data-theme",
+          t === "light" || t === "dark" ? t : "dark",
+        );
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

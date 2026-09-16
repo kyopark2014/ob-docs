@@ -51,6 +51,7 @@ CONTAINER_PORT = 8502
 LOG_GROUP = f"/ecs/app-for-{PROJECT}"
 ORIGIN_HEADER_SECRET = f"{SHARED}/cloudfront-alb-origin-header"
 SESSION_SECRET = f"{SHARED}/session-signing-key"
+VAULT_AGENT_SECRET = f"{SHARED}/vault-agent-token"
 EXEC_ROLE = f"role-ecs-execution-for-{SHARED}-{REGION}"
 TASK_ROLE = f"role-ecs-task-for-{SHARED}-{REGION}"
 
@@ -181,6 +182,25 @@ def get_secret_arn(sm, name: str) -> str:
     return sm.describe_secret(SecretId=name)["ARN"]
 
 
+def ensure_vault_agent_token(sm) -> str:
+    """Create or reuse shared vault-agent-token; return secret ARN."""
+    import secrets as py_secrets
+
+    try:
+        return sm.describe_secret(SecretId=VAULT_AGENT_SECRET)["ARN"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceNotFoundException":
+            raise
+    value = py_secrets.token_urlsafe(32)
+    resp = sm.create_secret(
+        Name=VAULT_AGENT_SECRET,
+        SecretString=value,
+        Description="Shared HMAC token for AgentCore my-vaults → ob-docs auth",
+    )
+    logger.info("Created secret %s", VAULT_AGENT_SECRET)
+    return resp["ARN"]
+
+
 def ensure_target_group(elbv2, vpc_id: str) -> str:
     try:
         tgs = elbv2.describe_target_groups(Names=[TG_NAME])
@@ -277,6 +297,7 @@ def register_task_definition(
     image_uri: str,
     cfg: dict[str, Any],
     session_secret_arn: str,
+    vault_agent_secret_arn: str,
 ) -> str:
     app_config = {
         "projectName": PROJECT,
@@ -304,6 +325,7 @@ def register_task_definition(
         ],
         "secrets": [
             {"name": "SESSION_SIGNING_KEY", "valueFrom": session_secret_arn},
+            {"name": "VAULT_AGENT_TOKEN", "valueFrom": vault_agent_secret_arn},
         ],
         "logConfiguration": {
             "logDriver": "awslogs",
@@ -489,6 +511,7 @@ def main() -> int:
     if not origin_header:
         raise RuntimeError(f"Empty origin header secret: {ORIGIN_HEADER_SECRET}")
     session_arn = get_secret_arn(c["sm"], SESSION_SECRET)
+    vault_agent_arn = ensure_vault_agent_token(c["sm"])
 
     logger.info("[1/6] ECR")
     repo_uri = ensure_ecr(c["ecr"])
@@ -508,7 +531,9 @@ def main() -> int:
     ensure_listener_rule(c["elbv2"], listener, tg_arn, origin_header)
 
     logger.info("[5/6] Task definition + service")
-    task_arn = register_task_definition(c["ecs"], image_uri, cfg, session_arn)
+    task_arn = register_task_definition(
+        c["ecs"], image_uri, cfg, session_arn, vault_agent_arn
+    )
     ensure_service(c["ecs"], c["elbv2"], task_arn, tg_arn, subnets, sgs)
 
     logger.info("[6/6] Wait for healthy")

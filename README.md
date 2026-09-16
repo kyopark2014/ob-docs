@@ -74,18 +74,22 @@ data/vault/                 # 또는 /mnt/vault
 | GET | `/vault/api/health` | 헬스체크 |
 | GET | `/vault/api/session` | 공유 세션 확인 |
 | GET | `/vault/api/files/tree` | 파일 트리 |
+| GET | `/vault/api/files/list?prefix=&ext=` | 플랫 파일 목록 |
 | GET | `/vault/api/files/read?path=` | 노트 읽기 |
-| PUT | `/vault/api/files/write` | 노트 저장 |
+| PUT | `/vault/api/files/write` | 노트 저장(덮어쓰기) |
+| POST | `/vault/api/files/append` | 노트 이어쓰기 |
+| POST | `/vault/api/files/mkdir` | 폴더 생성 |
+| POST | `/vault/api/files/rename` | 이동/이름변경 |
+| POST | `/vault/api/files/delete` | 삭제 |
 | GET | `/vault/api/search?q=` | 검색 |
 | GET | `/vault/api/graph` | 위키링크 그래프 |
 | POST | `/vault/api/graph/rebuild` | 인덱스 재생성 |
 
-## 인증
+인증: `agent_user_id` 쿠키, `Authorization: Bearer <session>`, 또는 AgentCore용 `Authorization: VaultAgent v1.<payload>.<sig>` (`agentic-work/vault-agent-token`).
 
-agentic-work와 동일한 `agent_user_id` HMAC 쿠키를 검증합니다.
-
-- Secrets Manager 키: `{sharedProjectName}/session-signing-key` (기본 `agentic-work/session-signing-key`)
-- 또는 환경변수 `SESSION_SIGNING_KEY`
+- Secrets Manager 키: `{sharedProjectName}/session-signing-key` (웹 세션)
+- Secrets Manager 키: `{sharedProjectName}/vault-agent-token` (my-vaults skill / AgentCore)
+- 또는 환경변수 `SESSION_SIGNING_KEY` / `VAULT_AGENT_TOKEN`
 - 미인증 시 agentic-work 로그인 URL로 안내
 
 ## ECS / ALB 연동 (agentic-work installer 확장)
@@ -104,12 +108,12 @@ SESSION_SIGNING_KEY=...   # agentic-work와 동일
 VAULT_MOUNT=/mnt/vault
 ```
 
-## agentic-work 연동 (향후)
+## agentic-work 연동
 
-현재는 별도 서비스입니다. 이후 agentic-work에서 `my-vault` skill / MCP로 이 vault의 노트를 CRUD할 예정입니다.
+agentic-work의 `my-vaults` skill이 이 API로 vault 노트를 CRUD합니다.
 
 ```text
-agentic-work ──skill:my-vault──▶ ob-docs API ──▶ /mnt/vault (.md)
+agentic-work ──skill:my-vaults──▶ ob-docs API ──▶ /mnt/vault (.md)
 ```
 
 ## Docker
