@@ -1,17 +1,23 @@
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import { api } from "../api";
 
 const WIKI_RE = /(!)?\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]/g;
 
+/** Hash prefix — relative URLs survive react-markdown's defaultUrlTransform
+ *  (custom schemes like wiki:// are stripped to ""). */
+export const WIKI_HASH_PREFIX = "#__wiki__/";
+
 function expandWikiLinks(text: string): string {
   return text.replace(WIKI_RE, (_m, embed, target, _hash, alias) => {
-    const label = alias || target;
+    const label = alias || target.trim();
     if (embed) {
       return `*(embed: ${label})*`;
     }
-    return `[${label}](wiki://${encodeURIComponent(target)})`;
+    // Angle-bracket destination keeps spaces/parens safe for CommonMark.
+    const dest = `${WIKI_HASH_PREFIX}${encodeURIComponent(target.trim())}`;
+    return `[${label}](<${dest}>)`;
   });
 }
 
@@ -58,6 +64,28 @@ function normalizeMdMediaDestinations(text: string): string {
   });
 }
 
+function parseWikiHref(href: string | undefined): string | null {
+  if (!href) return null;
+  // react-markdown may leave "#__wiki__/..." or resolve against page as full URL
+  const hashIdx = href.indexOf(WIKI_HASH_PREFIX);
+  if (hashIdx >= 0) {
+    const encoded = href.slice(hashIdx + WIKI_HASH_PREFIX.length);
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return encoded;
+    }
+  }
+  if (href.startsWith("wiki://")) {
+    try {
+      return decodeURIComponent(href.slice("wiki://".length));
+    } catch {
+      return href.slice("wiki://".length);
+    }
+  }
+  return null;
+}
+
 type Props = {
   content: string;
   notePath?: string | null;
@@ -69,8 +97,8 @@ export function MarkdownPreview({ content, notePath, onWikiClick }: Props) {
 
   const components: Components = {
     a({ href, children }) {
-      if (href?.startsWith("wiki://")) {
-        const target = decodeURIComponent(href.slice("wiki://".length));
+      const wikiTarget = parseWikiHref(href);
+      if (wikiTarget !== null) {
         return (
           <span
             className="wiki-link"
@@ -78,10 +106,14 @@ export function MarkdownPreview({ content, notePath, onWikiClick }: Props) {
             tabIndex={0}
             onClick={(e) => {
               e.preventDefault();
-              onWikiClick(target);
+              e.stopPropagation();
+              onWikiClick(wikiTarget);
             }}
             onKeyDown={(e) => {
-              if (e.key === "Enter") onWikiClick(target);
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onWikiClick(wikiTarget);
+              }
             }}
           >
             {children}
@@ -111,7 +143,14 @@ export function MarkdownPreview({ content, notePath, onWikiClick }: Props) {
 
   return (
     <div className="preview-pane">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        urlTransform={(url) => {
+          if (url.includes(WIKI_HASH_PREFIX) || url.startsWith("wiki:")) return url;
+          return defaultUrlTransform(url);
+        }}
+        components={components}
+      >
         {expanded}
       </ReactMarkdown>
     </div>

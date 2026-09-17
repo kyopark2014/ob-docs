@@ -965,14 +965,18 @@ export default function App() {
         nodes.flatMap((n) => (n.type === "folder" ? flatten(n.children || []) : [n]));
       const all = flatten(treeRef.current);
       const local = resolveWikiTarget(target, all, activePathRef.current);
+      const openInAppTab = async (path: string) => {
+        // Always open inside the vault window as an editor tab (never window.open).
+        await openFile(path);
+      };
       if (local) {
-        await openFile(local);
+        await openInAppTab(local);
         return;
       }
       try {
         const resolved = await api.resolveWikiLink(target, activePathRef.current);
         if (resolved.path) {
-          await openFile(resolved.path);
+          await openInAppTab(resolved.path);
           return;
         }
       } catch {
