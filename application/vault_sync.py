@@ -24,6 +24,8 @@ _queue_lock = threading.RLock()
 _flush_lock = threading.Lock()
 # Hide from S3-backed file tree (case-sensitive key listing)
 HIDDEN_SKIP_NAMES = {".git", ".vault"}
+# Marker files that represent empty folders (hidden from UI tree)
+FOLDER_KEEP_NAMES = {".keep", ".gitkeep"}
 
 
 def _pending_local_path() -> Path:
@@ -148,7 +150,7 @@ def pending_count() -> int:
     return len(load_queue().get("ops") or [])
 
 
-def _enqueue(op: dict[str, Any]) -> dict[str, Any]:
+def _enqueue(op: dict[str, Any], *, mirror: bool = True) -> dict[str, Any]:
     with _queue_lock:
         data = _load_local_queue()
         ops = list(data.get("ops") or [])
@@ -162,11 +164,12 @@ def _enqueue(op: dict[str, Any]) -> dict[str, Any]:
             ops.append(op)
             data = {"version": 1, "ops": ops}
         _save_local_queue(data)
-        _mirror_pending_to_s3(data)
+        if mirror:
+            _mirror_pending_to_s3(data)
         return data
 
 
-def enqueue_put(rel_path: str) -> dict[str, Any]:
+def enqueue_put(rel_path: str, *, mirror: bool = True) -> dict[str, Any]:
     rel = (rel_path or "").replace("\\", "/").lstrip("/")
     if not rel or rel.startswith(".vault/pending"):
         return load_queue()
@@ -176,11 +179,12 @@ def enqueue_put(rel_path: str) -> dict[str, Any]:
             "op": "put",
             "path": rel,
             "ts": time.time(),
-        }
+        },
+        mirror=mirror,
     )
 
 
-def enqueue_delete(rel_path: str) -> dict[str, Any]:
+def enqueue_delete(rel_path: str, *, mirror: bool = True) -> dict[str, Any]:
     rel = (rel_path or "").replace("\\", "/").lstrip("/")
     if not rel:
         return load_queue()
@@ -190,7 +194,8 @@ def enqueue_delete(rel_path: str) -> dict[str, Any]:
             "op": "delete",
             "path": rel,
             "ts": time.time(),
-        }
+        },
+        mirror=mirror,
     )
 
 
@@ -200,16 +205,17 @@ def enqueue_put_tree(rel_dir: str = "") -> dict[str, Any]:
     base = root / rel_dir if rel_dir else root
     if not base.exists():
         return load_queue()
-    data = load_queue()
     if base.is_file():
         return enqueue_put(base.relative_to(root).as_posix())
+    data = load_queue()
     for path in base.rglob("*"):
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
         if rel == f".vault/{_PENDING_NAME}":
             continue
-        data = enqueue_put(rel)
+        data = enqueue_put(rel, mirror=False)
+    _mirror_pending_to_s3(data)
     return data
 
 
@@ -223,8 +229,10 @@ def enqueue_delete_tree(rel_dir: str) -> dict[str, Any]:
     data = load_queue()
     for path in base.rglob("*"):
         if path.is_file():
-            data = enqueue_delete(path.relative_to(root).as_posix())
+            data = enqueue_delete(path.relative_to(root).as_posix(), mirror=False)
     # also mark the directory prefix (no-op on S3 for empty dirs)
+    data = enqueue_delete(rel_dir, mirror=False)
+    _mirror_pending_to_s3(data)
     return data
 
 
@@ -577,6 +585,10 @@ def build_tree_from_rels(rels: list[str]) -> list[dict[str, Any]]:
             continue
         if parts[0] in HIDDEN_SKIP_NAMES:
             continue
+        # ``Folder/.keep`` → create Folder node, skip the marker file itself
+        skip_leaf = parts[-1] in FOLDER_KEEP_NAMES
+        if skip_leaf and len(parts) == 1:
+            continue
         cur_children: dict[str, Any] = root["children"]
         path_acc: list[str] = []
         for i, part in enumerate(parts):
@@ -584,6 +596,8 @@ def build_tree_from_rels(rels: list[str]) -> list[dict[str, Any]]:
             path = "/".join(path_acc)
             is_last = i == len(parts) - 1
             if is_last:
+                if skip_leaf:
+                    break
                 # file
                 cur_children[part] = {
                     "name": part,
@@ -904,12 +918,84 @@ def startup_sync() -> dict[str, Any]:
 
 def queue_and_flush_put(rel_path: str) -> dict[str, Any]:
     enqueue_put(rel_path)
-    return flush_pending_to_s3()
+    schedule_flush_pending()
+    return {"ok": True, "queued": True, "pending": pending_count()}
 
 
 def queue_and_flush_delete(rel_path: str) -> dict[str, Any]:
     enqueue_delete(rel_path)
-    return flush_pending_to_s3()
+    schedule_flush_pending()
+    return {"ok": True, "queued": True, "pending": pending_count()}
+
+
+# ---------------------------------------------------------------------------
+# Lightweight background flush (mutations return immediately)
+# ---------------------------------------------------------------------------
+
+_flush_bg_lock = threading.Lock()
+_flush_bg_thread: Optional[threading.Thread] = None
+_flush_bg_requested = False
+_flush_bg_reconcile = False
+
+
+def schedule_flush_pending(*, reconcile_casing: bool = False) -> dict[str, Any]:
+    """Enqueue a background pending→S3 flush without blocking the request.
+
+    Rapid mkdir/write/rename calls coalesce onto one worker. Local vault +
+    pending queue are already durable on disk before this is called; pull from
+    S3 stays blocked while pending ops remain.
+    """
+    global _flush_bg_thread, _flush_bg_requested, _flush_bg_reconcile
+    if vault_backend.backend_mode() != "s3":
+        return {"ok": False, "reason": f"backend={vault_backend.backend_mode()}"}
+
+    with _flush_bg_lock:
+        _flush_bg_requested = True
+        if reconcile_casing:
+            _flush_bg_reconcile = True
+        if _flush_bg_thread is not None and _flush_bg_thread.is_alive():
+            return {
+                "ok": True,
+                "queued": True,
+                "pending": pending_count(),
+                "message": "S3 flush already running",
+            }
+
+        def worker() -> None:
+            global _flush_bg_thread, _flush_bg_requested, _flush_bg_reconcile
+            try:
+                while True:
+                    with _flush_bg_lock:
+                        _flush_bg_requested = False
+                        do_reconcile = _flush_bg_reconcile
+                        _flush_bg_reconcile = False
+                    try:
+                        flush_pending_to_s3()
+                        if do_reconcile:
+                            reconcile_s3_folder_casing()
+                    except Exception:
+                        logger.exception("Background S3 flush failed")
+                    with _flush_bg_lock:
+                        if not _flush_bg_requested:
+                            _flush_bg_thread = None
+                            return
+            finally:
+                with _flush_bg_lock:
+                    if _flush_bg_thread is threading.current_thread():
+                        _flush_bg_thread = None
+
+        _flush_bg_thread = threading.Thread(
+            target=worker,
+            name="vault-s3-flush",
+            daemon=True,
+        )
+        _flush_bg_thread.start()
+    return {
+        "ok": True,
+        "queued": True,
+        "pending": pending_count(),
+        "message": "S3 flush scheduled",
+    }
 
 
 # ---------------------------------------------------------------------------

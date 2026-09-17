@@ -201,7 +201,11 @@ def sync_from_s3(*, force: bool = False) -> dict:
 
 
 def sync_to_s3(rel_path: Optional[str] = None) -> dict:
-    """Upload local vault file(s) to S3 via durable pending queue + flush."""
+    """Queue local vault file(s) for S3 upload; flush runs in the background.
+
+    Callers (mkdir/write/upload) return as soon as the local write + pending
+    queue entry exist so the UI can refresh without waiting on S3.
+    """
     from application import vault_sync
 
     if backend_mode() != "s3":
@@ -210,7 +214,7 @@ def sync_to_s3(rel_path: Optional[str] = None) -> dict:
         vault_sync.enqueue_put(rel_path)
     else:
         vault_sync.enqueue_put_tree("")
-    return vault_sync.flush_pending_to_s3()
+    return vault_sync.schedule_flush_pending()
 
 
 def ensure_seed_vault() -> None:

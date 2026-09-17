@@ -48,6 +48,16 @@ export type NotesSourcesConfig = {
 
 const BASE = "/vault/api";
 
+async function readResponseBody(res: Response): Promise<unknown> {
+  const raw = await res.text();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return raw;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     credentials: "include",
@@ -57,20 +67,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     },
     ...init,
   });
+  const body = await readResponseBody(res);
   if (!res.ok) {
-    let detail: unknown = null;
-    try {
-      detail = await res.json();
-    } catch {
-      detail = await res.text();
-    }
-    const message = formatApiError(detail, res.status);
+    const message = formatApiError(body, res.status);
     const err = new Error(message) as Error & { status?: number; detail?: unknown };
     err.status = res.status;
-    err.detail = detail;
+    err.detail = body;
     throw err;
   }
-  return res.json() as Promise<T>;
+  return body as T;
 }
 
 function formatApiError(detail: unknown, status: number): string {
@@ -104,6 +109,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ user_id }),
     }),
+  setSessionWithAccessToken: (access_token: string) =>
+    request<{ user_id: string; agentic_work_url: string; authenticated: boolean }>(
+      "/session",
+      {
+        method: "POST",
+        body: JSON.stringify({ access_token }),
+      },
+    ),
+  getPublicConfig: () =>
+    request<{
+      google_client_id: string;
+      local_auth_bypass: boolean;
+      agentic_work_url: string;
+      project_name: string;
+    }>("/config"),
+  clearSession: () =>
+    request<{ ok: boolean }>("/session", { method: "DELETE" }),
   getTree: () =>
     request<{ root: string; mode: string; children: TreeNode[] }>("/files/tree"),
   readFile: (path: string) =>
@@ -162,23 +184,18 @@ export const api = {
       credentials: "include",
       body: fd,
     });
+    const body = await readResponseBody(res);
     if (!res.ok) {
-      let detail: unknown = null;
-      try {
-        detail = await res.json();
-      } catch {
-        detail = await res.text();
-      }
       const err = new Error(
-        typeof detail === "object" && detail && "detail" in detail
-          ? JSON.stringify((detail as { detail: unknown }).detail)
-          : `HTTP ${res.status}`,
+        typeof body === "object" && body && "detail" in body
+          ? JSON.stringify((body as { detail: unknown }).detail)
+          : formatApiError(body, res.status),
       ) as Error & { status?: number; detail?: unknown };
       err.status = res.status;
-      err.detail = detail;
+      err.detail = body;
       throw err;
     }
-    return res.json() as Promise<{ ok: boolean; path: string; size: number }>;
+    return body as { ok: boolean; path: string; size: number };
   },
   rawUrl: (path: string) =>
     `${BASE}/files/raw?path=${encodeURIComponent(path)}`,
@@ -186,6 +203,13 @@ export const api = {
     request<{ query: string; results: SearchHit[] }>(
       `/search?q=${encodeURIComponent(q)}`,
     ),
+  resolveWikiLink: (target: string, fromPath?: string | null) => {
+    const qs = new URLSearchParams({ target });
+    if (fromPath) qs.set("from", fromPath);
+    return request<{ target: string; from: string | null; path: string | null }>(
+      `/search/resolve?${qs.toString()}`,
+    );
+  },
   getGraph: () => request<GraphPayload>("/graph"),
   getNotesGraphStatus: () => request<NotesGraphStatus>("/graph/status"),
   syncNotesGraph: (full = false) =>

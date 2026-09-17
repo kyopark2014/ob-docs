@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,9 +29,35 @@ def _strip_code(text: str) -> str:
     text = FENCE_RE.sub(" ", text)
     return INLINE_CODE_RE.sub(" ", text)
 
+
+def _norm_key(name: str) -> str:
+    """NFC + casefold key for wiki targets / filenames (strip trailing .md)."""
+    s = unicodedata.normalize("NFC", (name or "").strip()).replace("\\", "/")
+    if s.lower().endswith(".md"):
+        s = s[:-3]
+    return s.casefold()
+
+
+def _posix_join(parent: str, rel: str) -> str:
+    """Join vault-relative paths and normalize . / .. segments."""
+    parent = parent.replace("\\", "/").strip("/")
+    rel = unicodedata.normalize("NFC", rel).replace("\\", "/").strip()
+    parts = [*(parent.split("/") if parent else []), *rel.split("/")]
+    out: list[str] = []
+    for part in parts:
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if out:
+                out.pop()
+            continue
+        out.append(part)
+    return "/".join(out)
+
+
 _lock = threading.RLock()
 _index: dict[str, "NoteMeta"] = {}
-_name_map: dict[str, str] = {}  # lowercase name/alias -> relative path
+_name_map: dict[str, str] = {}  # normalized name/alias -> relative path
 _built = False
 
 
@@ -120,9 +147,35 @@ def _parse_note(rel: str, path: Path) -> NoteMeta:
 def _register_names(meta: NoteMeta) -> None:
     stem = Path(meta.path).stem
     for name in {stem, meta.title, *meta.aliases}:
-        key = name.strip().lower()
+        key = _norm_key(name)
         if key:
             _name_map[key] = meta.path
+
+
+def _path_without_md(rel: str) -> str:
+    rel = rel.replace("\\", "/")
+    return rel[:-3] if rel.lower().endswith(".md") else rel
+
+
+def _lookup_exact_path(raw: str) -> str | None:
+    """Match vault-relative path with or without .md (NFC / casefold)."""
+    needle = _norm_key(raw)
+    if not needle:
+        return None
+    for rel in _index:
+        if _norm_key(_path_without_md(rel)) == needle:
+            return rel
+    return None
+
+
+def _prefer_same_folder(candidates: list[str], from_path: str | None) -> str | None:
+    if not candidates:
+        return None
+    if len(candidates) == 1 or not from_path:
+        return candidates[0]
+    from_parent = Path(from_path).parent
+    same = [p for p in candidates if Path(p).parent == from_parent]
+    return same[0] if same else candidates[0]
 
 
 def rebuild_index() -> dict[str, Any]:
@@ -190,15 +243,82 @@ def remove_note(rel: str) -> None:
             del _name_map[k]
 
 
-def resolve_link(name: str) -> str | None:
+def resolve_link(name: str, *, from_path: str | None = None) -> str | None:
+    """Resolve an Obsidian-style wiki target to a vault-relative .md path.
+
+    Order (closest to Obsidian):
+    1. Vault-absolute path (with/without .md)
+    2. Path relative to the source note's folder
+    3. Unique path suffix match
+    4. Basename / title / alias (prefer same folder when ambiguous)
+    """
     ensure_index()
-    key = name.strip().lower()
+    raw = unicodedata.normalize("NFC", (name or "").strip()).replace("\\", "/")
+    if not raw:
+        return None
+    key = _norm_key(raw)
+    basename_key = _norm_key(Path(raw).name)
+
     with _lock:
+        # 1. Exact vault-relative path
+        hit = _lookup_exact_path(raw)
+        if hit:
+            return hit
+
+        # 2. Relative to current note directory
+        if from_path:
+            parent = str(Path(from_path).parent).replace("\\", "/")
+            if parent == ".":
+                parent = ""
+            joined = _posix_join(parent, raw)
+            hit = _lookup_exact_path(joined)
+            if hit:
+                return hit
+
+        # 3. Path suffix (e.g. aws-services/Note matches folder/aws-services/Note.md)
+        if "/" in raw.strip("/"):
+            suffix_hits = [
+                rel
+                for rel in _index
+                if _norm_key(_path_without_md(rel)) == key
+                or _norm_key(_path_without_md(rel)).endswith("/" + key)
+            ]
+            preferred = _prefer_same_folder(suffix_hits, from_path)
+            if preferred:
+                return preferred
+
+        # 4. Basename / title / alias map
         if key in _name_map:
-            return _name_map[key]
-        # try with/without .md
-        if key.endswith(".md") and key[:-3] in _name_map:
-            return _name_map[key[:-3]]
+            mapped = _name_map[key]
+            # If multiple notes share the basename, prefer same folder via scan
+            stem_hits = [
+                rel for rel in _index if _norm_key(Path(rel).stem) == key
+            ]
+            if len(stem_hits) > 1:
+                return _prefer_same_folder(stem_hits, from_path) or mapped
+            return mapped
+
+        if basename_key and basename_key != key and basename_key in _name_map:
+            mapped = _name_map[basename_key]
+            stem_hits = [
+                rel for rel in _index if _norm_key(Path(rel).stem) == basename_key
+            ]
+            if from_path and stem_hits:
+                return _prefer_same_folder(stem_hits, from_path) or mapped
+            return mapped
+
+        # 5. Same-folder basename when path prefix was wrong (e.g. [[aws-services/Note]]
+        #    but Note.md lives beside the source)
+        if from_path and basename_key:
+            stem_hits = [
+                rel for rel in _index if _norm_key(Path(rel).stem) == basename_key
+            ]
+            same = _prefer_same_folder(stem_hits, from_path)
+            if same and Path(same).parent == Path(from_path).parent:
+                return same
+            if len(stem_hits) == 1:
+                return stem_hits[0]
+
         return None
 
 
@@ -216,21 +336,23 @@ def list_metas() -> list[NoteMeta]:
 
 def backlinks(rel: str) -> list[dict[str, str]]:
     ensure_index()
-    stem = Path(rel).stem.lower()
+    stem = _norm_key(Path(rel).stem)
     meta = get_meta(rel)
     names = {stem}
     if meta:
-        names.add(meta.title.lower())
-        names.update(a.lower() for a in meta.aliases)
+        names.add(_norm_key(meta.title))
+        names.update(_norm_key(a) for a in meta.aliases)
     results: list[dict[str, str]] = []
     with _lock:
-        for other in _index.values():
-            if other.path == rel:
-                continue
-            for link in other.links:
-                if link.strip().lower() in names:
-                    results.append({"path": other.path, "title": other.title})
-                    break
+        others = list(_index.values())
+    for other in others:
+        if other.path == rel:
+            continue
+        for link in other.links:
+            resolved = resolve_link(link, from_path=other.path)
+            if resolved == rel or _norm_key(link) in names:
+                results.append({"path": other.path, "title": other.title})
+                break
     return results
 
 
@@ -280,36 +402,37 @@ def build_graph_payload() -> dict[str, Any]:
     edges = []
     seen_edges: set[tuple[str, str]] = set()
     with _lock:
-        for meta in _index.values():
-            nodes.append(
-                {
-                    "id": meta.path,
-                    "label": meta.title or Path(meta.path).stem,
-                    "path": meta.path,
-                    "tags": meta.tags,
-                }
-            )
-            for link in meta.links:
-                target = _name_map.get(link.strip().lower())
-                if not target:
-                    # unresolved — still show dangling node id as name
-                    dangling_id = f"missing:{link}"
-                    if not any(n["id"] == dangling_id for n in nodes):
-                        nodes.append(
-                            {
-                                "id": dangling_id,
-                                "label": link,
-                                "path": None,
-                                "tags": [],
-                                "missing": True,
-                            }
-                        )
-                    target = dangling_id
-                key = (meta.path, target)
-                if key in seen_edges:
-                    continue
-                seen_edges.add(key)
-                edges.append({"source": meta.path, "target": target})
+        metas = list(_index.values())
+    for meta in metas:
+        nodes.append(
+            {
+                "id": meta.path,
+                "label": meta.title or Path(meta.path).stem,
+                "path": meta.path,
+                "tags": meta.tags,
+            }
+        )
+        for link in meta.links:
+            target = resolve_link(link, from_path=meta.path)
+            if not target:
+                # unresolved — still show dangling node id as name
+                dangling_id = f"missing:{link}"
+                if not any(n["id"] == dangling_id for n in nodes):
+                    nodes.append(
+                        {
+                            "id": dangling_id,
+                            "label": link,
+                            "path": None,
+                            "tags": [],
+                            "missing": True,
+                        }
+                    )
+                target = dangling_id
+            key = (meta.path, target)
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            edges.append({"source": meta.path, "target": target})
     return {"nodes": nodes, "edges": edges}
 
 

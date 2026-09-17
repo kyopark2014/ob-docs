@@ -16,7 +16,9 @@ from application import vault_backend, vault_index, vault_share, vault_sync
 
 router = APIRouter(prefix="/vault/api/files", tags=["files"])
 
-HIDDEN_SKIP = {".git"}
+HIDDEN_SKIP = {".git", ".keep", ".gitkeep"}
+# Empty folders need a marker object so they survive S3 sync / tree rebuild.
+FOLDER_KEEP_NAME = ".keep"
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {
     "image/png": ".png",
@@ -318,6 +320,14 @@ def mkdir(request: Request, body: MkdirBody) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     target.mkdir(parents=True, exist_ok=True)
+    # S3 has no empty directories: a marker file keeps the folder in the tree
+    # after sync_from_s3 rebuilds from object keys.
+    keep = target / FOLDER_KEEP_NAME
+    if not keep.exists():
+        keep.write_text("", encoding="utf-8")
+    keep_rel = f"{body.path.rstrip('/')}/{FOLDER_KEEP_NAME}"
+    if vault_backend.backend_mode() == "s3":
+        vault_backend.sync_to_s3(keep_rel)
     return {"ok": True, "path": body.path}
 
 
@@ -373,9 +383,7 @@ def rename(request: Request, body: RenameBody) -> dict:
         pass
     if vault_backend.backend_mode() == "s3":
         vault_sync.enqueue_put_tree(body.to_path)
-        vault_sync.flush_pending_to_s3()
-        # Collapse any agent/ + Agent/ duplicates left on S3 after Mac rename.
-        vault_sync.reconcile_s3_folder_casing()
+        vault_sync.schedule_flush_pending(reconcile_casing=True)
     return {"ok": True, "from": body.from_path, "to": body.to_path}
 
 
@@ -407,7 +415,7 @@ def delete_path(request: Request, body: DeleteBody) -> dict:
             vault_index.remove_note(body.path)
     vault_index.rebuild_index()
     if vault_backend.backend_mode() == "s3":
-        vault_sync.flush_pending_to_s3()
+        vault_sync.schedule_flush_pending()
     return {"ok": True, "path": body.path}
 
 
@@ -449,7 +457,7 @@ def duplicate_path(request: Request, body: DuplicateBody) -> dict:
     rel = dst.relative_to(root).as_posix()
     if vault_backend.backend_mode() == "s3":
         vault_sync.enqueue_put_tree(rel)
-        vault_sync.flush_pending_to_s3()
+        vault_sync.schedule_flush_pending()
     return {"ok": True, "from": body.path, "to": rel}
 
 

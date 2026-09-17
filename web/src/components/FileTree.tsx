@@ -9,6 +9,7 @@ import {
   type TouchEvent,
 } from "react";
 import type { TreeNode } from "../types";
+import { isFolderOpen, setFolderOpen } from "../treeSettings";
 import { ChevronIcon, PinIcon } from "./Icons";
 
 const DND_TYPE = "application/x-ob-docs-path";
@@ -42,6 +43,8 @@ type Props = {
   onSelectFolder?: (path: string) => void;
   onFolderContextMenu?: (path: string, x: number, y: number) => void;
   onFileContextMenu?: (path: string, x: number, y: number) => void;
+  /** Empty area of the tree (vault root create menu). */
+  onPanelContextMenu?: (x: number, y: number) => void;
   onMove?: (fromPath: string, toParentPath: string) => void;
   onUploadFiles?: (parentPath: string, files: File[]) => void;
   draftFolder?: DraftFolder | null;
@@ -104,7 +107,7 @@ function canDropOnFolder(fromPath: string, fromKind: "file" | "folder", toFolder
 }
 
 /** Prefer vault move over OS-file upload when both are present. */
-function acceptDrop(
+export function acceptDrop(
   e: DragEvent,
   folderPath: string,
   onMove?: (fromPath: string, toParentPath: string) => void,
@@ -121,6 +124,14 @@ function acceptDrop(
     return true;
   }
   return false;
+}
+
+export function isVaultMoveDrag(e: DragEvent): boolean {
+  return isInternalMoveDrag(e) || Array.from(e.dataTransfer.types || []).includes("text/plain");
+}
+
+export function hasExternalFileDrag(e: DragEvent): boolean {
+  return hasExternalFiles(e);
 }
 
 /** Touch long-press → context menu (mobile has no right-click). */
@@ -227,6 +238,7 @@ function FileTreeBranch(props: Props) {
     onDraftCancel,
     onMove,
     onUploadFiles,
+    onPanelContextMenu,
     depth = 0,
   } = props;
   const { target, setTarget, clear } = useContext(DropHighlightCtx);
@@ -239,6 +251,16 @@ function FileTreeBranch(props: Props) {
       className={
         depth === 0
           ? `file-tree${target === "" ? " drop-target" : ""}`
+          : undefined
+      }
+      onContextMenu={
+        depth === 0 && onPanelContextMenu
+          ? (e) => {
+              const el = e.target as HTMLElement;
+              if (el.closest?.(".tree-item")) return;
+              e.preventDefault();
+              onPanelContextMenu(e.clientX, e.clientY);
+            }
           : undefined
       }
       onDragOver={
@@ -267,6 +289,7 @@ function FileTreeBranch(props: Props) {
         depth === 0 && (onMove || onUploadFiles)
           ? (e) => {
               e.preventDefault();
+              e.stopPropagation();
               clear();
               const el = e.target as HTMLElement;
               if (el.closest?.(".tree-item")) return;
@@ -341,15 +364,22 @@ function TreeRow({
     (renamingPath?.startsWith(node.path + "/") ?? false);
 
   const [open, setOpen] = useState(
-    depth < 1 ||
-      node.path.startsWith("00-Inbox") ||
-      node.path === "notes" ||
-      !!shouldForce,
+    () => isFolderOpen(node.path) || !!shouldForce,
   );
 
   useEffect(() => {
-    if (shouldForce) setOpen(true);
-  }, [shouldForce]);
+    if (!shouldForce) return;
+    setOpen(true);
+    setFolderOpen(node.path, true);
+  }, [shouldForce, node.path]);
+
+  const toggleOpen = useCallback(() => {
+    setOpen((v) => {
+      const next = !v;
+      setFolderOpen(node.path, next);
+      return next;
+    });
+  }, [node.path]);
 
   if (node.type === "folder") {
     const showDraftInside =
@@ -413,12 +443,13 @@ function TreeRow({
               clear();
               if (acceptDrop(e, node.path, onMove, onUploadFiles)) {
                 setOpen(true);
+                setFolderOpen(node.path, true);
               }
             }}
             onClick={() => {
               if (suppressClick.current) return;
               onSelectFolder?.(node.path);
-              setOpen((v) => !v);
+              toggleOpen();
             }}
             onContextMenu={(e) => {
               e.preventDefault();

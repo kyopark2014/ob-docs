@@ -17,8 +17,11 @@ export type FileMenuAction =
   | "rename"
   | "delete";
 
+export type PanelMenuAction = "new-note" | "new-folder";
+
 export type ContextMenuState = {
-  kind: "folder" | "file";
+  kind: "folder" | "file" | "panel";
+  /** Folder/file path, or parent folder for panel ("" = vault root). */
   path: string;
   x: number;
   y: number;
@@ -32,16 +35,23 @@ type Props = {
   pinned?: boolean;
   onFolderAction: (action: FolderMenuAction, path: string) => void;
   onFileAction: (action: FileMenuAction, path: string) => void;
+  onPanelAction: (action: PanelMenuAction, parentPath: string) => void;
   onClose: () => void;
 };
 
-type MenuItem =
-  | {
-      action: FolderMenuAction | FileMenuAction;
-      label: string;
-      danger?: boolean;
-      sepBefore?: boolean;
-    };
+type MenuItem = {
+  action: FolderMenuAction | FileMenuAction | PanelMenuAction;
+  label: string;
+  danger?: boolean;
+  sepBefore?: boolean;
+};
+
+function panelItems(): MenuItem[] {
+  return [
+    { action: "new-note", label: "New note" },
+    { action: "new-folder", label: "New folder" },
+  ];
+}
 
 function folderItems(pinned: boolean): MenuItem[] {
   return [
@@ -75,6 +85,7 @@ export function FolderContextMenu({
   pinned = false,
   onFolderAction,
   onFileAction,
+  onPanelAction,
   onClose,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
@@ -95,15 +106,17 @@ export function FolderContextMenu({
   }, [onClose]);
 
   const pad = 8;
-  const approxH = 260;
+  const approxH = menu.kind === "panel" ? 90 : 260;
   const approxW = 200;
   const left = Math.min(menu.x, window.innerWidth - approxW - pad);
   const top = Math.min(menu.y, window.innerHeight - approxH - pad);
 
   const items =
-    menu.kind === "folder"
-      ? folderItems(pinned)
-      : fileItems(pinned, /\.md$/i.test(menu.path));
+    menu.kind === "panel"
+      ? panelItems()
+      : menu.kind === "folder"
+        ? folderItems(pinned)
+        : fileItems(pinned, /\.md$/i.test(menu.path));
 
   return createPortal(
     <div
@@ -121,7 +134,9 @@ export function FolderContextMenu({
             className={`ctx-item${item.danger ? " danger" : ""}`}
             role="menuitem"
             onClick={() => {
-              if (menu.kind === "folder") {
+              if (menu.kind === "panel") {
+                onPanelAction(item.action as PanelMenuAction, menu.path);
+              } else if (menu.kind === "folder") {
                 onFolderAction(item.action as FolderMenuAction, menu.path);
               } else {
                 onFileAction(item.action as FileMenuAction, menu.path);

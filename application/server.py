@@ -18,6 +18,7 @@ from application.api.routes_graph import router as graph_router
 from application.api.routes_search import router as search_router
 from application.api.routes_share import api_router as share_api_router
 from application.api.routes_share import public_router as share_public_router
+from application.security_headers import SecurityHeadersMiddleware
 from application import vault_backend, vault_index
 
 logging.basicConfig(
@@ -66,6 +67,9 @@ app = FastAPI(
     redoc_url="/vault/api/redoc" if _ENABLE_API_DOCS else None,
     openapi_url="/vault/api/openapi.json" if _ENABLE_API_DOCS else None,
 )
+
+# Must allow same-origin iframe for Notes Graph despite CloudFront XFO DENY.
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(auth_router)
 app.include_router(files_router)

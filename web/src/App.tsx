@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import { api } from "./api";
-import { FileTree } from "./components/FileTree";
+import { FileTree, acceptDrop, hasExternalFileDrag, isVaultMoveDrag } from "./components/FileTree";
 import {
   AlertDialog,
   ConfirmDialog,
@@ -9,6 +9,7 @@ import {
 import { ConfigDrawer } from "./components/ConfigDrawer";
 import { SyncProgressModal, type SyncProgressInfo } from "./components/SyncProgressModal";
 import { SharedListModal } from "./components/SharedListModal";
+import { GoogleLoginModal } from "./components/GoogleLoginModal";
 import { NotesConfigureModal } from "./components/NotesConfigureModal";
 import { NotesGraphModal } from "./components/NotesGraphModal";
 import {
@@ -16,6 +17,7 @@ import {
   type ContextMenuState,
   type FileMenuAction,
   type FolderMenuAction,
+  type PanelMenuAction,
 } from "./components/FolderContextMenu";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import {
@@ -24,6 +26,7 @@ import {
   EditIcon,
   FilesIcon,
   GraphIcon,
+  LogoutIcon,
   PlusFileIcon,
   PlusFolderIcon,
   SearchIcon,
@@ -42,10 +45,16 @@ import {
   togglePinnedPath,
 } from "./pinSettings";
 import {
+  ensureAncestorsOpen,
+  removeOpenFolders,
+  rewriteOpenFolders,
+} from "./treeSettings";
+import {
   getShowImages,
   isImageFileName,
   setShowImages as persistShowImages,
 } from "./viewSettings";
+import { resolveWikiTarget } from "./wikiLink";
 import type {
   FilePayload,
   OpenTab,
@@ -180,6 +189,7 @@ function readLastNotePath(): string | null {
 function writeLastNotePath(path: string): void {
   try {
     localStorage.setItem(LAST_NOTE_KEY, path);
+    ensureAncestorsOpen(path);
   } catch {
     /* ignore */
   }
@@ -239,6 +249,14 @@ export default function App() {
   const { theme, setTheme } = useTheme();
   const [ready, setReady] = useState(false);
   const [authError, setAuthError] = useState<{ login_url?: string } | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [publicConfig, setPublicConfig] = useState<{
+    google_client_id: string;
+    local_auth_bypass: boolean;
+    agentic_work_url: string;
+    project_name: string;
+  } | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [panel, setPanel] = useState<PanelMode>("files");
   const [tree, setTree] = useState<TreeNode[]>([]);
@@ -295,7 +313,10 @@ export default function App() {
   const graphBtnRef = useRef<HTMLButtonElement>(null);
   const settingsFlyoutRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
-  const renameInFlight = useRef(false);
+  /** Serializes H1↔filename renames so save never races a half-finished rename. */
+  const renameChainRef = useRef(Promise.resolve());
+  /** Old path → latest path after H1 auto-rename (follows chains). */
+  const renamedFromRef = useRef(new Map<string, string>());
   const draftRef = useRef(draft);
   const activePathRef = useRef(activePath);
   const treeRef = useRef(tree);
@@ -309,61 +330,168 @@ export default function App() {
     persistPinnedPaths(next);
   }, []);
 
+  const resolveLatestPath = useCallback((path: string): string => {
+    let cur = path;
+    const seen = new Set<string>();
+    while (renamedFromRef.current.has(cur) && !seen.has(cur)) {
+      seen.add(cur);
+      cur = renamedFromRef.current.get(cur)!;
+    }
+    return cur;
+  }, []);
+
   const syncFilenameToH1 = useCallback(
     async (path: string, content: string, currentTree: TreeNode[]): Promise<string> => {
       const title = extractH1(content);
-      if (!title) return path;
+      if (!title) return resolveLatestPath(path);
       const safe = sanitizeFilename(title);
-      if (!safe) return path;
-      const parts = path.split("/");
-      const parent = parts.slice(0, -1).join("/");
-      const currentStem = parts[parts.length - 1]?.replace(/\.md$/i, "") || "";
-      if (safe === currentStem) {
-        await api.writeFile(path, content);
-        return path;
-      }
-      if (renameInFlight.current) return path;
-      renameInFlight.current = true;
+      if (!safe) return resolveLatestPath(path);
+
+      let release!: () => void;
+      const prev = renameChainRef.current;
+      renameChainRef.current = new Promise<void>((resolve) => {
+        release = resolve;
+      });
       try {
-        await api.writeFile(path, content);
-        const dest = uniqueNamedPath(parent, safe, currentTree, path);
-        if (dest === path) return path;
-        await api.rename(path, dest);
+        await prev;
+        // Follow any rename that finished while we waited (stale Old.md → New.md).
+        const startPath = resolveLatestPath(path);
+        const parts = startPath.split("/");
+        const parent = parts.slice(0, -1).join("/");
+        const currentStem = parts[parts.length - 1]?.replace(/\.md$/i, "") || "";
+        if (safe === currentStem) {
+          await api.writeFile(startPath, content);
+          return startPath;
+        }
+        await api.writeFile(startPath, content);
+        const dest = uniqueNamedPath(parent, safe, currentTree, startPath);
+        if (dest === startPath) return startPath;
+        await api.rename(startPath, dest);
+        renamedFromRef.current.set(startPath, dest);
+        // Sync ref immediately so concurrent save/read sees the new path before React re-renders.
+        if (
+          activePathRef.current === startPath ||
+          activePathRef.current === path ||
+          !activePathRef.current
+        ) {
+          activePathRef.current = dest;
+        }
         return dest;
       } finally {
-        renameInFlight.current = false;
+        release();
       }
     },
-    [],
+    [resolveLatestPath],
   );
 
   const bootstrap = useCallback(async () => {
     try {
+      const cfg = await api.getPublicConfig();
+      setPublicConfig(cfg);
+    } catch {
+      setPublicConfig(null);
+    }
+    try {
       const session = await api.getSession();
       setUserId(session.user_id);
       setAuthError(null);
+      setLoginError(null);
     } catch (err) {
       const e = err as Error & { status?: number; detail?: unknown };
       if (e.status === 401) {
-        try {
-          const session = await api.createLocalSession();
-          setUserId(session.user_id);
-          setAuthError(null);
-        } catch {
-          const detail = e.detail as { detail?: { login_url?: string } } | undefined;
-          setAuthError({ login_url: detail?.detail?.login_url });
-          setReady(true);
-          return;
-        }
-      } else {
-        setAuthError({});
+        // Do not auto-create local session — show Google login (or local bypass form).
+        const detail = e.detail as { detail?: { login_url?: string } } | undefined;
+        setAuthError({ login_url: detail?.detail?.login_url });
         setReady(true);
         return;
       }
+      setAuthError({});
+      setReady(true);
+      return;
     }
     const t = await api.getTree();
     setTree(t.children);
     setReady(true);
+  }, []);
+
+  const finishLogin = useCallback(async (user_id: string) => {
+    setUserId(user_id);
+    setAuthError(null);
+    setLoginError(null);
+    const t = await api.getTree();
+    setTree(t.children);
+    setReady(true);
+  }, []);
+
+  const handleGoogleAccessToken = useCallback(
+    async (accessToken: string) => {
+      setAuthBusy(true);
+      setLoginError(null);
+      try {
+        const session = await api.setSessionWithAccessToken(accessToken);
+        await finishLogin(session.user_id);
+      } catch (err) {
+        setLoginError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setAuthBusy(false);
+      }
+    },
+    [finishLogin],
+  );
+
+  const handleLocalUserId = useCallback(
+    async (localUserId: string) => {
+      setAuthBusy(true);
+      setLoginError(null);
+      try {
+        const session = await api.createLocalSession(localUserId);
+        await finishLogin(session.user_id);
+      } catch (err) {
+        setLoginError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setAuthBusy(false);
+      }
+    },
+    [finishLogin],
+  );
+
+  const handleLogout = useCallback(async () => {
+    setSettingsOpen(false);
+    setAppearanceOpen(false);
+    setViewOpen(false);
+    setGraphMenuOpen(false);
+    setSharedListOpen(false);
+    try {
+      await api.clearSession();
+    } catch {
+      /* still clear local UI */
+    }
+    try {
+      window.google?.accounts?.id?.disableAutoSelect();
+    } catch {
+      /* GSI may not be loaded */
+    }
+    setUserId(null);
+    setTree([]);
+    setTabs([]);
+    setActivePath(null);
+    setSelectedFolder(null);
+    setFile(null);
+    setDraft("");
+    setDirty(false);
+    setHits([]);
+    setSearchQ("");
+    setPanel("files");
+    setViewMode("preview");
+    setLoginError(null);
+    setAuthBusy(false);
+    setAuthError({});
+    try {
+      const cfg = await api.getPublicConfig();
+      setPublicConfig(cfg);
+    } catch {
+      /* keep last public config for Google client id */
+    }
   }, []);
 
   useEffect(() => {
@@ -529,31 +657,39 @@ export default function App() {
 
   const persistNote = useCallback(
     async (path: string, content: string): Promise<{ finalPath: string; content: string }> => {
+      const startPath = resolveLatestPath(path);
       let body = content;
       if (!extractH1(body)) {
-        const stem = path.split("/").pop()?.replace(/\.md$/i, "") || "Untitled";
+        const stem = startPath.split("/").pop()?.replace(/\.md$/i, "") || "Untitled";
         body = `# ${stem}\n\n${body.replace(/^\s+/, "")}`;
       }
-      const finalPath = await syncFilenameToH1(path, body, treeRef.current);
+      const finalPath = await syncFilenameToH1(startPath, body, treeRef.current);
       const safe = sanitizeFilename(extractH1(body) || "Untitled");
       setTabs((prev) =>
         prev.map((t) =>
-          t.path === path || t.path === finalPath ? { ...t, path: finalPath, title: safe } : t,
+          t.path === path || t.path === startPath || t.path === finalPath
+            ? { ...t, path: finalPath, title: safe }
+            : t,
         ),
       );
       await refreshTree();
       return { finalPath, content: body };
     },
-    [refreshTree, syncFilenameToH1],
+    [refreshTree, resolveLatestPath, syncFilenameToH1],
   );
 
   const openFile = useCallback(
     async (path: string) => {
       // Notes only — images/binaries are moved via drag-and-drop, not opened as markdown
       if (!/\.md$/i.test(path)) return;
-      if (activePath && path !== activePath && dirty && draft !== file?.content) {
+      const currentPath = activePathRef.current;
+      if (currentPath && path !== currentPath && dirty && draftRef.current !== file?.content) {
         try {
-          await persistNote(activePath, draft);
+          const { finalPath } = await persistNote(currentPath, draftRef.current);
+          if (finalPath !== currentPath) {
+            setActivePath(finalPath);
+            writeLastNotePath(finalPath);
+          }
         } catch (err) {
           void showAlert(err instanceof Error ? err.message : String(err), "Save failed");
           return;
@@ -572,7 +708,7 @@ export default function App() {
       setPanel("files");
       setViewMode("preview");
     },
-    [activePath, dirty, draft, file?.content, persistNote, showAlert],
+    [dirty, file?.content, persistNote, showAlert],
   );
 
   // On refresh: restore last note, else open first markdown file
@@ -613,11 +749,15 @@ export default function App() {
   );
 
   const save = useCallback(async () => {
-    if (!activePath) return;
+    // Wait out any H1 auto-rename, then use the live path (not a stale closure).
+    await renameChainRef.current;
+    const path = resolveLatestPath(activePathRef.current || "");
+    if (!path) return;
     setSaving(true);
     try {
-      const { finalPath } = await persistNote(activePath, draft);
-      if (finalPath !== activePath) {
+      const { finalPath } = await persistNote(path, draftRef.current);
+      activePathRef.current = finalPath;
+      if (finalPath !== path) {
         setActivePath(finalPath);
         writeLastNotePath(finalPath);
       }
@@ -631,7 +771,7 @@ export default function App() {
     } finally {
       setSaving(false);
     }
-  }, [activePath, draft, persistNote, showAlert]);
+  }, [persistNote, resolveLatestPath, showAlert]);
 
   // Live tab label + debounced file rename when H1 changes
   useEffect(() => {
@@ -821,18 +961,26 @@ export default function App() {
 
   const onWikiClick = useCallback(
     async (target: string) => {
-      const needle = target.replace(/\.md$/i, "").toLowerCase();
       const flatten = (nodes: TreeNode[]): TreeNode[] =>
         nodes.flatMap((n) => (n.type === "folder" ? flatten(n.children || []) : [n]));
-      const all = flatten(tree);
-      const hit = all.find((f) => {
-        const stem = f.name.replace(/\.md$/i, "").toLowerCase();
-        return stem === needle || f.path.toLowerCase().includes(needle);
-      });
-      if (hit) await openFile(hit.path);
-      else void showAlert(`노트를 찾을 수 없습니다: ${target}`, "Not found");
+      const all = flatten(treeRef.current);
+      const local = resolveWikiTarget(target, all, activePathRef.current);
+      if (local) {
+        await openFile(local);
+        return;
+      }
+      try {
+        const resolved = await api.resolveWikiLink(target, activePathRef.current);
+        if (resolved.path) {
+          await openFile(resolved.path);
+          return;
+        }
+      } catch {
+        /* fall through to alert */
+      }
+      void showAlert(`노트를 찾을 수 없습니다: ${target}`, "Not found");
     },
-    [openFile, showAlert, tree],
+    [openFile, showAlert],
   );
 
   const onEditorPaste = useCallback(
@@ -948,9 +1096,12 @@ export default function App() {
       if (to === path) return;
       try {
         await api.rename(path, to);
+        renamedFromRef.current.set(path, to);
+        if (activePathRef.current === path) activePathRef.current = to;
         updatePinnedPaths(rewritePinnedPaths(pinnedPaths, path, to));
+        rewriteOpenFolders(path, to);
         if (selectedFolder === path) setSelectedFolder(to);
-        if (activePath === path) {
+        if (activePath === path || activePathRef.current === to) {
           setActivePath(to);
           writeLastNotePath(to);
           setTabs((prev) =>
@@ -1000,7 +1151,25 @@ export default function App() {
       }
       try {
         await api.rename(fromPath, to);
+      } catch (err) {
+        // Duplicate drop handlers can race; if source is already gone, treat as done.
+        const status = (err as { status?: number } | null)?.status;
+        if (status === 404) {
+          await refreshTree();
+          return;
+        }
+        void showAlert(err instanceof Error ? err.message : String(err), "Move failed");
+        return;
+      }
+      try {
+        renamedFromRef.current.set(fromPath, to);
+        if (activePathRef.current === fromPath) activePathRef.current = to;
+        else if (activePathRef.current?.startsWith(fromPath + "/")) {
+          activePathRef.current =
+            to + activePathRef.current.slice(fromPath.length);
+        }
         updatePinnedPaths(rewritePinnedPaths(pinnedPaths, fromPath, to));
+        rewriteOpenFolders(fromPath, to);
         const rewrite = (p: string) =>
           p === fromPath ? to : p.startsWith(fromPath + "/") ? to + p.slice(fromPath.length) : p;
 
@@ -1195,6 +1364,7 @@ export default function App() {
         try {
           await api.deletePath(path);
           updatePinnedPaths(removePinnedPaths(pinnedPaths, path));
+          removeOpenFolders(path);
           if (selectedFolder === path) setSelectedFolder(null);
           if (activePath?.startsWith(path + "/")) {
             setActivePath(null);
@@ -1220,6 +1390,29 @@ export default function App() {
       updatePinnedPaths,
     ],
   );
+
+  const onPanelMenuAction = useCallback(
+    async (action: PanelMenuAction, parentPath: string) => {
+      // Empty-area menu always targets vault root (parentPath === "").
+      if (action === "new-note") {
+        await createNoteIn(parentPath || "00-Inbox");
+        return;
+      }
+      if (action === "new-folder") {
+        startCreateFolder(parentPath);
+      }
+    },
+    [createNoteIn, startCreateFolder],
+  );
+
+  const openPanelContextMenu = useCallback((x: number, y: number) => {
+    setCtxMenu({
+      kind: "panel",
+      path: "",
+      x,
+      y,
+    });
+  }, []);
 
   const crumbs = useMemo(() => {
     if (!activePath) return [];
@@ -1271,15 +1464,18 @@ export default function App() {
 
   if (authError && !userId) {
     return (
-      <div className="login-gate">
-        <div className="login-card">
-          <h1>ob-docs</h1>
-          <p>
-            agentic-work에서 로그인한 뒤 이 페이지로 돌아오세요. 세션 쿠키를 공유합니다.
-          </p>
-          <a href={authError.login_url || "/"}>agentic-work로 이동</a>
-        </div>
-      </div>
+      <GoogleLoginModal
+        clientId={publicConfig?.google_client_id || ""}
+        localAuthBypass={Boolean(publicConfig?.local_auth_bypass)}
+        projectName={publicConfig?.project_name || "ob-docs"}
+        error={loginError || (authBusy ? "로그인 중…" : null)}
+        onAccessToken={(token) => void handleGoogleAccessToken(token)}
+        onLocalUserId={
+          publicConfig?.local_auth_bypass
+            ? (id) => void handleLocalUserId(id)
+            : undefined
+        }
+      />
     );
   }
 
@@ -1291,6 +1487,7 @@ export default function App() {
           pinned={pinnedPathSet.has(ctxMenu.path)}
           onFolderAction={(action, path) => void onFolderMenuAction(action, path)}
           onFileAction={(action, path) => void onFileMenuAction(action, path)}
+          onPanelAction={(action, path) => void onPanelMenuAction(action, path)}
           onClose={() => setCtxMenu(null)}
         />
       )}
@@ -1417,6 +1614,19 @@ export default function App() {
             <AppearanceIcon />
             <span>Appearance ({themeToLabel(theme)})</span>
           </button>
+          <button
+            type="button"
+            className="rail-settings-btn"
+            title="Log out"
+            onClick={() => {
+              setAppearanceOpen(false);
+              setViewOpen(false);
+              void handleLogout();
+            }}
+          >
+            <LogoutIcon />
+            <span>Log out</span>
+          </button>
         </div>
       )}
       {syncPopupOpen && (
@@ -1515,7 +1725,35 @@ export default function App() {
                 </button>
               </div>
             </div>
-            <div className="sidebar-body">
+            <div
+              className="sidebar-body"
+              onContextMenu={(e) => {
+                const el = e.target as HTMLElement;
+                if (el.closest?.(".tree-item") || el.closest?.(".ctx-menu")) return;
+                e.preventDefault();
+                openPanelContextMenu(e.clientX, e.clientY);
+              }}
+              onDragOver={(e) => {
+                const el = e.target as HTMLElement;
+                if (el.closest?.(".tree-item")) return;
+                if (isVaultMoveDrag(e) || hasExternalFileDrag(e)) {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = isVaultMoveDrag(e) ? "move" : "copy";
+                }
+              }}
+              onDrop={(e) => {
+                const el = e.target as HTMLElement;
+                if (el.closest?.(".tree-item")) return;
+                e.preventDefault();
+                // Empty panel background → vault root
+                acceptDrop(
+                  e,
+                  "",
+                  (from, toParent) => void movePath(from, toParent),
+                  (parent, files) => void uploadFilesToFolder(parent, files),
+                );
+              }}
+            >
               {pinnedNodes.length > 0 && (
                 <div className="tree-section">
                   <div className="section-label">Pinned</div>
@@ -1535,6 +1773,7 @@ export default function App() {
                     onFileContextMenu={(path, x, y) =>
                       setCtxMenu({ kind: "file", path, x, y })
                     }
+                    onPanelContextMenu={openPanelContextMenu}
                     draftFolder={draftFolder}
                     onDraftConfirm={(name) => void confirmCreateFolder(name)}
                     onDraftCancel={cancelCreateFolder}
@@ -1560,6 +1799,7 @@ export default function App() {
                 onFileContextMenu={(path, x, y) =>
                   setCtxMenu({ kind: "file", path, x, y })
                 }
+                onPanelContextMenu={openPanelContextMenu}
                 draftFolder={draftFolder}
                 onDraftConfirm={(name) => void confirmCreateFolder(name)}
                 onDraftCancel={cancelCreateFolder}
