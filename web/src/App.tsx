@@ -24,6 +24,7 @@ import { OverlayScroll } from "./components/OverlayScroll";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import {
   AppearanceIcon,
+  AgentIcon,
   BookIcon,
   EditIcon,
   FilesIcon,
@@ -40,6 +41,7 @@ import {
 } from "./components/Icons";
 import { MeetingLogSidebar } from "./components/MeetingLogSidebar";
 import { MeetingLogView } from "./components/MeetingLogView";
+import { AgentPanel } from "./components/AgentPanel";
 import { MEETING_FOLDER, DEFAULT_MEETING_TITLE } from "./meetingLog/config";
 import {
   buildMeetingMarkdown,
@@ -72,6 +74,12 @@ import {
   getSidebarWidth,
   setSidebarWidth as persistSidebarWidth,
 } from "./sidebarSettings";
+import {
+  AGENT_W_DEFAULT,
+  clampAgentWidth,
+  getAgentWidth,
+  setAgentWidth as persistAgentWidth,
+} from "./agentPanelSettings";
 import { resolveWikiTarget } from "./wikiLink";
 import type {
   FilePayload,
@@ -326,6 +334,12 @@ export default function App() {
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
+  const [agentOpen, setAgentOpen] = useState(false);
+  const [agentNotePath, setAgentNotePath] = useState<string | null>(null);
+  const [agentWidth, setAgentWidth] = useState(() => getAgentWidth());
+  const [agentResizing, setAgentResizing] = useState(false);
+  const agentWidthRef = useRef(agentWidth);
+  agentWidthRef.current = agentWidth;
   const [pinnedPaths, setPinnedPathsState] = useState<string[]>(() => getPinnedPaths());
   const [settingsFlyoutPos, setSettingsFlyoutPos] = useState<{ left: number; bottom: number } | null>(
     null,
@@ -1406,6 +1420,12 @@ export default function App() {
         await openFile(path);
         return;
       }
+      if (action === "open-agent") {
+        setAgentNotePath(path);
+        setAgentOpen(true);
+        await openFile(path);
+        return;
+      }
       if (action === "pin") {
         updatePinnedPaths(togglePinnedPath(path, pinnedPaths));
         return;
@@ -1599,6 +1619,49 @@ export default function App() {
     persistSidebarWidth(SIDEBAR_W_DEFAULT);
   }, []);
 
+  const onAgentResizeStart = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = agentWidthRef.current;
+    setAgentResizing(true);
+    document.body.classList.add("is-resizing-agent");
+
+    const onMove = (ev: PointerEvent) => {
+      // Dragging left edge: moving left grows the panel.
+      const next = clampAgentWidth(startW - (ev.clientX - startX));
+      agentWidthRef.current = next;
+      setAgentWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      document.body.classList.remove("is-resizing-agent");
+      setAgentResizing(false);
+      persistAgentWidth(agentWidthRef.current);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }, []);
+
+  const onAgentResizeReset = useCallback(() => {
+    setAgentWidth(AGENT_W_DEFAULT);
+    persistAgentWidth(AGENT_W_DEFAULT);
+  }, []);
+
+  const onAgentNoteUpdated = useCallback(
+    (path: string) => {
+      if (activePath === path || tabs.some((t) => t.path === path)) {
+        void openFile(path);
+      }
+      void refreshTree();
+    },
+    [activePath, openFile, refreshTree, tabs],
+  );
+
   const crumbs = useMemo(() => {
     if (!activePath) return [];
     const parts = activePath.split("/");
@@ -1666,8 +1729,11 @@ export default function App() {
 
   return (
     <div
-      className={`app${panel === "hidden" ? " sidebar-collapsed" : ""}${sidebarResizing ? " is-resizing" : ""}`}
-      style={{ ["--sidebar-w" as string]: `${sidebarWidth}px` }}
+      className={`app${panel === "hidden" ? " sidebar-collapsed" : ""}${agentOpen ? " agent-open" : ""}${sidebarResizing || agentResizing ? " is-resizing" : ""}`}
+      style={{
+        ["--sidebar-w" as string]: `${sidebarWidth}px`,
+        ["--agent-w" as string]: `${agentWidth}px`,
+      }}
     >
       {ctxMenu && (
         <FolderContextMenu
@@ -2120,6 +2186,24 @@ export default function App() {
                     <button
                       type="button"
                       className="icon-btn"
+                      title="Open agent"
+                      aria-label="Open agent"
+                      onClick={() => {
+                        if (!activePath) return;
+                        void onFileMenuAction("open-agent", activePath);
+                      }}
+                      style={{
+                        color:
+                          agentOpen && agentNotePath === activePath
+                            ? "var(--accent)"
+                            : undefined,
+                      }}
+                    >
+                      <AgentIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn"
                       title="Preview"
                       onClick={() => setViewMode("preview")}
                       style={{ color: viewMode === "preview" ? "var(--accent)" : undefined }}
@@ -2198,6 +2282,20 @@ export default function App() {
               </>
             )}
       </main>
+
+      {agentOpen && (
+        <AgentPanel
+          notePath={agentNotePath}
+          onClose={() => {
+            setAgentOpen(false);
+            setAgentNotePath(null);
+          }}
+          onNoteUpdated={onAgentNoteUpdated}
+          onResizeStart={onAgentResizeStart}
+          onResizeReset={onAgentResizeReset}
+          resizing={agentResizing}
+        />
+      )}
 
       <ConfirmDialog
         open={!!confirmState}

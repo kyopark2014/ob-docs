@@ -111,6 +111,9 @@ data/vault/                 # 또는 /mnt/vault
 | PATCH | `/vault/api/graph/pattern` | 그래프 뷰 패턴 전환 |
 | GET/PUT | `/vault/api/graph/sources` | Notes Configure (포함 폴더) |
 | GET | `/vault/api/graph/backlinks` | 백링크 |
+| GET | `/vault/api/agent/health` | Open Agent harness 설정 여부 |
+| GET | `/vault/api/agent/note-meta?path=` | 에이전트 칩용 노트 메타 |
+| POST | `/vault/api/agent/chat` | Open Agent SSE (`token` / `note_updated` / `done`) |
 
 인증: `agent_user_id` 쿠키, `Authorization: Bearer <session>`, 또는 AgentCore용 `Authorization: VaultAgent v1.<payload>.<sig>` (`agentic-work/vault-agent-token`).
 
@@ -119,6 +122,21 @@ data/vault/                 # 또는 /mnt/vault
 - 또는 환경변수 `SESSION_SIGNING_KEY` / `VAULT_AGENT_TOKEN`
 - 미인증 시 agentic-work 로그인 URL로 안내
 - `/vault/s/*` 공개 viewer만 세션 없이 접근 가능
+
+### Open Agent
+
+노트 우클릭 → **Open agent** → 문서 창 오른쪽에 채팅 패널이 열립니다 (agentic-work 채팅 UI와 같은 톤).  
+백엔드는 Bedrock AgentCore **InvokeHarness**입니다.
+
+| 구성 | 내용 |
+|---|---|
+| Skill | **use-vault** — vault 규칙·경로·저장 형식 지침 |
+| MCP | **websearch** (Exa `remote_mcp`) |
+| 노트 저장 | 응답의 `<<<VAULT_WRITE>>>` 마커를 서버가 파싱 (code interpreter 없음) |
+
+선택한 노트 경로가 입력창 칩으로 표시되고, 본문은 프롬프트에 포함됩니다. 수정 마커가 있으면 응답 후 열린 탭을 다시 로드합니다.
+
+`python installer.py`가 skill을 S3에 올리고 전용 harness(`ob_docs`, websearch + use-vault)를 만들며 `HARNESS_ARN`을 config/ECS에 넣습니다.
 
 ### 노트의 public 공유
 
@@ -238,11 +256,13 @@ python installer.py
    - IAM: `role-ecs-{task,execution}-for-agentic-work-{region}`
    - ECS cluster `cluster-for-agentic-work`
    - 기존 ALB/ECS가 없으면 최소 VPC + `alb-for-agentic-work` 생성
-1. ECR `ecr-for-ob-docs` 빌드/푸시
-2. ALB rule `/vault*` → `TG-for-ob-docs`  
+1. **skills 업로드** (`use-vault` → `s3://…/skills/`)
+2. **AgentCore Harness** (`ob_docs`, skill=`use-vault`, MCP=`websearch`, **no code interpreter**) → `HARNESS_ARN`
+3. ECR `ecr-for-ob-docs` 빌드/푸시
+4. ALB rule `/vault*` → `TG-for-ob-docs`  
    (CloudFront HTTPS면 origin header 조건 유지, ALB HTTP면 path only)
-3. ECS `service-for-ob-docs` on `cluster-for-agentic-work`
-4. 샘플 vault를 `s3://…/vault/`에 seed (`VAULT_S3_ENABLE=1` sync)
+5. ECS `service-for-ob-docs` on `cluster-for-agentic-work` (`APP_CONFIG_JSON`에 `HARNESS_ARN`)
+6. 샘플 vault를 `s3://…/vault/`에 seed (`VAULT_S3_ENABLE=1` sync)
 
 ### 제거 (uninstaller)
 

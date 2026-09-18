@@ -32,6 +32,12 @@ from urllib.parse import urlparse
 import boto3
 from botocore.exceptions import ClientError
 
+from harness_provision import (
+    create_harness_execution_role,
+    create_or_get_harness,
+    ensure_ecs_invoke_harness,
+    upload_skills_to_s3,
+)
 from shared_infra import (
     CLUSTER,
     ORIGIN_HEADER_SECRET,
@@ -376,6 +382,8 @@ def register_task_definition(
         "google_client_id": cfg.get("google_client_id", ""),
         "sharing_url": cfg.get("sharing_url") or cfg.get("agentic_work_url"),
         "agentic_work_url": cfg.get("agentic_work_url") or cfg.get("sharing_url"),
+        "HARNESS_ARN": cfg.get("HARNESS_ARN") or "",
+        "harnessName": cfg.get("harnessName") or "",
     }
     container = {
         "name": "app",
@@ -717,19 +725,60 @@ def main() -> int:
     session_arn = get_secret_arn(c["sm"], SESSION_SECRET)
     vault_agent_arn = ensure_vault_agent_token(c["sm"])
 
-    logger.info("[1/6] ECR")
+    account = str(cfg["accountId"])
+    region = str(cfg["region"])
+
+    logger.info("[1/8] Upload skills (use-vault) → s3://%s/skills/", bucket)
+    n_skills = upload_skills_to_s3(
+        bucket,
+        sharing_url=str(cfg.get("sharing_url") or cfg.get("agentic_work_url") or ""),
+        region=region,
+        shared_project=SHARED,
+    )
+    logger.info("Uploaded %d skill files", n_skills)
+
+    logger.info("[2/8] AgentCore Harness (use-vault + websearch, no code interpreter)")
+    exec_role_arn = create_harness_execution_role(
+        account,
+        region,
+        PROJECT,
+        s3_bucket=bucket,
+        shared_project=SHARED,
+    )
+    harness_info = create_or_get_harness(
+        account=account,
+        region=region,
+        project=PROJECT,
+        execution_role_arn=exec_role_arn,
+        s3_bucket=bucket,
+        sharing_url=str(cfg.get("sharing_url") or cfg.get("agentic_work_url") or ""),
+        shared_project=SHARED,
+    )
+    cfg["HARNESS_ARN"] = harness_info["harness_arn"]
+    cfg["harnessName"] = harness_info["harness_name"]
+    save_config(cfg)
+    ensure_ecs_invoke_harness(
+        c["iam"],
+        shared=SHARED,
+        region=region,
+        account=account,
+        harness_arn=harness_info["harness_arn"],
+    )
+    logger.info("Harness ARN: %s", harness_info["harness_arn"])
+
+    logger.info("[3/8] ECR")
     repo_uri = ensure_ecr(c["ecr"])
     docker_login(c["ecr"], repo_uri)
 
     tag = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    logger.info("[2/6] Build & push image tag=%s", tag)
+    logger.info("[4/8] Build & push image tag=%s", tag)
     image_uri = build_and_push(repo_uri, tag)
 
-    logger.info("[3/6] Seed vault → s3://%s/vault/", bucket)
+    logger.info("[5/8] Seed vault → s3://%s/vault/", bucket)
     n = seed_vault_to_s3(c["s3"], bucket)
     logger.info("Uploaded %d vault files", n)
 
-    logger.info("[4/6] Target group + listener rule")
+    logger.info("[6/8] Target group + listener rule")
     ensure_log_group(c["logs"])
     tg_arn = ensure_target_group(c["elbv2"], network.vpc_id)
     require_header = _uses_cloudfront(str(cfg.get("sharing_url") or ""), network.alb_dns)
@@ -743,7 +792,7 @@ def main() -> int:
     if not require_header:
         logger.info("ALB-only mode: /vault listener rule without origin header")
 
-    logger.info("[5/6] Task definition + service")
+    logger.info("[7/8] Task definition + service")
     task_arn = register_task_definition(
         c["ecs"], image_uri, cfg, session_arn, vault_agent_arn
     )
@@ -757,7 +806,7 @@ def main() -> int:
         assign_public_ip=network.assign_public_ip,
     )
 
-    logger.info("[6/6] Wait for ECS PRIMARY deployment")
+    logger.info("[8/8] Wait for ECS PRIMARY deployment")
     wait_service(
         c["ecs"],
         c["elbv2"],

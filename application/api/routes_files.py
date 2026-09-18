@@ -28,6 +28,37 @@ ALLOWED_IMAGE_TYPES = {
     "image/webp": ".webp",
     "image/svg+xml": ".svg",
 }
+ALLOWED_UPLOAD_SUFFIXES = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".md",
+    ".markdown",
+    ".txt",
+    ".csv",
+    ".json",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".yml",
+    ".yaml",
+    ".xml",
+    ".html",
+    ".htm",
+    ".rst",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".ppt",
+    ".pptx",
+    ".xls",
+    ".xlsx",
+}
 
 
 class WriteBody(BaseModel):
@@ -226,11 +257,7 @@ async def upload_file(
     suffix = Path(path).suffix.lower()
     if content_type and content_type not in ALLOWED_IMAGE_TYPES and not suffix:
         raise HTTPException(status_code=400, detail=f"Unsupported content type: {content_type}")
-    if content_type in ALLOWED_IMAGE_TYPES and suffix not in ALLOWED_IMAGE_TYPES.values():
-        # keep requested path suffix if present; otherwise require image extension
-        pass
-    if suffix and suffix not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".md", ".txt"}:
-        # allow common image + text; reject unknown binaries for now
+    if suffix and suffix not in ALLOWED_UPLOAD_SUFFIXES:
         if content_type not in ALLOWED_IMAGE_TYPES and not content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
 

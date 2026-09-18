@@ -11,6 +11,7 @@ export type FolderMenuAction =
 
 export type FileMenuAction =
   | "open-tab"
+  | "open-agent"
   | "duplicate"
   | "share"
   | "pin"
@@ -67,6 +68,7 @@ function folderItems(pinned: boolean): MenuItem[] {
 function fileItems(pinned: boolean, canShare: boolean): MenuItem[] {
   const items: MenuItem[] = [
     { action: "open-tab", label: "Open in new tab" },
+    { action: "open-agent", label: "Open agent" },
     { action: "duplicate", label: "Duplicate", sepBefore: true },
   ];
   if (canShare) {
@@ -106,7 +108,7 @@ export function FolderContextMenu({
   }, [onClose]);
 
   const pad = 8;
-  const approxH = menu.kind === "panel" ? 90 : 260;
+  const approxH = menu.kind === "panel" ? 90 : 290;
   const approxW = 200;
   const left = Math.min(menu.x, window.innerWidth - approxW - pad);
   const top = Math.min(menu.y, window.innerHeight - approxH - pad);
