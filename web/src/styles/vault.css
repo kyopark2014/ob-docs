@@ -488,12 +488,13 @@ button.config-popover-choice.is-selected {
   cursor: col-resize;
   z-index: 6;
   touch-action: none;
+  background: transparent;
 }
 
 .sidebar-resizer:hover,
 .sidebar-resizer.is-active {
-  background: var(--accent);
-  opacity: 0.55;
+  /* Keep resize affordance via cursor only — no accent flash */
+  background: transparent;
 }
 
 .app.is-resizing,
