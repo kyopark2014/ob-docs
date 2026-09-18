@@ -18,6 +18,7 @@ export type AgentMessage = {
 
 type Props = {
   notePath: string | null;
+  modelName?: string | null;
   onClose: () => void;
   onNoteUpdated?: (path: string) => void;
   onResizeStart?: (e: ReactPointerEvent<HTMLDivElement>) => void;
@@ -191,6 +192,7 @@ function MessageTimeline({
 
 export function AgentPanel({
   notePath,
+  modelName,
   onClose,
   onNoteUpdated,
   onResizeStart,
@@ -344,6 +346,7 @@ export function AgentPanel({
             prompt: text,
             note_path: note?.path ?? null,
             session_id: sessionId,
+            model_name: modelName || null,
             image_paths: imagePaths,
             file_paths: filePaths,
           },
@@ -364,7 +367,7 @@ export function AgentPanel({
         abortRef.current = null;
       }
     },
-    [note?.path, onNoteUpdated, sessionId, flushLiveTextIntoEvents],
+    [note?.path, modelName, onNoteUpdated, sessionId, flushLiveTextIntoEvents],
   );
 
   return (
@@ -382,6 +385,11 @@ export function AgentPanel({
       )}
       <header className="agent-panel-header">
         <span className="agent-panel-title">Agent</span>
+        {modelName ? (
+          <span className="agent-panel-model" title={modelName}>
+            {modelName}
+          </span>
+        ) : null}
         <button
           type="button"
           className="agent-panel-close"

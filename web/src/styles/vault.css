@@ -2377,6 +2377,17 @@ body.is-resizing-agent {
   color: var(--text);
 }
 
+.agent-panel-model {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .agent-panel-close {
   width: 28px;
   height: 28px;

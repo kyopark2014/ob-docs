@@ -275,11 +275,14 @@ export const api = {
     request<{ path: string; name: string; size: number; char_count: number }>(
       `/agent/note-meta?path=${encodeURIComponent(path)}`,
     ),
+  agentModels: () =>
+    request<{ models: string[]; default_model: string }>("/agent/models"),
   agentChat: (
     body: {
       prompt: string;
       note_path?: string | null;
       session_id?: string | null;
+      model_name?: string | null;
       image_paths?: string[];
       file_paths?: string[];
     },
@@ -316,6 +319,7 @@ async function streamAgentChat(
     prompt: string;
     note_path?: string | null;
     session_id?: string | null;
+    model_name?: string | null;
     image_paths?: string[];
     file_paths?: string[];
   },
@@ -330,6 +334,7 @@ async function streamAgentChat(
       prompt: body.prompt,
       note_path: body.note_path || null,
       session_id: body.session_id || null,
+      model_name: body.model_name || null,
       image_paths: body.image_paths || [],
       file_paths: body.file_paths || [],
     }),

@@ -65,6 +65,20 @@ export function EditIcon() {
   );
 }
 
+export function ModelIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      fill="currentColor"
+    >
+      <path d="M3 3h10v10H3V3Zm2 2v6h6V5H5Zm1 1h4v1H6V6Zm0 2h4v1H6V8Zm0 2h3v1H6v-1Z" />
+    </svg>
+  );
+}
+
 export function AgentIcon() {
   return (
     <svg

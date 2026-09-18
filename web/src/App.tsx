@@ -31,6 +31,7 @@ import {
   GraphIcon,
   LogoutIcon,
   MicIcon,
+  ModelIcon,
   PlusFileIcon,
   PlusFolderIcon,
   SearchIcon,
@@ -42,6 +43,11 @@ import {
 import { MeetingLogSidebar } from "./components/MeetingLogSidebar";
 import { MeetingLogView } from "./components/MeetingLogView";
 import { AgentPanel } from "./components/AgentPanel";
+import {
+  DEFAULT_AGENT_MODEL,
+  getAgentModel,
+  setAgentModel,
+} from "./agentModelSettings";
 import { MEETING_FOLDER, DEFAULT_MEETING_TITLE } from "./meetingLog/config";
 import {
   buildMeetingMarkdown,
@@ -336,6 +342,9 @@ export default function App() {
   sidebarWidthRef.current = sidebarWidth;
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentNotePath, setAgentNotePath] = useState<string | null>(null);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [agentModel, setAgentModelState] = useState(() => getAgentModel());
+  const [agentModels, setAgentModels] = useState<string[]>([DEFAULT_AGENT_MODEL]);
   const [agentWidth, setAgentWidth] = useState(() => getAgentWidth());
   const [agentResizing, setAgentResizing] = useState(false);
   const agentWidthRef = useRef(agentWidth);
@@ -349,6 +358,7 @@ export default function App() {
   const appearanceBtnRef = useRef<HTMLButtonElement>(null);
   const viewBtnRef = useRef<HTMLButtonElement>(null);
   const graphBtnRef = useRef<HTMLButtonElement>(null);
+  const modelBtnRef = useRef<HTMLButtonElement>(null);
   const settingsFlyoutRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   /** Serializes H1↔filename renames so save never races a half-finished rename. */
@@ -536,6 +546,30 @@ export default function App() {
     void bootstrap();
   }, [bootstrap]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await api.agentModels();
+        if (cancelled) return;
+        const list = res.models?.length ? res.models : [DEFAULT_AGENT_MODEL];
+        setAgentModels(list);
+        setAgentModelState((prev) => {
+          const next = list.includes(prev)
+            ? prev
+            : res.default_model || DEFAULT_AGENT_MODEL;
+          if (next !== prev) setAgentModel(next);
+          return next;
+        });
+      } catch {
+        /* keep defaults until auth / harness is ready */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
   const refreshTree = useCallback(async () => {
     const t = await api.getTree();
     setTree(t.children);
@@ -636,6 +670,7 @@ export default function App() {
       setAppearanceOpen(false);
       setViewOpen(false);
       setGraphMenuOpen(false);
+      setModelMenuOpen(false);
       setSettingsFlyoutPos(null);
       return;
     }
@@ -1796,12 +1831,31 @@ export default function App() {
             setSettingsOpen(false);
             setAppearanceOpen(false);
             setViewOpen(false);
+            setModelMenuOpen(false);
             setGraphMenuOpen((v) => !v);
           }}
         >
           <GraphIcon />
         </button>
         <div className="rail-spacer" />
+        <button
+          ref={modelBtnRef}
+          type="button"
+          className={`rail-btn${modelMenuOpen ? " active" : ""}`}
+          title={agentModel || "Model"}
+          aria-label="Model"
+          aria-expanded={modelMenuOpen}
+          aria-haspopup="dialog"
+          onClick={() => {
+            setSettingsOpen(false);
+            setAppearanceOpen(false);
+            setViewOpen(false);
+            setGraphMenuOpen(false);
+            setModelMenuOpen((v) => !v);
+          }}
+        >
+          <ModelIcon />
+        </button>
         <button
           ref={settingsBtnRef}
           type="button"
@@ -1811,6 +1865,7 @@ export default function App() {
           aria-expanded={settingsOpen}
           onClick={() => {
             setGraphMenuOpen(false);
+            setModelMenuOpen(false);
             setSettingsOpen((v) => !v);
           }}
         >
@@ -1943,6 +1998,23 @@ export default function App() {
             if (next[0]) handleGraphAction(next[0]);
           }}
           onClose={() => setGraphMenuOpen(false)}
+        />
+      )}
+      {modelMenuOpen && (
+        <ConfigDrawer
+          title="Model"
+          options={agentModels}
+          selected={agentModel ? [agentModel] : []}
+          mode="single"
+          placement="end"
+          anchorEl={modelBtnRef.current}
+          onChange={(next) => {
+            const name = next[0];
+            if (!name) return;
+            setAgentModel(name);
+            setAgentModelState(name);
+          }}
+          onClose={() => setModelMenuOpen(false)}
         />
       )}
       {appearanceOpen && (
@@ -2286,6 +2358,7 @@ export default function App() {
       {agentOpen && (
         <AgentPanel
           notePath={agentNotePath}
+          modelName={agentModel}
           onClose={() => {
             setAgentOpen(false);
             setAgentNotePath(null);

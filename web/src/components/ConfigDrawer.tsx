@@ -56,6 +56,15 @@ export function ConfigDrawer({
         Math.max(8, rect.right + MENU_GAP),
         window.innerWidth - width - 8,
       );
+      const spaceBelow = window.innerHeight - rect.top - 8;
+      const spaceAbove = rect.bottom - 8;
+      // Near the bottom of the rail (Model/Settings): grow upward.
+      if (spaceBelow < MENU_MAX_HEIGHT && spaceAbove >= spaceBelow) {
+        const maxHeight = Math.min(MENU_MAX_HEIGHT, Math.max(120, spaceAbove));
+        const top = Math.max(8, rect.bottom - maxHeight);
+        setPosition({ left, top, width, maxHeight });
+        return;
+      }
       const top = Math.min(
         Math.max(8, rect.top),
         window.innerHeight - 80,

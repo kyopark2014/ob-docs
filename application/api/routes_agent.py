@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from application.api.routes_auth import require_user_id
-from application import harness_client, vault_backend, vault_index
+from application import harness_client, models as model_catalog, vault_backend, vault_index
 
 logger = logging.getLogger("routes_agent")
 
@@ -27,6 +27,7 @@ class ChatBody(BaseModel):
     prompt: str = ""
     note_path: Optional[str] = Field(default=None, max_length=1024)
     session_id: Optional[str] = Field(default=None, max_length=128)
+    model_name: Optional[str] = Field(default=None, max_length=128)
     image_paths: list[str] = Field(default_factory=list, max_length=20)
     file_paths: list[str] = Field(default_factory=list, max_length=20)
 
@@ -129,6 +130,7 @@ def _sanitize_timeline_text(timeline: list[dict[str, Any]]) -> None:
 @router.get("/health")
 def agent_health() -> dict:
     arn = harness_client.resolve_harness_arn()
+    catalog = model_catalog.list_models()
     return {
         "status": "ok",
         "harnessConfigured": bool(arn),
@@ -136,7 +138,15 @@ def agent_health() -> dict:
         "skills": ["use-vault"],
         "mcp": ["websearch"],
         "tools": ["exa"],
+        "models": catalog["models"],
+        "default_model": catalog["default_model"],
     }
+
+
+@router.get("/models")
+def agent_models(request: Request) -> dict:
+    require_user_id(request)
+    return model_catalog.list_models()
 
 
 @router.get("/note-meta")
@@ -197,6 +207,7 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
         note_content, _ = _read_note(note_path)
 
     session_id = harness_client.normalize_session_id(body.session_id)
+    model_name = model_catalog.normalize_model_name(body.model_name)
     full_prompt = harness_client.build_user_prompt(
         prompt,
         note_path=note_path,
@@ -215,6 +226,7 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
                     full_prompt,
                     session_id=session_id,
                     actor_id=user_id,
+                    model_name=model_name,
                 )
                 final = ""
                 try:

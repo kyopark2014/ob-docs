@@ -352,6 +352,7 @@ def iter_harness_events(
     *,
     session_id: str,
     actor_id: Optional[str] = None,
+    model_name: Optional[str] = None,
 ) -> Generator[dict[str, Any], None, str]:
     """Yield stream events for SSE; return final assistant text.
 
@@ -360,6 +361,8 @@ def iter_harness_events(
       {"type": "tool", "tool": name, "input": ..., "toolUseId": id}
       {"type": "tool_result", "tool": name, "data": str, "toolUseId": id}
     """
+    from application import models as model_catalog
+
     harness_arn = resolve_harness_arn()
     if not harness_arn:
         raise RuntimeError(
@@ -369,9 +372,11 @@ def iter_harness_events(
 
     tools = default_invoke_tools()
     skills = default_invoke_skills()
+    model_cfg = model_catalog.harness_model_config(model_name)
     kwargs: dict[str, Any] = {
         "harnessArn": harness_arn,
         "runtimeSessionId": session_id,
+        "model": model_cfg,
         "messages": [
             {
                 "role": "user",
@@ -386,10 +391,11 @@ def iter_harness_events(
         kwargs["actorId"] = actor_id
 
     logger.info(
-        "invoke_harness arn=%s session=%s actor=%s prompt_chars=%s tools=%s skills=%s",
+        "invoke_harness arn=%s session=%s actor=%s model=%s prompt_chars=%s tools=%s skills=%s",
         harness_arn,
         session_id,
         actor_id,
+        model_cfg,
         len(prompt or ""),
         [t.get("name") for t in tools],
         skills,
@@ -561,11 +567,12 @@ def iter_harness_text(
     *,
     session_id: str,
     actor_id: Optional[str] = None,
+    model_name: Optional[str] = None,
 ) -> Generator[str, None, str]:
     """Yield incremental full-text snapshots; return final text."""
     final = ""
     for event in iter_harness_events(
-        prompt, session_id=session_id, actor_id=actor_id
+        prompt, session_id=session_id, actor_id=actor_id, model_name=model_name
     ):
         if event.get("type") == "token" and isinstance(event.get("text"), str):
             final = event["text"]

@@ -112,8 +112,9 @@ data/vault/                 # 또는 /mnt/vault
 | GET/PUT | `/vault/api/graph/sources` | Notes Configure (포함 폴더) |
 | GET | `/vault/api/graph/backlinks` | 백링크 |
 | GET | `/vault/api/agent/health` | Open Agent harness 설정 여부 |
+| GET | `/vault/api/agent/models` | 선택 가능한 모델 목록 |
 | GET | `/vault/api/agent/note-meta?path=` | 에이전트 칩용 노트 메타 |
-| POST | `/vault/api/agent/chat` | Open Agent SSE (`token` / `note_updated` / `done`) |
+| POST | `/vault/api/agent/chat` | Open Agent SSE (`token` / `tool` / `note_updated` / `done`) |
 
 인증: `agent_user_id` 쿠키, `Authorization: Bearer <session>`, 또는 AgentCore용 `Authorization: VaultAgent v1.<payload>.<sig>` (`agentic-work/vault-agent-token`).
 
@@ -123,22 +124,102 @@ data/vault/                 # 또는 /mnt/vault
 - 미인증 시 agentic-work 로그인 URL로 안내
 - `/vault/s/*` 공개 viewer만 세션 없이 접근 가능
 
-### Open Agent
+Open Agent 사용법·동작은 [Agent로 Note 수정하기](#agent로-note-수정하기)를 보세요.
 
-노트 우클릭 → **Open agent** → 문서 창 오른쪽에 채팅 패널이 열립니다 (agentic-work 채팅 UI와 같은 톤).  
-백엔드는 Bedrock AgentCore **InvokeHarness**입니다.
+## Agent로 Note 수정하기
 
-| 구성 | 내용 |
+선택한 마크다운 노트를 **Bedrock AgentCore InvokeHarness**로 요약·수정합니다.  
+code interpreter는 쓰지 않고, 웹 검색(Exa)과 vault 저장 마커(`VAULT_WRITE`)만 사용합니다.
+
+### 여는 방법
+
+| 진입점 | 동작 |
 |---|---|
-| Skill | **use-vault** — vault 규칙·경로·저장 형식 지침 |
-| MCP | **websearch** (Exa `remote_mcp`) |
-| 노트 저장 | 응답의 `<<<VAULT_WRITE>>>` 마커를 서버가 파싱 (code interpreter 없음) |
+| 노트 우클릭 → **Open agent** | 문서 창 오른쪽에 Agent 패널 오픈 |
+| 문서 툴바 **Agent** 아이콘 | 현재 열린 노트로 동일하게 오픈 |
 
-선택한 노트 경로가 입력창 칩으로 표시되고, 본문은 프롬프트에 포함됩니다. 수정 마커가 있으면 응답 후 열린 탭을 다시 로드합니다.
+패널 UI는 agentic-work 채팅과 비슷한 톤(타임라인 · tool 카드 · 입력창)입니다.
 
-`python installer.py`가 skill을 S3에 올리고 전용 harness(`ob_docs`, websearch + use-vault)를 만들며 `HARNESS_ARN`을 config/ECS에 넣습니다.
+### 구성 (Harness)
 
-### 노트의 public 공유
+| 항목 | 내용 |
+|---|---|
+| Runtime | AgentCore **InvokeHarness** (`HARNESS_ARN`, installer가 `ob_docs` harness 생성) |
+| Skill | **use-vault** — vault 경로·본문 규칙·저장 형식 지침 (S3 `skills/use-vault/`) |
+| MCP / tools | **websearch** — Exa `remote_mcp` (`exa`만, code interpreter 없음) |
+| 모델 | 좌측 rail 하단 **Model** 아이콘(Settings 바로 위)에서 선택 (기본 `Claude 4.6 Sonnet`, localStorage 저장) |
+| 세션 | 채팅 `session_id`로 harness 대화 이어가기 |
+
+`python installer.py`가 skill을 S3에 올리고 harness를 프로비저닝한 뒤 `HARNESS_ARN`을 config/ECS에 넣습니다.
+
+### 요청 흐름
+
+```text
+UI (Agent 패널)
+  → POST /vault/api/agent/chat  (SSE)
+  → build_user_prompt (선택 노트 본문 + 첨부)
+  → InvokeHarness (model override + exa + use-vault)
+  → 스트림: token / text / tool / tool_result
+  → 응답의 VAULT_WRITE 파싱 → vault 파일 저장
+  → note_updated → 열린 탭 다시 로드
+```
+
+1. **선택 노트**: 입력창 칩으로 경로·크기가 보이고, 본문 전체가 프롬프트에 포함됩니다.
+2. **모델**: rail Model에서 고른 display name이 `model_name`으로 전달되고, 서버가 Bedrock `modelId`로 변환해 InvokeHarness `model`에 넣습니다.
+3. **웹 검색**: 필요 시 harness가 Exa MCP를 호출합니다. UI에는 harness-work 스타일 **tool / tool_result** 카드가 타임라인에 표시됩니다.
+4. **최종 답변**: tool 카드 **아래**에 텍스트가 오도록 서버·클라이언트가 타임라인을 맞춥니다.
+
+### 노트 저장 (`VAULT_WRITE`)
+
+code interpreter가 없으므로 에이전트는 스크립트로 vault에 쓰지 않습니다.  
+응답에 아래 마커를 넣으면 **ob-docs 서버**가 선택 노트 경로만 덮어씁니다.
+
+```text
+<<<VAULT_WRITE Meeting/Weekly-Sync.md>>>
+# Weekly Sync
+
+본문 전체 (YAML frontmatter 금지)
+<<<END_VAULT_WRITE>>>
+```
+
+- 경로에 공백이 있어도 파싱됩니다.
+- 선택 노트와 **다른 경로**로의 WRITE는 무시됩니다.
+- 저장 후 UI에 `vault_write` tool 카드가 보이고, Preview/Edit 탭이 갱신됩니다.
+- 스트리밍 중 불완전 마커·완성 마커 본문은 채팅에 노출되지 않습니다.
+
+### 첨부 (사진 / Load files)
+
+입력창 **+** 는 메시지 입력 전과 관계없이 항상 사용할 수 있습니다.
+
+| 메뉴 | 동작 |
+|---|---|
+| **사진 첨부** | 이미지 선택 또는 Ctrl/⌘+V 붙여넣기 → **현재 노트와 같은 폴더**에 저장 → 미리보기 칩 |
+| **Load files** | 문서/텍스트 등을 같은 폴더에 올린 뒤 칩으로 표시 |
+
+전송 시:
+
+- 이미지: Bedrock Converse로 설명을 뽑아 프롬프트에 합침 (InvokeHarness는 텍스트 전용)
+- 텍스트형 파일: 본문을 프롬프트에 포함
+- 바이너리: 경로·크기만 안내
+
+파일명은 충돌 방지를 위해 `타임스탬프-원본이름` 형식으로 저장됩니다.
+
+### Preview와 Mermaid
+
+노트 Preview에서 mermaid 펜스 코드 블록(예: flowchart)은 다이어그램으로 렌더링됩니다. Edit 모드에서는 원문 그대로입니다.
+
+### API 요약
+
+| Method | Path | 설명 |
+|---|---|---|
+| GET | `/vault/api/agent/health` | harness·skill·모델 기본값 |
+| GET | `/vault/api/agent/models` | 선택 가능 모델 목록 |
+| GET | `/vault/api/agent/note-meta?path=` | 칩용 name/size |
+| POST | `/vault/api/agent/chat` | SSE 채팅 (`prompt`, `note_path`, `session_id`, `model_name`, `image_paths`, `file_paths`) |
+
+SSE 이벤트 예: `session`, `token`, `text`, `tool`, `tool_result`, `note_updated`, `done`, `error`.
+
+## 노트의 public 공유
 
 로그인된 사용자가 markdown 노트를 **쿠키 없이** 볼 수 있는 CloudFront URL로 공유합니다. agentic-work markdown viewer와 비슷한 HTML 페이지를 서버가 렌더합니다.
 

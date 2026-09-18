@@ -483,7 +483,7 @@ def flush_pending_to_s3(
                         p
                         for p in root.rglob("*")
                         if p.is_file()
-                        and p.relative_to(root).as_posix() != f".vault/{_PENDING_NAME}"
+                        and not p.relative_to(root).as_posix().startswith(".vault/")
                     ]
                     for j, path in enumerate(files, start=1):
                         rel_f = path.relative_to(root).as_posix()
@@ -691,6 +691,10 @@ def sync_from_s3_incremental(
                 rel = key[len(prefix) :] if key.startswith(prefix) else key
                 if not rel or rel == f".vault/{_PENDING_NAME}":
                     continue
+                # Do not mirror .vault settings/cache from S3 into the working copy
+                # (Notes Graph HTML lives under .vault/cache/notes-graphify/).
+                if rel.startswith(".vault/"):
+                    continue
                 remote[rel] = obj
 
         candidates: list[tuple[str, dict[str, Any]]] = []
@@ -798,9 +802,12 @@ def _prune_local_not_in_remote(root: Path, remote_exact: set[str]) -> int:
     Matching is exact (case-sensitive) first. If the local path only matches an
     S3 key ignoring case (macOS APFS), keep it so ``agent/`` vs ``Agent/``
     downloads are not deleted when the volume cannot store both spellings.
+
+    Never prune ``.vault/`` (settings, pending queue, Notes Graph cache under
+    ``.vault/cache/notes-graphify/``). Those are local/derived and are not
+    mirrored as user notes — deleting them after Sync made Graph disappear.
     """
     pruned = 0
-    protect_exact = {f".vault/{_PENDING_NAME}", f".vault/{_STATUS_NAME}"}
     remote_lower = {r.lower() for r in remote_exact}
     files: list[Path] = []
     for path in root.rglob("*"):
@@ -810,7 +817,8 @@ def _prune_local_not_in_remote(root: Path, remote_exact: set[str]) -> int:
             rel = path.relative_to(root).as_posix()
         except ValueError:
             continue
-        if rel in protect_exact:
+        # Keep all local settings / graph artifacts / sync metadata.
+        if rel == ".vault" or rel.startswith(".vault/"):
             continue
         if rel in remote_exact:
             continue
@@ -821,8 +829,13 @@ def _prune_local_not_in_remote(root: Path, remote_exact: set[str]) -> int:
 
     for path in files:
         try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            rel = str(path)
+        try:
             path.unlink()
             pruned += 1
+            logger.info("Pruned local file missing on S3: %s", rel)
         except OSError:
             logger.debug("Prune failed: %s", path, exc_info=True)
 
