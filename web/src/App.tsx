@@ -29,6 +29,7 @@ import {
   FilesIcon,
   GraphIcon,
   LogoutIcon,
+  MicIcon,
   PlusFileIcon,
   PlusFolderIcon,
   SearchIcon,
@@ -37,6 +38,15 @@ import {
   SyncIcon,
   ViewIcon,
 } from "./components/Icons";
+import { MeetingLogSidebar } from "./components/MeetingLogSidebar";
+import { MeetingLogView } from "./components/MeetingLogView";
+import { MEETING_FOLDER } from "./meetingLog/config";
+import {
+  buildMeetingMarkdown,
+  extractTitleFromEntries,
+  meetingFileBaseName,
+} from "./meetingLog/format";
+import { useMeetingLog } from "./meetingLog/useMeetingLog";
 import { useTheme } from "./hooks/useTheme";
 import type { Theme } from "./theme";
 import {
@@ -267,6 +277,7 @@ export default function App() {
   } | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [panel, setPanel] = useState<PanelMode>("files");
+  const meeting = useMeetingLog();
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -1116,6 +1127,34 @@ export default function App() {
     await createNoteIn(draftParentPath || "00-Inbox");
   }, [createNoteIn, draftParentPath]);
 
+  const saveMeetingToVault = useCallback(async () => {
+    const source =
+      meeting.batchEntries.length > 0 ? meeting.batchEntries : meeting.entries;
+    if (!source.length) {
+      meeting.setStatus("저장할 회의 기록이 없습니다.");
+      return;
+    }
+    meeting.setSavingVault(true);
+    try {
+      const title = extractTitleFromEntries(source);
+      const baseName = meetingFileBaseName(title, meeting.recordedAt);
+      const path = uniqueNamedPath(MEETING_FOLDER, baseName, treeRef.current);
+      const md = buildMeetingMarkdown(title, source, meeting.recordedAt);
+      await api.writeFile(path, md);
+      await refreshTree();
+      meeting.setStatus(`Vault에 저장했습니다: ${path}`);
+      meeting.setCanSaveVault(false);
+      setPanel("files");
+      await openFile(path);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      meeting.setStatus(`Vault 저장 실패: ${msg}`);
+      void showAlert(msg, "Vault 저장 실패");
+    } finally {
+      meeting.setSavingVault(false);
+    }
+  }, [meeting, openFile, refreshTree, showAlert]);
+
   const startCreateFolder = useCallback(
     (parentPath?: string) => {
       setPanel("files");
@@ -1667,6 +1706,15 @@ export default function App() {
           <SearchIcon />
         </button>
         <button
+          type="button"
+          className={`rail-btn${panel === "meeting" ? " active" : ""}`}
+          title="Meeting Log"
+          aria-pressed={panel === "meeting"}
+          onClick={() => setPanel((p) => (p === "meeting" ? "hidden" : "meeting"))}
+        >
+          <MicIcon />
+        </button>
+        <button
           ref={graphBtnRef}
           type="button"
           className={`rail-btn${graphMenuOpen || notesSyncBusy || notesGraphOpen ? " active" : ""}`}
@@ -1991,6 +2039,21 @@ export default function App() {
             </OverlayScroll>
           </>
         )}
+        {panel === "meeting" && (
+          <MeetingLogSidebar
+            meeting={meeting}
+            onClose={() => setPanel("files")}
+            onSaveVault={() => void saveMeetingToVault()}
+            onClearConfirm={async () =>
+              askConfirm({
+                title: "기록 지우기",
+                message: "실시간·전체 변환 기록을 모두 지울까요?",
+                confirmLabel: "지우기",
+                danger: true,
+              })
+            }
+          />
+        )}
         {panel !== "hidden" && (
           <div
             className={`sidebar-resizer${sidebarResizing ? " is-active" : ""}`}
@@ -2005,6 +2068,10 @@ export default function App() {
       </aside>
 
       <main className="main">
+            {panel === "meeting" ? (
+              <MeetingLogView meeting={meeting} />
+            ) : (
+              <>
             <div className="tabs">
               {tabs.map((t) => (
                 <div
@@ -2123,6 +2190,8 @@ export default function App() {
                 <br />
                 <span style={{ fontSize: 12 }}>Local-first · .md SoT · .vault settings</span>
               </div>
+            )}
+              </>
             )}
       </main>
 
