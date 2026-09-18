@@ -2,11 +2,16 @@
 """Deploy ob-docs onto the shared agentic-work ALB / ECS / S3 stack.
 
 Creates (idempotent):
+  - Shared infra if missing (S3, secrets, IAM roles, ECS cluster, VPC/ALB)
+    via ``shared_infra.py`` (same naming as agentic-work/installer.py)
   - ECR repository
   - ALB target group TG-for-ob-docs (port 8502)
-  - Listener rule: path /vault* + CloudFront origin header → ob-docs TG
+  - Listener rule: path /vault* (+ optional CloudFront origin header) → ob-docs TG
   - ECS task definition + Fargate service on cluster-for-agentic-work
   - Seeds s3://{bucket}/vault/ from data/vault/
+
+``config.json`` may be missing or partial — installer bootstraps it (and will
+merge keys from ``../agentic-work/application/config.json`` when present).
 
 Usage:
   python installer.py
@@ -16,16 +21,26 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import boto3
 from botocore.exceptions import ClientError
+
+from shared_infra import (
+    CLUSTER,
+    ORIGIN_HEADER_SECRET,
+    PROJECT,
+    SESSION_SECRET,
+    SHARED,
+    bootstrap_config,
+    ensure_shared_stack,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,44 +52,34 @@ logger = logging.getLogger("ob-docs-installer")
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 
-PROJECT = "ob-docs"
-SHARED = "agentic-work"
-REGION = "us-west-2"
-ACCOUNT = "262976740991"
-CLUSTER = f"cluster-for-{SHARED}"
-ALB_NAME = f"alb-for-{SHARED}"
 SERVICE_NAME = f"service-for-{PROJECT}"
 TASK_FAMILY = f"task-for-{PROJECT}"
 TG_NAME = f"TG-for-{PROJECT}"
 ECR_NAME = f"ecr-for-{PROJECT}"
 CONTAINER_PORT = 8502
 LOG_GROUP = f"/ecs/app-for-{PROJECT}"
-ORIGIN_HEADER_SECRET = f"{SHARED}/cloudfront-alb-origin-header"
-SESSION_SECRET = f"{SHARED}/session-signing-key"
 VAULT_AGENT_SECRET = f"{SHARED}/vault-agent-token"
-EXEC_ROLE = f"role-ecs-execution-for-{SHARED}-{REGION}"
-TASK_ROLE = f"role-ecs-task-for-{SHARED}-{REGION}"
 
 
 def load_config() -> dict[str, Any]:
-    with CONFIG_PATH.open(encoding="utf-8") as f:
-        return json.load(f)
+    return bootstrap_config(CONFIG_PATH)
 
 
 def save_config(cfg: dict[str, Any]) -> None:
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def clients():
+def clients(region: str):
     return {
-        "ecr": boto3.client("ecr", region_name=REGION),
-        "ecs": boto3.client("ecs", region_name=REGION),
-        "elbv2": boto3.client("elbv2", region_name=REGION),
-        "ec2": boto3.client("ec2", region_name=REGION),
-        "logs": boto3.client("logs", region_name=REGION),
-        "s3": boto3.client("s3", region_name=REGION),
-        "sm": boto3.client("secretsmanager", region_name=REGION),
-        "sts": boto3.client("sts", region_name=REGION),
+        "ecr": boto3.client("ecr", region_name=region),
+        "ecs": boto3.client("ecs", region_name=region),
+        "elbv2": boto3.client("elbv2", region_name=region),
+        "ec2": boto3.client("ec2", region_name=region),
+        "logs": boto3.client("logs", region_name=region),
+        "s3": boto3.client("s3", region_name=region),
+        "sm": boto3.client("secretsmanager", region_name=region),
+        "sts": boto3.client("sts", region_name=region),
+        "iam": boto3.client("iam"),
     }
 
 
@@ -174,10 +179,6 @@ def ensure_log_group(logs) -> None:
         logger.info("Log group exists: %s", LOG_GROUP)
 
 
-def get_secret_string(sm, name: str) -> str:
-    return (sm.get_secret_value(SecretId=name).get("SecretString") or "").strip()
-
-
 def get_secret_arn(sm, name: str) -> str:
     return sm.describe_secret(SecretId=name)["ARN"]
 
@@ -241,14 +242,24 @@ def ensure_target_group(elbv2, vpc_id: str) -> str:
     return arn
 
 
-def ensure_listener_rule(elbv2, listener_arn: str, tg_arn: str, origin_header: str) -> str:
-    """Path /vault* + origin header → ob-docs TG.
+def ensure_listener_rule(
+    elbv2,
+    listener_arn: str,
+    tg_arn: str,
+    origin_header: str,
+    *,
+    require_origin_header: bool = True,
+) -> str:
+    """Path /vault* (+ optional origin header) → ob-docs TG.
 
     Must be a *higher* priority (lower number) than the agentic-work catch-all
     header-only rule, otherwise /vault never reaches ob-docs.
 
     Prefer priority 1 so agentic-work's header-only rules (often 4/5/10) cannot
     steal /vault traffic. Also refuse to treat header-only rules as the vault rule.
+
+    When ``require_origin_header`` is False (ALB-only / no CloudFront), the rule
+    matches path only so browsers can hit the ALB DNS directly.
     """
     rules = elbv2.describe_rules(ListenerArn=listener_arn)["Rules"]
     vault_rule = None
@@ -261,7 +272,10 @@ def ensure_listener_rule(elbv2, listener_arn: str, tg_arn: str, origin_header: s
             if c.get("Field") != "path-pattern":
                 continue
             values = c.get("Values") or []
-            if any(str(v) == "/vault" or str(v).startswith("/vault/") or str(v) == "/vault/*" for v in values):
+            if any(
+                str(v) == "/vault" or str(v).startswith("/vault/") or str(v) == "/vault/*"
+                for v in values
+            ):
                 has_vault_path = True
                 break
         if has_vault_path:
@@ -279,19 +293,22 @@ def ensure_listener_rule(elbv2, listener_arn: str, tg_arn: str, origin_header: s
         if desired_priority > 10:
             raise RuntimeError("No free ALB listener priority for /vault rule")
 
-    conditions = [
+    conditions: list[dict[str, Any]] = [
         {
             "Field": "path-pattern",
             "Values": ["/vault", "/vault/*"],
         },
-        {
-            "Field": "http-header",
-            "HttpHeaderConfig": {
-                "HttpHeaderName": "X-Custom-Header",
-                "Values": [origin_header],
-            },
-        },
     ]
+    if require_origin_header and origin_header:
+        conditions.append(
+            {
+                "Field": "http-header",
+                "HttpHeaderConfig": {
+                    "HttpHeaderName": "X-Custom-Header",
+                    "Values": [origin_header],
+                },
+            }
+        )
     actions = [{"Type": "forward", "TargetGroupArn": tg_arn}]
 
     if vault_rule:
@@ -343,11 +360,15 @@ def register_task_definition(
     session_secret_arn: str,
     vault_agent_secret_arn: str,
 ) -> str:
+    account = str(cfg["accountId"])
+    region = str(cfg["region"])
+    exec_role = f"role-ecs-execution-for-{SHARED}-{region}"
+    task_role = f"role-ecs-task-for-{SHARED}-{region}"
     app_config = {
         "projectName": PROJECT,
         "sharedProjectName": SHARED,
-        "accountId": ACCOUNT,
-        "region": REGION,
+        "accountId": account,
+        "region": region,
         "s3_bucket": cfg["s3_bucket"],
         "s3_arn": cfg.get("s3_arn", f"arn:aws:s3:::{cfg['s3_bucket']}"),
         "s3_files_vault_prefix": "vault/",
@@ -375,7 +396,7 @@ def register_task_definition(
             "logDriver": "awslogs",
             "options": {
                 "awslogs-group": LOG_GROUP,
-                "awslogs-region": REGION,
+                "awslogs-region": region,
                 "awslogs-stream-prefix": "ecs",
             },
         },
@@ -396,8 +417,8 @@ def register_task_definition(
         requiresCompatibilities=["FARGATE"],
         cpu="512",
         memory="1024",
-        executionRoleArn=f"arn:aws:iam::{ACCOUNT}:role/{EXEC_ROLE}",
-        taskRoleArn=f"arn:aws:iam::{ACCOUNT}:role/{TASK_ROLE}",
+        executionRoleArn=f"arn:aws:iam::{account}:role/{exec_role}",
+        taskRoleArn=f"arn:aws:iam::{account}:role/{task_role}",
         containerDefinitions=[container],
         runtimePlatform={"cpuArchitecture": "ARM64", "operatingSystemFamily": "LINUX"},
         tags=[{"key": "Name", "value": TASK_FAMILY}],
@@ -414,12 +435,22 @@ def ensure_service(
     tg_arn: str,
     subnets: list[str],
     security_groups: list[str],
+    *,
+    assign_public_ip: str = "DISABLED",
 ) -> None:
     try:
         desc = ecs.describe_services(cluster=CLUSTER, services=[SERVICE_NAME])
         services = [s for s in desc.get("services", []) if s.get("status") != "INACTIVE"]
     except ClientError:
         services = []
+
+    network = {
+        "awsvpcConfiguration": {
+            "subnets": subnets,
+            "securityGroups": security_groups,
+            "assignPublicIp": assign_public_ip,
+        }
+    }
 
     if services:
         ecs.update_service(
@@ -428,6 +459,7 @@ def ensure_service(
             taskDefinition=task_def_arn,
             desiredCount=1,
             forceNewDeployment=True,
+            networkConfiguration=network,
             deploymentConfiguration={
                 "minimumHealthyPercent": 100,
                 "maximumPercent": 200,
@@ -441,13 +473,7 @@ def ensure_service(
             taskDefinition=task_def_arn,
             desiredCount=1,
             launchType="FARGATE",
-            networkConfiguration={
-                "awsvpcConfiguration": {
-                    "subnets": subnets,
-                    "securityGroups": security_groups,
-                    "assignPublicIp": "DISABLED",
-                }
-            },
+            networkConfiguration=network,
             loadBalancers=[
                 {
                     "targetGroupArn": tg_arn,
@@ -613,6 +639,9 @@ def wait_service(
 
 def ensure_sg_ingress(ec2, ecs_sg: str, alb_sg: str) -> None:
     """Allow ALB → ob-docs container port."""
+    if not ecs_sg or not alb_sg:
+        logger.warning("Skipping SG ingress (ecs_sg=%s alb_sg=%s)", ecs_sg, alb_sg)
+        return
     try:
         ec2.authorize_security_group_ingress(
             GroupId=ecs_sg,
@@ -637,41 +666,54 @@ def ensure_sg_ingress(ec2, ecs_sg: str, alb_sg: str) -> None:
         logger.info("SG ingress already present for :%s", CONTAINER_PORT)
 
 
+def _uses_cloudfront(sharing_url: str, alb_dns: str) -> bool:
+    """True when traffic is expected via HTTPS/CloudFront (origin header required)."""
+    url = (sharing_url or "").strip()
+    if not url:
+        return False
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "http" and alb_dns and host == alb_dns.lower():
+        return False
+    return parsed.scheme == "https"
+
+
 def main() -> int:
     if shutil_which("docker") is None:
         logger.error("Docker is required")
         return 1
 
     cfg = load_config()
-    cfg.setdefault("sharing_url", "https://cowork.my-agentic-ai.click")
-    cfg.setdefault("agentic_work_url", cfg["sharing_url"])
-    bucket = cfg["s3_bucket"]
-
-    c = clients()
+    region = str(cfg["region"])
+    c = clients(region)
     ident = c["sts"].get_caller_identity()
     logger.info("AWS account=%s arn=%s", ident.get("Account"), ident.get("Arn"))
+    if str(ident.get("Account")) != str(cfg.get("accountId")):
+        logger.warning(
+            "config accountId=%s differs from caller %s — using caller for deploy",
+            cfg.get("accountId"),
+            ident.get("Account"),
+        )
+        cfg["accountId"] = str(ident["Account"])
 
-    # Discover shared ALB / networking from existing agentic-work service
-    aw = c["ecs"].describe_services(
-        cluster=CLUSTER, services=[f"service-for-{SHARED}"]
-    )["services"][0]
-    subnets = aw["networkConfiguration"]["awsvpcConfiguration"]["subnets"]
-    sgs = aw["networkConfiguration"]["awsvpcConfiguration"]["securityGroups"]
-    aw_tg = aw["loadBalancers"][0]["targetGroupArn"]
-    vpc_id = c["elbv2"].describe_target_groups(TargetGroupArns=[aw_tg])["TargetGroups"][0][
-        "VpcId"
-    ]
-    alb = c["elbv2"].describe_load_balancers(Names=[ALB_NAME])["LoadBalancers"][0]
-    alb_sg = alb["SecurityGroups"][0]
-    listener = c["elbv2"].describe_listeners(LoadBalancerArn=alb["LoadBalancerArn"])[
-        "Listeners"
-    ][0]["ListenerArn"]
+    logger.info("[0/6] Ensure shared agentic-work-compatible infra")
+    cfg, network, origin_header = ensure_shared_stack(
+        cfg=cfg,
+        s3=c["s3"],
+        sm=c["sm"],
+        iam=c["iam"],
+        ecs=c["ecs"],
+        elbv2=c["elbv2"],
+        ec2=c["ec2"],
+    )
+    save_config(cfg)
+    bucket = cfg["s3_bucket"]
 
-    ensure_sg_ingress(c["ec2"], sgs[0], alb_sg)
-
-    origin_header = get_secret_string(c["sm"], ORIGIN_HEADER_SECRET)
     if not origin_header:
         raise RuntimeError(f"Empty origin header secret: {ORIGIN_HEADER_SECRET}")
+
+    ensure_sg_ingress(c["ec2"], network.security_groups[0], network.alb_sg)
+
     session_arn = get_secret_arn(c["sm"], SESSION_SECRET)
     vault_agent_arn = ensure_vault_agent_token(c["sm"])
 
@@ -689,14 +731,31 @@ def main() -> int:
 
     logger.info("[4/6] Target group + listener rule")
     ensure_log_group(c["logs"])
-    tg_arn = ensure_target_group(c["elbv2"], vpc_id)
-    ensure_listener_rule(c["elbv2"], listener, tg_arn, origin_header)
+    tg_arn = ensure_target_group(c["elbv2"], network.vpc_id)
+    require_header = _uses_cloudfront(str(cfg.get("sharing_url") or ""), network.alb_dns)
+    ensure_listener_rule(
+        c["elbv2"],
+        network.listener_arn,
+        tg_arn,
+        origin_header,
+        require_origin_header=require_header,
+    )
+    if not require_header:
+        logger.info("ALB-only mode: /vault listener rule without origin header")
 
     logger.info("[5/6] Task definition + service")
     task_arn = register_task_definition(
         c["ecs"], image_uri, cfg, session_arn, vault_agent_arn
     )
-    ensure_service(c["ecs"], c["elbv2"], task_arn, tg_arn, subnets, sgs)
+    ensure_service(
+        c["ecs"],
+        c["elbv2"],
+        task_arn,
+        tg_arn,
+        network.subnets,
+        network.security_groups,
+        assign_public_ip=network.assign_public_ip,
+    )
 
     logger.info("[6/6] Wait for ECS PRIMARY deployment")
     wait_service(
@@ -711,10 +770,15 @@ def main() -> int:
     cfg["ecs_service"] = SERVICE_NAME
     cfg["ecs_cluster"] = CLUSTER
     cfg["target_group"] = TG_NAME
+    cfg["alb_dns"] = network.alb_dns
     save_config(cfg)
 
     url = f"{cfg.get('sharing_url', '').rstrip('/')}/vault"
     logger.info("Deployed: %s", url)
+    if not cfg.get("google_client_id"):
+        logger.warning(
+            "google_client_id is empty — set it in config.json for Google sign-in"
+        )
     print(url)
     return 0
 

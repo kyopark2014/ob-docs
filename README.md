@@ -3,7 +3,8 @@
 Obsidian형 **Local-first Plain Text** vault 웹 앱입니다.  
 노트는 `.md`가 Source of Truth이고, 설정은 `.vault/`에 격리되며, 그래프·검색·백링크는 파생 캐시입니다.
 
-agentic-work와 **같은 CloudFront / ALB / S3 버킷**을 공유합니다.
+agentic-work와 **같은 CloudFront / ALB / S3 버킷**을 공유할 수 있습니다.  
+agentic-work가 없어도 `python installer.py`만으로 공유 인프라를 만들고 `/vault`를 배포할 수 있습니다.
 
 | 항목 | 값 |
 |---|---|
@@ -210,16 +211,47 @@ docker run --rm -p 8502:8502 \
   ob-docs
 ```
 
-## 배포 (shared agentic-work ALB)
+## 배포 (installer)
+
+agentic-work와 **같은 리소스 이름**을 사용합니다. `config.json`이 없거나 일부만 있어도
+`installer.py`가 부족한 공유 인프라를 만들어 준 뒤 ob-docs를 배포합니다.
 
 ```bash
 python installer.py
 ```
 
-배포 후 URL: https://cowork.my-agentic-ai.click/vault
+배포 후 URL: `{sharing_url}/vault`  
+(기존 환경 예: https://cowork.my-agentic-ai.click/vault)
 
-installer가 수행하는 일:
+### config.json
+
+- 없으면 생성합니다. `accountId` / `region` / `s3_bucket` 등은 STS·기본값으로 채웁니다.
+- 옆에 `../agentic-work/application/config.json`이 있으면 `s3_bucket`, `sharing_url`,
+  `google_client_id` 등을 병합합니다.
+- Google 로그인에는 `google_client_id`가 필요합니다 (비어 있으면 배포는 되지만 로그인 불가).
+
+### installer가 수행하는 일
+
+0. **공유 인프라 ensure** (`shared_infra.py`, agentic-work와 동일 네이밍)
+   - S3 `storage-for-agentic-work-{account}-{region}`
+   - Secrets: `agentic-work/cloudfront-alb-origin-header`, `session-signing-key`
+   - IAM: `role-ecs-{task,execution}-for-agentic-work-{region}`
+   - ECS cluster `cluster-for-agentic-work`
+   - 기존 ALB/ECS가 없으면 최소 VPC + `alb-for-agentic-work` 생성
 1. ECR `ecr-for-ob-docs` 빌드/푸시
-2. ALB rule `/vault*` → `TG-for-ob-docs` (CloudFront origin header 조건 유지)
+2. ALB rule `/vault*` → `TG-for-ob-docs`  
+   (CloudFront HTTPS면 origin header 조건 유지, ALB HTTP면 path only)
 3. ECS `service-for-ob-docs` on `cluster-for-agentic-work`
 4. 샘플 vault를 `s3://…/vault/`에 seed (`VAULT_S3_ENABLE=1` sync)
+
+### 제거 (uninstaller)
+
+```bash
+python uninstaller.py
+python uninstaller.py --yes
+```
+
+- **항상 삭제**: `service-for-ob-docs`, `TG-for-ob-docs`, `/vault*` listener rule, ECR, 로그 그룹, `vault-agent-token`
+- **공유 중**(agentic-work 서비스가 살아 있으면) ALB·VPC·클러스터·S3·IAM·origin/session secret은 **유지**
+- **공유가 없으면** installer가 만든 공유 이름 인프라까지 삭제
+- 공유 중인데 vault 객체만 지우려면: `--purge-vault-prefix`
