@@ -203,3 +203,86 @@ def build_markdown_viewer_page(
 </body>
 </html>
 """
+
+
+def build_text_viewer_page(
+    file_name: str,
+    text: str,
+    *,
+    as_markdown: bool,
+    download_href: str = "",
+) -> str:
+    """CSP-safe text/markdown viewer for Load-files ``/vault/api/files/view``."""
+    download_link = ""
+    if download_href:
+        download_link = (
+            f'<a class="action" href="{html.escape(download_href, quote=True)}">'
+            "Download</a>"
+        )
+    if as_markdown:
+        return build_markdown_viewer_page(
+            file_name, text, topbar_right_html=download_link
+        )
+
+    title = html.escape(file_name)
+    body_inner = f'<pre class="code">{html.escape(text)}</pre>'
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title}</title>
+  <style>
+    :root {{ color-scheme: light dark; }}
+    body {{
+      margin: 0;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    }}
+    .topbar {{
+      position: sticky; top: 0; z-index: 2;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 10px 20px;
+      border-bottom: 1px solid #30363d;
+      background: rgba(13, 17, 23, 0.92);
+      backdrop-filter: blur(8px);
+    }}
+    .topbar h1 {{
+      margin: 0; font-size: 14px; font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }}
+    .topbar a.action {{
+      color: #58a6ff; text-decoration: none; font-size: 13px; white-space: nowrap;
+    }}
+    .wrap {{
+      box-sizing: border-box;
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 24px 20px 64px;
+    }}
+    pre.code {{
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.5;
+    }}
+    @media (prefers-color-scheme: light) {{
+      body {{ background: #ffffff; color: #1f2328; }}
+      .topbar {{ background: rgba(255,255,255,0.92); border-bottom-color: #d0d7de; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>{title}</h1>
+    {download_link}
+  </div>
+  <div class="wrap">
+    <article>{body_inner}</article>
+  </div>
+</body>
+</html>
+"""

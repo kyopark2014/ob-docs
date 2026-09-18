@@ -1,19 +1,30 @@
 ---
 name: use-vault
-description: ob-docs vault의 마크다운 노트 규칙·경로·저장 형식을 안내합니다. 노트 읽기/수정, vault, 메모 저장, 위키링크, 백링크 요청 시 사용합니다.
+description: ob-docs vault의 마크다운 노트를 조회·검색·생성·수정합니다. vault, 노트, 위키링크, 백링크, 메모 저장 요청 시 사용합니다.
 ---
 
 # use-vault (ob-docs)
 
-ob-docs vault의 마크다운 노트 규칙과 저장 형식을 정의합니다.
+ob-docs vault의 마크다운 노트 규칙과 저장 형식을 정의합니다.  
+노트는 `.md`가 Source of Truth입니다.
 
-## Open Agent (Harness) — 중요
+## When to Use
 
-이 harness에는 **code interpreter가 없습니다.**  
-`read_vault.py` / `write_vault.py`를 실행하지 마세요.
+- vault / 내 노트 / 노트 조회·검색
+- 파일 트리, 백링크·그래프 확인
+- 새 노트 작성, 기존 노트 수정·이어쓰기
 
-- **읽기**: 사용자 메시지에 포함된 선택 노트 본문을 사용하세요.
-- **저장**: 응답에 `VAULT_WRITE` 마커를 넣으면 서버가 vault에 저장합니다.
+## Critical Rules
+
+1. 경로는 vault 상대경로입니다. 예: `Meeting/Weekly-Sync.md`
+2. **노트 본문**: YAML frontmatter를 **넣지 마세요**. `# 제목` 한 줄로 시작하세요.
+3. **새 노트는 vault 루트에 두지 마세요.** 주제 폴더 아래(`Category/Note.md`)에만 저장합니다.
+4. 선택 노트 본문이 사용자 메시지에 포함되어 있으면 그 내용을 우선 사용하세요.
+5. ad-hoc `curl`로 vault API를 새로 짜지 마세요.
+
+## Open Agent — 노트 저장
+
+선택 노트를 덮어쓸 때는 응답에 `VAULT_WRITE` 마커를 넣으세요. 서버가 파싱해 vault에 저장합니다.
 
 ```
 <<<VAULT_WRITE Meeting/Note.md>>>
@@ -23,35 +34,24 @@ ob-docs vault의 마크다운 노트 규칙과 저장 형식을 정의합니다.
 <<<END_VAULT_WRITE>>>
 ```
 
-## When to Use
+- 선택된 노트 경로만 수정하세요.
+- 마커 밖의 텍스트로 변경 요약을 한국어로 알려 주세요.
+- 읽기만 할 때는 마커를 넣지 마세요.
 
-- vault 경로·노트 본문 규칙 확인
-- 선택 노트 요약·설명·수정 형식 안내
-- 위키링크·백링크 등 vault 관례
+## Subcommands (참고)
 
-## Critical Rules
-
-1. Open Agent에서는 스크립트/`curl`/S3 sync를 실행하지 마세요.
-2. 경로는 vault 상대경로입니다. 예: `Meeting/Weekly-Sync.md`
-3. 수정 시 선택 노트 경로만 `VAULT_WRITE`로 덮어쓰세요.
-4. **노트 본문**: YAML frontmatter를 넣지 마세요. `# 제목` 한 줄로 시작하세요.
-5. code interpreter / shell / AWS 자격증명 점검을 하지 마세요.
-
-## Local / CI environments (optional scripts)
-
-code interpreter가 있는 환경에서만 아래 스크립트를 사용할 수 있습니다.
+skill에 포함된 `scripts/read_vault.py` · `write_vault.py`는 vault HTTP API 래퍼입니다.  
+**code interpreter 샌드박스에는 harness skill 마운트 경로가 보이지 않을 수 있으므로**,  
+Open Agent에서는 위 `VAULT_WRITE` 경로를 사용하세요.
 
 | 스크립트 | 용도 |
 | --- | --- |
-| `scripts/read_vault.py` | health / tree / list / read / search / graph / backlinks |
-| `scripts/write_vault.py` | write / append / mkdir / rename / delete / rebuild |
+| `read_vault.py` | health / tree / list / read / search / graph / backlinks |
+| `write_vault.py` | write / append / mkdir / rename / delete / rebuild |
 
-마운트 경로 예: `/home/.agents/skills/s3/use-vault/scripts/...`
-
-## Environment / config.json
+## Environment
 
 | 키 / 변수 | 설명 |
 | --- | --- |
-| `config.json` → `ob_docs_url` / `sharing_url` | vault API base (스크립트용) |
-| `config.json` → `shared_project_name` | Secrets Manager prefix |
-| `VAULT_AGENT_TOKEN` | 스크립트 인증 (Open Agent VAULT_WRITE 경로에는 불필요) |
+| `OB_DOCS_URL` / `SHARING_URL` | vault API base |
+| `VAULT_AGENT_TOKEN` | 스크립트 인증 (Secrets Manager `agentic-work/vault-agent-token`) |

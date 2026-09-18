@@ -737,7 +737,7 @@ def main() -> int:
     )
     logger.info("Uploaded %d skill files", n_skills)
 
-    logger.info("[2/8] AgentCore Harness (use-vault + websearch, no code interpreter)")
+    logger.info("[2/8] AgentCore Harness (use-vault + websearch + code interpreter)")
     exec_role_arn = create_harness_execution_role(
         account,
         region,

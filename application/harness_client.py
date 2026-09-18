@@ -1,7 +1,8 @@
 """Bedrock AgentCore InvokeHarness client for ob-docs Open Agent.
 
-Tools: websearch (Exa) only — no code interpreter.
-Skill: use-vault (S3, guidance). Note edits: VAULT_WRITE markers (server-side).
+Tools: websearch (Exa) + code interpreter.
+Skill: use-vault (S3). Attachments: S3 + presigned URL (no full body inline).
+Note edits: VAULT_WRITE markers (server-side).
 """
 
 from __future__ import annotations
@@ -117,6 +118,11 @@ def default_invoke_tools() -> list[dict[str, Any]]:
             "name": "exa",
             "config": {"remoteMcp": {"url": "https://mcp.exa.ai/mcp"}},
         },
+        {
+            "type": "agentcore_code_interpreter",
+            "name": "code",
+            "config": {"agentCoreCodeInterpreter": {}},
+        },
     ]
 
 
@@ -153,22 +159,36 @@ def build_user_prompt(
     image_paths: Optional[list[str]] = None,
     file_paths: Optional[list[str]] = None,
 ) -> str:
+    """Build InvokeHarness user text.
+
+    Vault notes/attachments are referenced by S3 URI + presigned HTTPS URL
+    (agentic-work style) — full bodies are not inlined, to keep prompts small.
+    ``note_content`` is accepted for backward compatibility but ignored.
+    """
+    del note_content  # intentionally unused — links only
     lines = [
         "## 사용자 요청",
         (user_prompt or "").strip() or "(요청 없음)",
         "",
     ]
     if note_path:
+        ref = _vault_attachment_ref(note_path)
         lines.extend(
             [
                 "## 선택된 노트",
-                f"- path: {note_path}",
+                f"- path: {ref['path']}",
+                f"- name: {ref['name']}",
+                f"- size: {ref['size']} bytes",
+            ]
+        )
+        if ref.get("s3_uri"):
+            lines.append(f"- s3: {ref['s3_uri']}")
+        if ref.get("url"):
+            lines.append(f"- url: {ref['url']}")
+        lines.extend(
+            [
                 "",
-                "## 현재 본문",
-                "```markdown",
-                note_content if note_content is not None else "(빈 파일)",
-                "```",
-                "",
+                "본문은 프롬프트에 포함되지 않습니다. 위 url(또는 s3)에서 읽어 사용하세요.",
                 "이 노트를 수정하려면 응답에 다음 형식으로 **전체 본문**을 넣으세요:",
                 f"<<<VAULT_WRITE {note_path}>>>",
                 "# 제목",
@@ -213,6 +233,53 @@ TEXT_FILE_SUFFIXES = {
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 ATTACHED_TEXT_MAX = 80_000
 VISION_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+PRESIGN_EXPIRES_SECONDS = 3600
+
+
+def _vault_attachment_ref(rel_path: str) -> dict[str, Any]:
+    """Ensure vault file is on S3 and return path + s3_uri + presigned url (no body)."""
+    from application import vault_backend, vault_share
+
+    cleaned = (rel_path or "").replace("\\", "/").lstrip("/")
+    name = Path(cleaned).name or cleaned
+    size = 0
+    try:
+        target = vault_backend.resolve_vault_path(cleaned)
+        if target.is_file():
+            size = target.stat().st_size
+    except ValueError:
+        pass
+
+    ref: dict[str, Any] = {
+        "path": cleaned,
+        "name": name,
+        "size": size,
+        "s3_uri": None,
+        "url": None,
+    }
+    if not cleaned:
+        return ref
+
+    try:
+        vault_share.publish_vault_file_to_s3(cleaned)
+    except Exception as exc:
+        logger.warning("publish_vault_file_to_s3 failed for %s: %s", cleaned, exc)
+
+    bucket, region = vault_backend.s3_bucket_and_region()
+    if not bucket:
+        return ref
+    key = vault_backend.s3_prefix() + cleaned
+    ref["s3_uri"] = f"s3://{bucket}/{key}"
+    try:
+        client = boto3.client("s3", region_name=region)
+        ref["url"] = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": key},
+            ExpiresIn=PRESIGN_EXPIRES_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("presign failed for %s: %s", cleaned, exc)
+    return ref
 
 
 def _image_format_from_name(name: str) -> str:
@@ -298,35 +365,22 @@ def _describe_images(prompt: str, image_paths: list[str]) -> str:
 
 
 def _read_attached_file_section(path: str) -> str:
-    from application import vault_backend
-
-    name = Path(path).name
-    suffix = Path(path).suffix.lower()
-    try:
-        target = vault_backend.resolve_vault_path(path)
-    except ValueError as exc:
-        return f"### {name}\n- path: {path}\n- error: {exc}\n"
-    if not target.is_file():
-        return f"### {name}\n- path: {path}\n- error: not found\n"
-    size = target.stat().st_size
-    if suffix in IMAGE_SUFFIXES:
-        return f"### {name}\n- path: {path}\n- type: image ({size} bytes)\n"
-    if suffix not in TEXT_FILE_SUFFIXES:
-        return (
-            f"### {name}\n- path: {path}\n"
-            f"- type: binary ({size} bytes — 본문은 프롬프트에 포함되지 않음)\n"
-        )
-    try:
-        text = target.read_text(encoding="utf-8", errors="replace")
-    except Exception as exc:
-        return f"### {name}\n- path: {path}\n- error: {exc}\n"
-    if len(text) > ATTACHED_TEXT_MAX:
-        text = text[:ATTACHED_TEXT_MAX] + f"\n... (+{len(text) - ATTACHED_TEXT_MAX} chars truncated)"
-    fence = "markdown" if suffix in {".md", ".markdown"} else ""
-    return (
-        f"### {name}\n- path: {path}\n- size: {size} bytes\n\n"
-        f"```{fence}\n{text}\n```\n"
+    """Reference an attached vault file by S3/presigned URL (no body inline)."""
+    ref = _vault_attachment_ref(path)
+    lines = [
+        f"### {ref['name']}",
+        f"- path: {ref['path']}",
+        f"- size: {ref['size']} bytes",
+    ]
+    if ref.get("s3_uri"):
+        lines.append(f"- s3: {ref['s3_uri']}")
+    if ref.get("url"):
+        lines.append(f"- url: {ref['url']}")
+    lines.append(
+        "- 본문은 프롬프트에 없음. 위 url에서 읽어 사용하세요 "
+        "(code interpreter: urllib.request.urlopen)."
     )
+    return "\n".join(lines) + "\n"
 
 
 def _build_attachment_sections(
@@ -338,7 +392,18 @@ def _build_attachment_sections(
     parts: list[str] = []
     if image_paths:
         parts.append("## 첨부 이미지")
-        parts.append(_describe_images(user_prompt, image_paths))
+        # Prefer link refs; light vision describe only when few images.
+        if len(image_paths) <= 2:
+            parts.append(_describe_images(user_prompt, image_paths))
+        for path in image_paths:
+            ref = _vault_attachment_ref(path)
+            parts.append(
+                f"### {ref['name']}\n"
+                f"- path: {ref['path']}\n"
+                f"- size: {ref['size']} bytes\n"
+                + (f"- s3: {ref['s3_uri']}\n" if ref.get("s3_uri") else "")
+                + (f"- url: {ref['url']}\n" if ref.get("url") else "")
+            )
     if file_paths:
         parts.append("## 첨부 파일")
         for path in file_paths:

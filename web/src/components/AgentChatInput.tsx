@@ -39,8 +39,11 @@ type Props = {
   disabled?: boolean;
   waiting?: boolean;
   note: AgentNoteChip | null;
+  /** Extra notes added via Open agent while the panel was already open. */
+  extraNotes?: AgentNoteChip[];
   notePath?: string | null;
   onRemoveNote?: () => void;
+  onRemoveExtraNote?: (path: string) => void;
   onSend: (payload: AgentSendPayload) => void;
   onStop?: () => void;
 };
@@ -131,8 +134,10 @@ export function AgentChatInput({
   disabled,
   waiting = false,
   note,
+  extraNotes = [],
   notePath,
   onRemoveNote,
+  onRemoveExtraNote,
   onSend,
   onStop,
 }: Props) {
@@ -495,52 +500,113 @@ export function AgentChatInput({
         className="agent-chat-input-wrap"
         onSubmit={onSubmit}
       >
-        {note && (
+        {(note || extraNotes.length > 0) && (
           <div className="agent-loaded-files" aria-label="선택된 노트">
-            <div className="agent-loaded-file" title={note.path}>
-              <span className="agent-loaded-file-open">
-                <span className="agent-loaded-file-icon" aria-hidden="true">
-                  <svg width="14" height="14" viewBox="0 0 16 16">
-                    <path
-                      d="M4 2.5h5.5L12 5v8.5a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5Z"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.2"
-                    />
-                    <path
-                      d="M9.5 2.5V5H12"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.2"
-                    />
-                  </svg>
-                </span>
-                <span className="agent-loaded-file-meta">
-                  <span className="agent-loaded-file-name">{note.name}</span>
-                  {note.size > 0 && (
-                    <span className="agent-loaded-file-size">
-                      {formatFileSize(note.size)}
-                    </span>
-                  )}
-                </span>
-              </span>
-              <button
-                type="button"
-                className="agent-loaded-file-remove"
-                aria-label={`${note.name} 제거`}
-                onClick={() => onRemoveNote?.()}
-                disabled={inputDisabled}
-              >
-                ×
-              </button>
-            </div>
+            {note && (
+              <div className="agent-loaded-file" title={note.path}>
+                <a
+                  className="agent-loaded-file-open"
+                  href={api.viewUrl(note.path)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={`${note.path}\n클릭하여 새 탭에서 열기`}
+                >
+                  <span className="agent-loaded-file-icon" aria-hidden="true">
+                    <svg width="14" height="14" viewBox="0 0 16 16">
+                      <path
+                        d="M4 2.5h5.5L12 5v8.5a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5Z"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.2"
+                      />
+                      <path
+                        d="M9.5 2.5V5H12"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.2"
+                      />
+                    </svg>
+                  </span>
+                  <span className="agent-loaded-file-meta">
+                    <span className="agent-loaded-file-name">{note.name}</span>
+                    {note.size > 0 && (
+                      <span className="agent-loaded-file-size">
+                        {formatFileSize(note.size)}
+                      </span>
+                    )}
+                  </span>
+                </a>
+                <button
+                  type="button"
+                  className="agent-loaded-file-remove"
+                  aria-label={`${note.name} 제거`}
+                  onClick={() => onRemoveNote?.()}
+                  disabled={inputDisabled}
+                >
+                  ×
+                </button>
+              </div>
+            )}
+            {extraNotes.map((item) => (
+              <div key={item.path} className="agent-loaded-file" title={item.path}>
+                <a
+                  className="agent-loaded-file-open"
+                  href={api.viewUrl(item.path)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={`${item.path}\n클릭하여 새 탭에서 열기`}
+                >
+                  <span className="agent-loaded-file-icon" aria-hidden="true">
+                    <svg width="14" height="14" viewBox="0 0 16 16">
+                      <path
+                        d="M4 2.5h5.5L12 5v8.5a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5Z"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.2"
+                      />
+                      <path
+                        d="M9.5 2.5V5H12"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.2"
+                      />
+                    </svg>
+                  </span>
+                  <span className="agent-loaded-file-meta">
+                    <span className="agent-loaded-file-name">{item.name}</span>
+                    {item.size > 0 && (
+                      <span className="agent-loaded-file-size">
+                        {formatFileSize(item.size)}
+                      </span>
+                    )}
+                  </span>
+                </a>
+                <button
+                  type="button"
+                  className="agent-loaded-file-remove"
+                  aria-label={`${item.name} 제거`}
+                  onClick={() => onRemoveExtraNote?.(item.path)}
+                  disabled={inputDisabled}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
           </div>
         )}
         {attachments.length > 0 && (
           <div className="agent-attachments" aria-label="첨부 이미지">
             {attachments.map((item) => (
               <div key={item.path} className="agent-attachment" title={item.path}>
-                <img src={item.previewUrl} alt={item.name} />
+                <a
+                  className="agent-attachment-open"
+                  href={api.viewUrl(item.path)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={`${item.name}\n클릭하여 새 탭에서 열기`}
+                >
+                  <img src={item.previewUrl} alt={item.name} />
+                </a>
                 <button
                   type="button"
                   className="agent-attachment-remove"
@@ -572,7 +638,13 @@ export function AgentChatInput({
           <div className="agent-loaded-files" aria-label="첨부 파일">
             {loadedFiles.map((file) => (
               <div key={file.path} className="agent-loaded-file" title={file.path}>
-                <span className="agent-loaded-file-open">
+                <a
+                  className="agent-loaded-file-open"
+                  href={api.viewUrl(file.path)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={`${file.path}\n클릭하여 새 탭에서 열기`}
+                >
                   <span className="agent-loaded-file-icon" aria-hidden="true">
                     <svg width="14" height="14" viewBox="0 0 16 16">
                       <path
@@ -597,7 +669,7 @@ export function AgentChatInput({
                       </span>
                     )}
                   </span>
-                </span>
+                </a>
                 <button
                   type="button"
                   className="agent-loaded-file-remove"

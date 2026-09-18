@@ -6,13 +6,14 @@ import mimetypes
 import shutil
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from application.api.routes_auth import require_user_id
-from application import vault_backend, vault_index, vault_order, vault_share, vault_sync
+from application import vault_backend, vault_index, vault_order, vault_share, vault_sync, viewer_html
 
 router = APIRouter(prefix="/vault/api/files", tags=["files"])
 
@@ -20,6 +21,34 @@ HIDDEN_SKIP = {".git", ".keep", ".gitkeep"}
 # Empty folders need a marker object so they survive S3 sync / tree rebuild.
 FOLDER_KEEP_NAME = ".keep"
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+TEXT_VIEWER_EXTENSIONS = {
+    ".md",
+    ".markdown",
+    ".txt",
+    ".csv",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".xml",
+    ".html",
+    ".htm",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".rst",
+}
+INLINE_BINARY_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".pdf",
+}
+TEXT_VIEWER_MAX_BYTES = 2 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -238,6 +267,67 @@ def raw_file(request: Request, path: str) -> Response:
         raise HTTPException(status_code=404, detail="File not found")
     media, _ = mimetypes.guess_type(str(target))
     return FileResponse(target, media_type=media or "application/octet-stream")
+
+
+@router.get("/view")
+def view_vault_file(
+    request: Request,
+    path: str = Query(..., min_length=1, max_length=1024),
+    download: int = Query(0),
+):
+    """Open a vault attachment in a new browser tab (agentic-work Load-files viewer).
+
+    Markdown/text → HTML viewer; images/PDF → inline; other → download.
+    """
+    require_user_id(request)
+    try:
+        target = vault_backend.resolve_vault_path(path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    name = target.name
+    ext = target.suffix.lower()
+    force_download = bool(download)
+    encoded = quote(path, safe="")
+    download_href = f"/vault/api/files/view?path={encoded}&download=1"
+
+    if force_download or (
+        ext not in TEXT_VIEWER_EXTENSIONS and ext not in INLINE_BINARY_EXTENSIONS
+    ):
+        media, _ = mimetypes.guess_type(str(target))
+        return FileResponse(
+            target,
+            media_type=media or "application/octet-stream",
+            filename=name,
+            content_disposition_type="attachment",
+        )
+
+    if ext in INLINE_BINARY_EXTENSIONS:
+        media, _ = mimetypes.guess_type(str(target))
+        return FileResponse(
+            target,
+            media_type=media or "application/octet-stream",
+            filename=name,
+            content_disposition_type="inline",
+        )
+
+    data = target.read_bytes()
+    if len(data) > TEXT_VIEWER_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large for viewer (max {TEXT_VIEWER_MAX_BYTES} bytes)",
+        )
+    text = data.decode("utf-8", errors="replace")
+    as_markdown = ext in {".md", ".markdown"}
+    page = viewer_html.build_text_viewer_page(
+        name,
+        text,
+        as_markdown=as_markdown,
+        download_href=download_href,
+    )
+    return HTMLResponse(content=page, media_type="text/html; charset=utf-8")
 
 
 @router.post("/upload")

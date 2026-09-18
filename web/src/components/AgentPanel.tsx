@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, type AgentChatHandlers, type AgentToolEvent } from "../api";
+import { isImageFileName } from "../viewSettings";
 import {
   AgentChatInput,
   type AgentNoteChip,
@@ -13,6 +14,8 @@ export type AgentMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** Vault-relative paths attached with this user turn (images + loaded files). */
+  attachments?: string[];
   toolEvents?: AgentToolEvent[];
 };
 
@@ -25,6 +28,63 @@ type Props = {
   onResizeReset?: () => void;
   resizing?: boolean;
 };
+
+function fileNameFromPath(path: string): string {
+  const raw = path.split("?")[0].split("#")[0];
+  const name = raw.split("/").pop();
+  try {
+    return decodeURIComponent(name || path);
+  } catch {
+    return name || path;
+  }
+}
+
+function MessageAttachments({ paths }: { paths: string[] }) {
+  if (!paths.length) return null;
+
+  const images = paths.filter((p) => isImageFileName(p));
+  const files = paths.filter((p) => !isImageFileName(p));
+
+  return (
+    <>
+      {files.length > 0 && (
+        <div className="agent-message-loaded-files" aria-label="첨부 파일">
+          {files.map((path) => {
+            const label = fileNameFromPath(path);
+            return (
+              <a
+                key={path}
+                className="agent-message-loaded-file agent-message-loaded-file-link"
+                href={api.viewUrl(path)}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`${path}\n클릭하여 새 탭에서 열기`}
+              >
+                <span className="agent-message-loaded-file-name">{label}</span>
+              </a>
+            );
+          })}
+        </div>
+      )}
+      {images.length > 0 && (
+        <div className="agent-message-images" aria-label="첨부 이미지">
+          {images.map((path) => (
+            <a
+              key={path}
+              className="agent-message-image-link"
+              href={api.viewUrl(path)}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`${path}\n클릭하여 새 탭에서 열기`}
+            >
+              <img src={api.rawUrl(path)} alt={fileNameFromPath(path)} />
+            </a>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
 
 function newId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -206,9 +266,13 @@ export function AgentPanel({
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [note, setNote] = useState<AgentNoteChip | null>(null);
+  /** Additional notes from Open agent while panel is already open (do not replace). */
+  const [extraNotes, setExtraNotes] = useState<AgentNoteChip[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const streamTextRef = useRef("");
+  const noteRef = useRef<AgentNoteChip | null>(null);
+  noteRef.current = note;
 
   const flushLiveTextIntoEvents = useCallback(() => {
     const cleaned = stripVaultWriteMarkers(streamTextRef.current);
@@ -222,20 +286,31 @@ export function AgentPanel({
 
   useEffect(() => {
     let cancelled = false;
-    if (!notePath) {
-      setNote(null);
+    const path = (notePath || "").trim();
+    if (!path) {
       return;
     }
     void (async () => {
+      let chip: AgentNoteChip;
       try {
-        const meta = await api.agentNoteMeta(notePath);
+        const meta = await api.agentNoteMeta(path);
         if (cancelled) return;
-        setNote({ path: meta.path, name: meta.name, size: meta.size });
+        chip = { path: meta.path, name: meta.name, size: meta.size };
       } catch {
         if (cancelled) return;
-        const name = notePath.split("/").pop() || notePath;
-        setNote({ path: notePath, name, size: 0 });
+        const name = path.split("/").pop() || path;
+        chip = { path, name, size: 0 };
       }
+      const primary = noteRef.current;
+      if (!primary) {
+        setNote(chip);
+        return;
+      }
+      if (primary.path === chip.path) return;
+      setExtraNotes((prev) => {
+        if (prev.some((n) => n.path === chip.path)) return prev;
+        return [...prev, chip];
+      });
     })();
     return () => {
       cancelled = true;
@@ -256,13 +331,28 @@ export function AgentPanel({
     async (payload: AgentSendPayload) => {
       const text = (payload.text || "").trim();
       const imagePaths = payload.imagePaths || [];
-      const filePaths = payload.filePaths || [];
+      const filePaths = [
+        ...extraNotes.map((n) => n.path),
+        ...(payload.filePaths || []),
+      ];
+      // Selected note chip (Open agent) + extras + Load-files / images.
+      const attachments: string[] = [];
+      const seen = new Set<string>();
+      for (const path of [note?.path, ...imagePaths, ...filePaths]) {
+        const p = (path || "").trim();
+        if (!p || seen.has(p)) continue;
+        seen.add(p);
+        attachments.push(p);
+      }
       const display =
         text ||
-        (imagePaths.length || filePaths.length
+        (attachments.length
           ? [
               imagePaths.length ? `이미지 ${imagePaths.length}개` : "",
               filePaths.length ? `파일 ${filePaths.length}개` : "",
+              !text && note?.path && !imagePaths.length && !filePaths.length
+                ? note.name
+                : "",
             ]
               .filter(Boolean)
               .join(", ")
@@ -272,6 +362,7 @@ export function AgentPanel({
         id: newId(),
         role: "user",
         content: display || "(첨부)",
+        attachments: attachments.length > 0 ? attachments : undefined,
       };
       setMessages((prev) => [...prev, userMsg]);
       setStreaming(true);
@@ -367,7 +458,15 @@ export function AgentPanel({
         abortRef.current = null;
       }
     },
-    [note?.path, modelName, onNoteUpdated, sessionId, flushLiveTextIntoEvents],
+    [
+      note?.path,
+      note?.name,
+      extraNotes,
+      modelName,
+      onNoteUpdated,
+      sessionId,
+      flushLiveTextIntoEvents,
+    ],
   );
 
   return (
@@ -412,6 +511,9 @@ export function AgentPanel({
           )}
           {messages.map((m) => (
             <div key={m.id} className={`agent-message-row ${m.role}`}>
+              {m.role === "user" && m.attachments && m.attachments.length > 0 && (
+                <MessageAttachments paths={m.attachments} />
+              )}
               {m.role === "assistant" && m.toolEvents && m.toolEvents.length > 0 ? (
                 <MessageTimeline content={m.content} toolEvents={m.toolEvents} />
               ) : (
@@ -444,9 +546,13 @@ export function AgentPanel({
       </div>
       <AgentChatInput
         note={note}
+        extraNotes={extraNotes}
         notePath={notePath}
         waiting={streaming}
         onRemoveNote={() => setNote(null)}
+        onRemoveExtraNote={(path) =>
+          setExtraNotes((prev) => prev.filter((n) => n.path !== path))
+        }
         onSend={(payload) => void send(payload)}
         onStop={stop}
       />

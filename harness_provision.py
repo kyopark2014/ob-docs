@@ -1,7 +1,8 @@
 """Provision AgentCore Harness for ob-docs Open Agent.
 
-Default tools: websearch (Exa remote_mcp) only — no code interpreter.
-Default skill: ``use-vault`` (S3). Note saves use server-side VAULT_WRITE markers.
+Default tools: websearch (Exa) + code interpreter (harness-work style).
+Default skill: ``use-vault`` (S3). Scripts run via code interpreter; VAULT_WRITE
+markers remain as a fast path for selected-note edits.
 """
 
 from __future__ import annotations
@@ -39,20 +40,30 @@ WEBSEARCH_TOOL: dict[str, Any] = {
     "config": {"remoteMcp": {"url": "https://mcp.exa.ai/mcp"}},
 }
 
-DEFAULT_HARNESS_TOOLS: list[dict[str, Any]] = [WEBSEARCH_TOOL]
+CODE_INTERPRETER_TOOL: dict[str, Any] = {
+    "type": "agentcore_code_interpreter",
+    "name": "code",
+    "config": {"agentCoreCodeInterpreter": {}},
+}
+
+DEFAULT_HARNESS_TOOLS: list[dict[str, Any]] = [
+    WEBSEARCH_TOOL,
+    CODE_INTERPRETER_TOOL,
+]
 
 _SYSTEM_PROMPT_TEMPLATE = """당신은 ob-docs vault의 마크다운 노트를 도와주는 에디터 에이전트입니다.
 한국어로 답변하세요. 모르는 내용은 추측하지 마세요.
 
 ## 역할
-- 사용자 메시지에 포함된 선택 노트 본문을 읽고, 요약·설명·수정 요청에 응합니다.
-- vault 규칙·경로 관례가 필요하면 **use-vault** skill 지침을 로드하세요 (`skills` 도구).
+- 선택/첨부 노트는 **본문 전체가 프롬프트에 없습니다.** path · s3 · **url(presigned)** 만 전달됩니다.
+- 내용이 필요하면 code interpreter에서 `urllib.request.urlopen(url)`로 url을 읽어 사용하세요.
+- vault 규칙이 필요하면 **use-vault** skill을 로드하세요.
 - 최신 정보·사실 확인이 필요하면 **websearch(exa)** MCP 도구로 검색하세요.
-- **code interpreter / shell 은 없습니다.** 스크립트를 실행하려 하지 마세요.
+- **skill 스크립트 절대 경로(`/home/.agents/...`)는 CI에 없을 수 있으니 실행하지 마세요.**
 
 ## 노트 수정 (필수 형식)
 노트를 저장·덮어쓸 때는 응답에 아래 마커 블록을 **그대로** 포함하세요.
-서버가 마커를 파싱해 vault에 저장합니다. (use-vault 스크립트 실행 아님)
+서버가 마커를 파싱해 vault에 저장합니다.
 
 <<<VAULT_WRITE path/to/note.md>>>
 # 제목
@@ -65,7 +76,8 @@ _SYSTEM_PROMPT_TEMPLATE = """당신은 ob-docs vault의 마크다운 노트를 �
 - 읽기만 할 때는 마커를 넣지 마세요.
 
 ## 규칙
-- skill: use-vault · 도구: websearch(exa) · code interpreter 금지
+- skill: use-vault · 도구: websearch(exa) + code interpreter
+- 첨부는 url로 읽고, 저장은 VAULT_WRITE 마커를 사용하세요
 - 모르는 내용은 추측하지 마세요.
 """
 
@@ -502,7 +514,7 @@ def ensure_harness_tools_and_skills(
     *,
     s3_bucket: str,
 ) -> None:
-    """Keep tools = websearch only; skills = use-vault (no code interpreter)."""
+    """Keep tools = websearch + code; skills = use-vault."""
     desired_tools = default_harness_tools()
     desired_skills = build_use_vault_skills(s3_bucket)
     h = control.get_harness(harnessId=harness_id)["harness"]
@@ -530,9 +542,9 @@ def ensure_harness_tools_and_skills(
         desired_skills
     )
     if tools_ok and skills_ok:
-        logger.info("  Harness tools/skills already websearch + use-vault (no code)")
+        logger.info("  Harness tools/skills already exa + code + use-vault")
         return
-    logger.info("  Updating harness tools/skills → websearch + use-vault, no code")
+    logger.info("  Updating harness tools/skills → exa + code + use-vault")
     update_harness_safe(
         control,
         harness_id,
@@ -590,7 +602,7 @@ def create_or_get_harness(
     sharing_url: str = "",
     shared_project: str = "agentic-work",
 ) -> dict[str, str]:
-    """Create PUBLIC harness with websearch + use-vault (no code interpreter)."""
+    """Create PUBLIC harness with websearch + code interpreter + use-vault."""
     control = _control_client(region)
     harness_api_name = harness_name_for_api(project)
     logger.info("Creating/reusing harness %s", harness_api_name)

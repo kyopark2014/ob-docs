@@ -204,6 +204,9 @@ export const api = {
   },
   rawUrl: (path: string) =>
     `${BASE}/files/raw?path=${encodeURIComponent(path)}`,
+  /** Authenticated HTML viewer (new tab) for vault attachments — agentic-work style. */
+  viewUrl: (path: string) =>
+    `${BASE}/files/view?path=${encodeURIComponent(path)}`,
   search: (q: string) =>
     request<{ query: string; results: SearchHit[] }>(
       `/search?q=${encodeURIComponent(q)}`,

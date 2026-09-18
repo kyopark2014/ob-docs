@@ -129,7 +129,8 @@ Open Agent 사용법·동작은 [Agent로 Note 수정하기](#agent로-note-수�
 ## Agent로 Note 수정하기
 
 선택한 마크다운 노트를 **Bedrock AgentCore InvokeHarness**로 요약·수정합니다.  
-code interpreter는 쓰지 않고, 웹 검색(Exa)과 vault 저장 마커(`VAULT_WRITE`)만 사용합니다.
+웹 검색(Exa)·code interpreter를 쓸 수 있고, vault 저장은 **`VAULT_WRITE` 마커**(서버 파싱)를 사용합니다.  
+첨부/선택 노트는 **본문 전체를 넣지 않고** S3 업로드 후 **presigned URL·s3 URI**만 전달합니다 (agentic-work와 유사).
 
 ### 여는 방법
 
@@ -145,8 +146,8 @@ code interpreter는 쓰지 않고, 웹 검색(Exa)과 vault 저장 마커(`VAULT
 | 항목 | 내용 |
 |---|---|
 | Runtime | AgentCore **InvokeHarness** (`HARNESS_ARN`, installer가 `ob_docs` harness 생성) |
-| Skill | **use-vault** — vault 경로·본문 규칙·저장 형식 지침 (S3 `skills/use-vault/`) |
-| MCP / tools | **websearch** — Exa `remote_mcp` (`exa`만, code interpreter 없음) |
+| Skill | **use-vault** — vault 경로·본문 규칙·`VAULT_WRITE` 형식 (S3 `skills/use-vault/`) |
+| MCP / tools | **websearch** (Exa `remote_mcp`) + **code interpreter** (일반 계산; skill 스크립트 경로 실행은 비권장) |
 | 모델 | 좌측 rail 하단 **Model** 아이콘(Settings 바로 위)에서 선택 (기본 `Claude 4.6 Sonnet`, localStorage 저장) |
 | 세션 | 채팅 `session_id`로 harness 대화 이어가기 |
 
@@ -158,7 +159,7 @@ code interpreter는 쓰지 않고, 웹 검색(Exa)과 vault 저장 마커(`VAULT
 UI (Agent 패널)
   → POST /vault/api/agent/chat  (SSE)
   → build_user_prompt (선택 노트 본문 + 첨부)
-  → InvokeHarness (model override + exa + use-vault)
+  → InvokeHarness (model override + exa + code + use-vault)
   → 스트림: token / text / tool / tool_result
   → 응답의 VAULT_WRITE 파싱 → vault 파일 저장
   → note_updated → 열린 탭 다시 로드
@@ -166,13 +167,13 @@ UI (Agent 패널)
 
 1. **선택 노트**: 입력창 칩으로 경로·크기가 보이고, 본문 전체가 프롬프트에 포함됩니다.
 2. **모델**: rail Model에서 고른 display name이 `model_name`으로 전달되고, 서버가 Bedrock `modelId`로 변환해 InvokeHarness `model`에 넣습니다.
-3. **웹 검색**: 필요 시 harness가 Exa MCP를 호출합니다. UI에는 harness-work 스타일 **tool / tool_result** 카드가 타임라인에 표시됩니다.
+3. **웹 검색 / code**: 필요 시 Exa MCP 또는 code interpreter를 호출합니다. UI에는 harness-work 스타일 **tool / tool_result** 카드가 타임라인에 표시됩니다.
 4. **최종 답변**: tool 카드 **아래**에 텍스트가 오도록 서버·클라이언트가 타임라인을 맞춥니다.
 
 ### 노트 저장 (`VAULT_WRITE`)
 
-code interpreter가 없으므로 에이전트는 스크립트로 vault에 쓰지 않습니다.  
-응답에 아래 마커를 넣으면 **ob-docs 서버**가 선택 노트 경로만 덮어씁니다.
+응답에 아래 마커를 넣으면 **ob-docs 서버**가 선택 노트 경로만 덮어씁니다.  
+(CI 샌드박스에는 harness skill 마운트가 없을 수 있어, Open Agent는 스크립트 절대 경로 실행 대신 이 마커를 씁니다.)
 
 ```text
 <<<VAULT_WRITE Meeting/Weekly-Sync.md>>>
@@ -338,7 +339,7 @@ python installer.py
    - ECS cluster `cluster-for-agentic-work`
    - 기존 ALB/ECS가 없으면 최소 VPC + `alb-for-agentic-work` 생성
 1. **skills 업로드** (`use-vault` → `s3://…/skills/`)
-2. **AgentCore Harness** (`ob_docs`, skill=`use-vault`, MCP=`websearch`, **no code interpreter**) → `HARNESS_ARN`
+2. **AgentCore Harness** (`ob_docs`, skill=`use-vault`, tools=`exa` + `code`) → `HARNESS_ARN`
 3. ECR `ecr-for-ob-docs` 빌드/푸시
 4. ALB rule `/vault*` → `TG-for-ob-docs`  
    (CloudFront HTTPS면 origin header 조건 유지, ALB HTTP면 path only)

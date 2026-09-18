@@ -1,4 +1,4 @@
-"""Open Agent chat — SSE over InvokeHarness (exa + use-vault skill, no code interpreter)."""
+"""Open Agent chat — SSE over InvokeHarness (exa + code interpreter + use-vault)."""
 
 from __future__ import annotations
 
@@ -137,7 +137,7 @@ def agent_health() -> dict:
         "harnessArn": arn or None,
         "skills": ["use-vault"],
         "mcp": ["websearch"],
-        "tools": ["exa"],
+        "tools": ["exa", "code"],
         "models": catalog["models"],
         "default_model": catalog["default_model"],
     }
@@ -203,17 +203,33 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
         )
 
     note_content: Optional[str] = None
+    # Bodies are not inlined anymore (S3 + presigned URL). Skip reading the full note.
     if note_path:
-        note_content, _ = _read_note(note_path)
+        note_content = None
 
     session_id = harness_client.normalize_session_id(body.session_id)
     model_name = model_catalog.normalize_model_name(body.model_name)
+    logger.info(
+        "agent chat note_path=%r model=%s images=%d files=%d prompt_chars=%d session=%s",
+        note_path,
+        model_name,
+        len(image_paths),
+        len(file_paths),
+        len(prompt),
+        session_id,
+    )
     full_prompt = harness_client.build_user_prompt(
         prompt,
         note_path=note_path,
         note_content=note_content,
         image_paths=image_paths,
         file_paths=file_paths,
+    )
+    logger.info(
+        "agent chat built_prompt_chars=%d note_path=%r files=%d",
+        len(full_prompt),
+        note_path,
+        len(file_paths),
     )
 
     def event_stream() -> Generator[str, None, None]:
