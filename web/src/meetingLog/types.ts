@@ -14,7 +14,7 @@ export type BatchEntry = {
   start?: number;
 };
 
-export type MeetingView = "live" | "batch" | "compare";
+export type MeetingView = "live" | "batch";
 
 export type InterimState = {
   speaker: string;

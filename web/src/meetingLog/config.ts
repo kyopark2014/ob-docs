@@ -22,9 +22,10 @@ export const MEETING_LOG_CONFIG: MeetingLogConfig = {
 };
 
 export const TARGET_SAMPLE_RATE = 16000;
-export const SPEAKERS = ["A", "B", "C", "D"] as const;
+export const SPEAKERS = ["A", "B", "C", "D", "E", "F"] as const;
 export type SpeakerId = (typeof SPEAKERS)[number];
 
+export const DEFAULT_MEETING_TITLE = "제목없음";
 export const MEETING_FOLDER = "Meeting";
 export const STORAGE_KEY = "ob-docs:meeting-log-entries-v1";
 export const BATCH_STORAGE_KEY = "ob-docs:meeting-log-batch-v1";

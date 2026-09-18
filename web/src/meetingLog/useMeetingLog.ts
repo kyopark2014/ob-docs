@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { encodeWav, floatTo16BitPcm, recordedSeconds } from "./audio";
 import {
   BATCH_STORAGE_KEY,
+  DEFAULT_MEETING_TITLE,
   MEETING_LOG_CONFIG,
   SPEAKERS,
   STORAGE_KEY,
@@ -52,6 +53,7 @@ export function useMeetingLog() {
   const [canSaveVault, setCanSaveVault] = useState(false);
   const [savingVault, setSavingVault] = useState(false);
   const [recordedAt, setRecordedAt] = useState<Date>(() => new Date());
+  const [title, setTitle] = useState(DEFAULT_MEETING_TITLE);
 
   const wantListenRef = useRef(false);
   const listeningRef = useRef(false);
@@ -59,18 +61,27 @@ export function useMeetingLog() {
   const pinnedSpeakerRef = useRef(pinnedSpeaker);
   const viewRef = useRef(view);
   const entriesRef = useRef(entries);
+  const batchEntriesRef = useRef(batchEntries);
+  const recordedAtRef = useRef(recordedAt);
   const pcmChunksRef = useRef<Uint8Array[]>([]);
+  /** Seconds from meeting start to the current recording segment (wall-clock). */
+  const sessionOffsetRef = useRef(0);
+  /** Offset captured when the current segment's batch job is queued. */
+  const pendingBatchOffsetRef = useRef(0);
   const seenFinalIdsRef = useRef(new Set<string>());
   const socketRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const batchBusyRef = useRef(false);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
   autoSpeakerRef.current = autoSpeaker;
   pinnedSpeakerRef.current = pinnedSpeaker;
   viewRef.current = view;
   entriesRef.current = entries;
+  batchEntriesRef.current = batchEntries;
+  recordedAtRef.current = recordedAt;
   listeningRef.current = listening;
   batchBusyRef.current = batchBusy;
 
@@ -149,24 +160,30 @@ export function useMeetingLog() {
   const addEntry = useCallback((text: string, speaker: string, start?: number) => {
     const cleaned = String(text || "").trim();
     if (!cleaned) return;
+    const now = Date.now();
+    // Prefer Transcribe offset within this segment, shifted to meeting timeline.
+    const meetingStart =
+      start != null && Number.isFinite(start)
+        ? sessionOffsetRef.current + Math.max(0, start)
+        : (now - recordedAtRef.current.getTime()) / 1000;
     setEntries((prev) => {
       const last = prev[prev.length - 1];
       if (
         last &&
         last.text === cleaned &&
         last.speaker === speaker &&
-        Date.now() - last.at < 1500
+        now - last.at < 1500
       ) {
         return prev;
       }
       return [
         ...prev,
         {
-          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          id: `${now}-${Math.random().toString(16).slice(2)}`,
           speaker,
           text: cleaned,
-          at: Date.now(),
-          start,
+          at: now,
+          start: meetingStart,
         },
       ];
     });
@@ -264,6 +281,7 @@ export function useMeetingLog() {
   }, []);
 
   const startAudioCapture = useCallback(async () => {
+    // Each mic-on starts a fresh audio segment (do not concatenate pause gaps).
     pcmChunksRef.current = [];
     setHasRecordedAudio(false);
     const mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -306,10 +324,12 @@ export function useMeetingLog() {
     setBatchBusy(true);
     setCanSaveVault(false);
     const seconds = recordedSeconds(pcmChunksRef.current);
-    setStatus(`전체 음성을 올리는 중… (${seconds.toFixed(0)}초)`);
+    const segmentOffset = pendingBatchOffsetRef.current;
+    const chunks = pcmChunksRef.current.slice();
+    setStatus(`이번 녹음(${seconds.toFixed(0)}초)을 올리는 중…`);
 
     try {
-      const wav = encodeWav(pcmChunksRef.current);
+      const wav = encodeWav(chunks);
       const signedRes = await fetch(apiUploadUrl, { cache: "no-store" });
       const signed = (await signedRes.json().catch(() => ({}))) as {
         uploadUrl?: string;
@@ -367,29 +387,64 @@ export function useMeetingLog() {
         throw new Error("배치 변환이 시간 안에 끝나지 않았습니다. 잠시 후 다시 시도하세요.");
       }
 
-      const nextBatch = Array.isArray(result.entries) ? result.entries : [];
-      setBatchEntries(nextBatch);
+      const segmentEntries = (Array.isArray(result.entries) ? result.entries : []).map(
+        (entry) => ({
+          ...entry,
+          start:
+            entry.start != null && Number.isFinite(entry.start)
+              ? segmentOffset + Number(entry.start)
+              : segmentOffset,
+        }),
+      );
+      // Append this segment's text; do not replace earlier segments.
+      setBatchEntries((prev) => [...prev, ...segmentEntries]);
+      pcmChunksRef.current = [];
+      setHasRecordedAudio(false);
       setView("batch");
-      setCanSaveVault(nextBatch.length > 0 || entriesRef.current.length > 0);
-      const mismatches = entriesRef.current.filter((live, i) => {
-        const batch = nextBatch[i];
-        return batch && live.speaker !== batch.speaker;
-      }).length;
+      setCanSaveVault(true);
       setStatus(
-        `회의 내용 정리가 끝났습니다. 화자 차이 ${mismatches}곳. Vault에 저장할 수 있습니다.`,
+        `배치 변환이 끝났습니다. 이번 ${segmentEntries.length}개 구간 추가. Vault에 저장할 수 있습니다.`,
       );
     } catch (err) {
       console.error(err);
       const raw = String(err instanceof Error ? err.message : err || "");
       setStatus(
         raw === "Failed to fetch"
-          ? "전체 변환 요청이 네트워크/CORS에서 막혔습니다. 새로고침 후 다시 시도하세요."
-          : raw || "전체 변환 중 오류가 났습니다.",
+          ? "배치 변환 요청이 네트워크/CORS에서 막혔습니다. 새로고침 후 다시 시도하세요."
+          : raw || "배치 변환 중 오류가 났습니다.",
       );
     } finally {
       setBatchBusy(false);
     }
   }, []);
+
+  const releaseWakeLock = useCallback(async () => {
+    const lock = wakeLockRef.current;
+    wakeLockRef.current = null;
+    if (!lock) return;
+    try {
+      await lock.release();
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const requestWakeLock = useCallback(async () => {
+    if (!wantListenRef.current) return;
+    if (!("wakeLock" in navigator) || typeof navigator.wakeLock?.request !== "function") {
+      return;
+    }
+    try {
+      await releaseWakeLock();
+      const lock = await navigator.wakeLock.request("screen");
+      wakeLockRef.current = lock;
+      lock.addEventListener("release", () => {
+        if (wakeLockRef.current === lock) wakeLockRef.current = null;
+      });
+    } catch {
+      // Unsupported, denied, or battery saver — recording still works.
+    }
+  }, [releaseWakeLock]);
 
   const stopListening = useCallback(
     (opts?: { silent?: boolean; autoBatch?: boolean }) => {
@@ -397,14 +452,16 @@ export function useMeetingLog() {
       const autoBatch = opts?.autoBatch ?? true;
       wantListenRef.current = false;
       setListening(false);
+      void releaseWakeLock();
       stopAudioCapture();
       closeSocket();
       setInterim(null);
       const ready = recordedSeconds(pcmChunksRef.current) >= 1;
       setHasRecordedAudio(ready);
+      pendingBatchOffsetRef.current = sessionOffsetRef.current;
       if (!silent) {
         const extra = ready
-          ? " 전체 음성을 Transcribe로 보내 회의 내용을 정리합니다."
+          ? " 이번 녹음을 배치 변환합니다."
           : "";
         setStatus(
           entriesRef.current.length
@@ -416,7 +473,7 @@ export function useMeetingLog() {
         void runBatchTranscribe();
       }
     },
-    [closeSocket, runBatchTranscribe, stopAudioCapture],
+    [closeSocket, releaseWakeLock, runBatchTranscribe, stopAudioCapture],
   );
 
   const startListening = useCallback(async () => {
@@ -433,8 +490,30 @@ export function useMeetingLog() {
     setListening(true);
     setView("live");
     setCanSaveVault(false);
-    setRecordedAt(new Date());
-    setStatus("Transcribe 스트림을 준비하는 중…");
+    seenFinalIdsRef.current.clear();
+    void requestWakeLock();
+
+    // Fresh audio each time; keep prior transcript text and meeting clock.
+    const continuing =
+      entriesRef.current.length > 0 || batchEntriesRef.current.length > 0;
+
+    if (!continuing) {
+      const now = new Date();
+      setRecordedAt(now);
+      recordedAtRef.current = now;
+      sessionOffsetRef.current = 0;
+    } else {
+      sessionOffsetRef.current = Math.max(
+        0,
+        (Date.now() - recordedAtRef.current.getTime()) / 1000,
+      );
+    }
+
+    setStatus(
+      continuing
+        ? "새 녹음을 시작합니다. 이전 대화 텍스트는 유지됩니다…"
+        : "Transcribe 스트림을 준비하는 중…",
+    );
 
     try {
       const res = await fetch(MEETING_LOG_CONFIG.apiStreamUrl, { cache: "no-store" });
@@ -466,7 +545,7 @@ export function useMeetingLog() {
           return;
         }
         setListening(true);
-        setStatus("듣고 있습니다. 실시간 기록과 함께 전체 음성도 저장합니다.");
+        setStatus("듣고 있습니다. 실시간 기록 중…");
       };
       socket.onmessage = (event) => {
         try {
@@ -517,6 +596,7 @@ export function useMeetingLog() {
   }, [
     closeSocket,
     handleTranscriptPayload,
+    requestWakeLock,
     startAudioCapture,
     stopAudioCapture,
     stopListening,
@@ -544,7 +624,7 @@ export function useMeetingLog() {
   const selectSpeakerMode = useCallback((value: string) => {
     if (value === "auto") {
       setAutoSpeaker(true);
-      setStatus("Amazon Transcribe 화자 분리(spk_0…)를 A–D로 표시합니다.");
+      setStatus("Amazon Transcribe 화자 분리(spk_0…)를 A–F로 표시합니다.");
     } else {
       setAutoSpeaker(false);
       setPinnedSpeaker(value as SpeakerId);
@@ -561,16 +641,19 @@ export function useMeetingLog() {
     setBatchEntries([]);
     seenFinalIdsRef.current.clear();
     pcmChunksRef.current = [];
+    sessionOffsetRef.current = 0;
+    pendingBatchOffsetRef.current = 0;
     setHasRecordedAudio(false);
     setCanSaveVault(false);
     setInterim(null);
+    setTitle(DEFAULT_MEETING_TITLE);
     setStatus("기록을 지웠습니다. 마이크를 눌러 다시 시작하세요.");
     return true;
   }, [batchEntries.length]);
 
   const copyLog = useCallback(async () => {
     const text = entriesToCopyText(view, entries, batchEntries);
-    if (!text || text === "# 실시간\t전체") {
+    if (!text) {
       setStatus("복사할 기록이 없습니다.");
       return;
     }
@@ -583,12 +666,20 @@ export function useMeetingLog() {
   }, [batchEntries, entries, view]);
 
   useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "visible" && wantListenRef.current) {
+        void requestWakeLock();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
       wantListenRef.current = false;
+      void releaseWakeLock();
       stopAudioCapture();
       closeSocket();
     };
-  }, [closeSocket, stopAudioCapture]);
+  }, [closeSocket, releaseWakeLock, requestWakeLock, stopAudioCapture]);
 
   const batchReady =
     hasRecordedAudio &&
@@ -613,6 +704,8 @@ export function useMeetingLog() {
     savingVault,
     setSavingVault,
     recordedAt,
+    title,
+    setTitle,
     batchReady,
     toggleListening,
     stopListening,

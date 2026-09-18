@@ -1,5 +1,6 @@
+import { useEffect, useRef, useState } from "react";
 import type { MeetingLogController } from "../meetingLog/useMeetingLog";
-import { SPEAKERS } from "../meetingLog/config";
+import { DEFAULT_MEETING_TITLE, SPEAKERS } from "../meetingLog/config";
 
 type Props = {
   meeting: MeetingLogController;
@@ -18,18 +19,46 @@ export function MeetingLogSidebar({
     status,
     listening,
     batchBusy,
-    batchReady,
     autoSpeaker,
     pinnedSpeaker,
     view,
     setView,
+    title,
+    setTitle,
     canSaveVault,
     savingVault,
     toggleListening,
-    runBatchTranscribe,
     selectSpeakerMode,
     copyLog,
   } = meeting;
+
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [draftTitle, setDraftTitle] = useState(title);
+  const titleInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!editingTitle) setDraftTitle(title);
+  }, [title, editingTitle]);
+
+  useEffect(() => {
+    if (!editingTitle) return;
+    const el = titleInputRef.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+  }, [editingTitle]);
+
+  const commitTitle = () => {
+    const next = draftTitle.trim() || DEFAULT_MEETING_TITLE;
+    setTitle(next);
+    setDraftTitle(next);
+    setEditingTitle(false);
+  };
+
+  const cancelTitleEdit = () => {
+    setDraftTitle(title);
+    setEditingTitle(false);
+  };
 
   return (
     <div className="meeting-sidebar">
@@ -64,6 +93,44 @@ export function MeetingLogSidebar({
       </div>
 
       <div className="meeting-sidebar-body">
+        <div className="meeting-title-field">
+          {editingTitle ? (
+            <input
+              ref={titleInputRef}
+              type="text"
+              className="meeting-title-input"
+              value={draftTitle}
+              placeholder={DEFAULT_MEETING_TITLE}
+              maxLength={60}
+              aria-label="회의 제목 수정"
+              onChange={(e) => setDraftTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitTitle();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  cancelTitleEdit();
+                }
+              }}
+              onBlur={cancelTitleEdit}
+            />
+          ) : (
+            <button
+              type="button"
+              className="meeting-title-display"
+              title="클릭하여 제목 수정"
+              aria-label="회의 제목 수정"
+              onClick={() => {
+                setDraftTitle(title);
+                setEditingTitle(true);
+              }}
+            >
+              {title.trim() || DEFAULT_MEETING_TITLE}
+            </button>
+          )}
+        </div>
+
         <p className="meeting-hint">
           마이크를 누르면 실시간으로 기록합니다. 녹음이 끝나면 전체 음성을 AWS
           Transcribe로 다시 보내 회의 내용을 정리합니다.
@@ -115,32 +182,25 @@ export function MeetingLogSidebar({
           </button>
         </div>
 
-        <div className="meeting-view-row" role="group" aria-label="기록 보기">
-          {(
-            [
-              ["live", "실시간"],
-              ["batch", "전체"],
-              ["compare", "비교"],
-            ] as const
-          ).map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              className={`meeting-view-btn${view === id ? " active" : ""}`}
-              aria-pressed={view === id}
-              onClick={() => setView(id)}
-            >
-              {label}
-            </button>
-          ))}
-          <button
-            type="button"
-            className="meeting-batch-btn"
-            disabled={!batchReady}
-            onClick={() => void runBatchTranscribe()}
-          >
-            {batchBusy ? "정리 중…" : "전체 변환"}
-          </button>
+        <div className="meeting-controls">
+          <div className="meeting-view-seg" role="group" aria-label="기록 보기">
+            {(
+              [
+                ["live", "실시간"],
+                ["batch", "배치"],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                className={`meeting-view-btn${view === id ? " active" : ""}`}
+                aria-pressed={view === id}
+                onClick={() => setView(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {canSaveVault && (

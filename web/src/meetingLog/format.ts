@@ -42,12 +42,55 @@ export function extractTitleFromEntries(
   return raw || "회의록";
 }
 
+/** Max characters for vault filename / markdown heading title. */
+export const MEETING_TITLE_MAX_LEN = 30;
+
+const TITLE_END_PUNCT = /[.!?。！？]/u;
+
+/**
+ * Truncate a meeting title to `maxLen` characters.
+ * Prefer the first sentence-ending punctuation within the window;
+ * otherwise (when over max) cut at the last whitespace that still makes a title.
+ */
+export function truncateMeetingTitle(
+  text: string,
+  maxLen = MEETING_TITLE_MAX_LEN,
+): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+
+  const window =
+    normalized.length <= maxLen ? normalized : normalized.slice(0, maxLen);
+
+  let cut = window.length;
+  let stripEndPunct = true;
+
+  // Prefer first period / sentence ender before maxLen (title = opening clause)
+  const punctMatch = TITLE_END_PUNCT.exec(window);
+  if (punctMatch && punctMatch.index != null && punctMatch.index > 0) {
+    cut = punctMatch.index + punctMatch[0].length;
+  } else if (normalized.length > maxLen) {
+    // Soft title break: last space (avoid cutting too early)
+    const spaceIdx = window.lastIndexOf(" ");
+    const minSoft = Math.max(8, Math.floor(maxLen * 0.4));
+    if (spaceIdx >= minSoft) {
+      cut = spaceIdx;
+      stripEndPunct = false;
+    }
+  }
+
+  let out = window.slice(0, cut).trim();
+  if (stripEndPunct) {
+    out = out.replace(/[.!?。！？]+$/u, "").trim();
+  }
+  return out;
+}
+
 export function sanitizeMeetingFilename(title: string): string {
-  const cleaned = title
-    .replace(/[\\/:*?"<>|#]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 120);
+  const cleaned = truncateMeetingTitle(
+    title.replace(/[\\/:*?"<>|#]/g, ""),
+    MEETING_TITLE_MAX_LEN,
+  );
   return cleaned || "회의록";
 }
 
@@ -118,26 +161,12 @@ export function buildMeetingMarkdown(
 }
 
 export function entriesToCopyText(
-  view: "live" | "batch" | "compare",
+  view: "live" | "batch",
   live: MeetingEntry[],
   batch: BatchEntry[],
 ): string {
   if (view === "batch") {
     return batch.map((item) => `[${item.speaker}] ${item.text}`).join("\n");
-  }
-  if (view === "compare") {
-    const n = Math.max(live.length, batch.length);
-    const lines = ["# 실시간\t전체"];
-    for (let i = 0; i < n; i += 1) {
-      const left = live[i];
-      const right = batch[i];
-      lines.push(
-        `${left ? `[${left.speaker}] ${left.text}` : "(없음)"}\t${
-          right ? `[${right.speaker}] ${right.text}` : "(없음)"
-        }`,
-      );
-    }
-    return lines.join("\n");
   }
   return live.map((item) => `[${item.speaker}] ${item.text}`).join("\n");
 }

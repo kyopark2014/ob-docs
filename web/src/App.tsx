@@ -40,7 +40,7 @@ import {
 } from "./components/Icons";
 import { MeetingLogSidebar } from "./components/MeetingLogSidebar";
 import { MeetingLogView } from "./components/MeetingLogView";
-import { MEETING_FOLDER } from "./meetingLog/config";
+import { MEETING_FOLDER, DEFAULT_MEETING_TITLE } from "./meetingLog/config";
 import {
   buildMeetingMarkdown,
   extractTitleFromEntries,
@@ -1136,7 +1136,11 @@ export default function App() {
     }
     meeting.setSavingVault(true);
     try {
-      const title = extractTitleFromEntries(source);
+      const typed = meeting.title.trim();
+      const title =
+        typed && typed !== DEFAULT_MEETING_TITLE
+          ? typed
+          : extractTitleFromEntries(source);
       const baseName = meetingFileBaseName(title, meeting.recordedAt);
       const path = uniqueNamedPath(MEETING_FOLDER, baseName, treeRef.current);
       const md = buildMeetingMarkdown(title, source, meeting.recordedAt);
@@ -2047,7 +2051,7 @@ export default function App() {
             onClearConfirm={async () =>
               askConfirm({
                 title: "기록 지우기",
-                message: "실시간·전체 변환 기록을 모두 지울까요?",
+                message: "실시간·배치 변환 기록을 모두 지울까요?",
                 confirmLabel: "지우기",
                 danger: true,
               })
