@@ -2665,7 +2665,7 @@ a.agent-message-loaded-file-link:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 0 2px 4px;
+  padding: 0 2px 6px;
 }
 
 .agent-loaded-file {
@@ -2676,7 +2676,7 @@ a.agent-message-loaded-file-link:focus-visible {
   padding: 8px 10px;
   border-radius: 10px;
   border: 1px solid var(--border);
-  background: var(--bg);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .agent-loaded-file-open {
@@ -2710,7 +2710,7 @@ button.agent-loaded-file-open:focus-visible {
 
 .agent-loaded-file-icon {
   flex-shrink: 0;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   display: inline-flex;
 }
 
@@ -2741,15 +2741,19 @@ button.agent-loaded-file-open:focus-visible {
   height: 22px;
   border: none;
   border-radius: 50%;
-  background: var(--bg-hover);
-  color: var(--text-muted);
-  cursor: pointer;
-  line-height: 1;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
   font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
 }
 
 .agent-loaded-file-remove:hover:not(:disabled) {
-  color: var(--text);
+  background: rgba(0, 0, 0, 0.7);
 }
 
 .agent-loaded-file-remove:disabled {
@@ -2882,12 +2886,24 @@ button.agent-loaded-file-open:focus-visible {
 
 .agent-attachment {
   position: relative;
-  width: 56px;
-  height: 56px;
+  width: 72px;
+  height: 72px;
   border-radius: 10px;
   overflow: hidden;
   border: 1px solid var(--border);
-  background: var(--bg);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.agent-attachment-open {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+
+.agent-attachment-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .agent-attachment img {
@@ -2899,20 +2915,30 @@ button.agent-loaded-file-open:focus-visible {
 
 .agent-attachment-remove {
   position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 18px;
-  height: 18px;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
   border: none;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.65);
   color: #fff;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
+}
+
+.agent-attachment-remove:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.85);
+}
+
+.agent-attachment-remove:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .agent-upload-status,
@@ -2990,8 +3016,17 @@ html[data-theme="light"] .agent-panel {
   background: #ffffff;
 }
 
-html[data-theme="light"] .agent-loaded-file {
-  background: #f7f7f9;
+html[data-theme="light"] .agent-loaded-file,
+html[data-theme="light"] .agent-attachment {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+html[data-theme="light"] .agent-loaded-file-remove {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+html[data-theme="light"] .agent-loaded-file-remove:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.55);
 }
 
 @media (max-width: 900px) {
