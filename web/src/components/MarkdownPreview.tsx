@@ -1,7 +1,9 @@
+import { Children, isValidElement, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import { api } from "../api";
+import { MermaidBlock } from "./MermaidBlock";
 
 const WIKI_RE = /(!)?\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]/g;
 
@@ -86,6 +88,24 @@ function parseWikiHref(href: string | undefined): string | null {
   return null;
 }
 
+function codeText(children: ReactNode): string {
+  return Children.toArray(children)
+    .map((child) => (typeof child === "string" || typeof child === "number" ? String(child) : ""))
+    .join("")
+    .replace(/\n$/, "");
+}
+
+function isMermaidCode(node: ReactNode): node is ReactElement<{
+  className?: string;
+  children?: ReactNode;
+}> {
+  if (!isValidElement(node)) return false;
+  const className = String(
+    (node.props as { className?: string }).className || "",
+  );
+  return /language-mermaid\b/.test(className);
+}
+
 type Props = {
   content: string;
   notePath?: string | null;
@@ -138,6 +158,13 @@ export function MarkdownPreview({ content, notePath, onWikiClick }: Props) {
       }
       const resolved = notePath ? resolveNoteAssetPath(notePath, src) : src;
       return <img src={api.rawUrl(resolved)} alt={alt || ""} />;
+    },
+    pre({ children }) {
+      const only = Children.count(children) === 1 ? Children.only(children) : null;
+      if (only && isMermaidCode(only)) {
+        return <MermaidBlock chart={codeText(only.props.children)} />;
+      }
+      return <pre>{children}</pre>;
     },
   };
 

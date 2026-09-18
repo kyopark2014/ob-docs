@@ -1040,6 +1040,33 @@ html[data-theme="light"] .tree-item.selected {
   padding: 0;
 }
 
+.preview-pane .mermaid-block {
+  margin: 1em 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  overflow-x: auto;
+}
+
+.preview-pane .mermaid-block svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.preview-pane .mermaid-loading {
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+.preview-pane .mermaid-error-msg {
+  margin: 0 0 8px;
+  color: var(--danger, #f87171);
+  font-size: 0.85em;
+}
+
 .preview-pane table {
   border-collapse: collapse;
   width: 100%;
