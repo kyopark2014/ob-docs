@@ -30,30 +30,55 @@ html:not([data-theme]) {
   --popover-selected: rgba(255, 255, 255, 0.08);
   --menu-btn-bg: #2a2a2a;
   --shadow: rgba(0, 0, 0, 0.45);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.22);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.35);
+  --overlay-scrollbar-size: 8px;
 }
 
 html[data-theme="light"] {
   color-scheme: light;
-  --bg: #f7f7f8;
-  --bg-sidebar: #ffffff;
-  --bg-elevated: #ffffff;
-  --bg-hover: #e8e8ed;
-  --bg-active: #ececf1;
-  --bg-rail: #f0f0f2;
-  --border: #e5e5e5;
+  /* Document view is the brightest surface; sidebar sits slightly behind it. */
+  --bg: #ffffff;
+  --bg-sidebar: #f3f3f6;
+  --bg-elevated: #f7f7f9;
+  --bg-hover: #e9e9ef;
+  --bg-active: #e4e4eb;
+  --bg-rail: #ececf0;
+  --border: #e2e2e8;
   --text: #0d0d0d;
-  --text-muted: #8e8e8e;
+  --text-muted: #8a8a93;
   --accent: #4493f8;
   --accent-soft: rgba(68, 147, 248, 0.16);
   --accent-hover: #3b82f6;
   --danger: #e03131;
   --danger-soft: rgba(224, 49, 49, 0.12);
   --link: #4493f8;
-  --popover-bg: #ececf1;
+  --popover-bg: #ffffff;
   --popover-hover: rgba(0, 0, 0, 0.04);
   --popover-selected: rgba(0, 0, 0, 0.07);
-  --menu-btn-bg: #e8e8ed;
-  --shadow: rgba(0, 0, 0, 0.18);
+  --menu-btn-bg: #ececf0;
+  --shadow: rgba(0, 0, 0, 0.12);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.2);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.32);
+  --overlay-scrollbar-size: 8px;
+}
+
+html[data-theme="light"] .sidebar {
+  /* Blend with panel so the divider isn't a darker stripe */
+  border-right-color: var(--bg-sidebar);
+}
+
+html[data-theme="light"] .main {
+  background: #ffffff;
+}
+
+html[data-theme="light"] .tabs {
+  background: #f7f7f9;
+  border-bottom-color: #e2e2e8;
+}
+
+html[data-theme="light"] .tab.active {
+  background: #ffffff;
 }
 
 *,
@@ -439,6 +464,34 @@ button.config-popover-choice.is-selected {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  position: relative;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 6;
+  touch-action: none;
+}
+
+.sidebar-resizer:hover,
+.sidebar-resizer.is-active {
+  background: var(--accent);
+  opacity: 0.55;
+}
+
+.app.is-resizing,
+body.is-resizing-sidebar {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+body.is-resizing-sidebar iframe {
+  pointer-events: none;
 }
 
 .sidebar-header {
@@ -512,13 +565,73 @@ button.config-popover-choice.is-selected {
   visibility: visible;
 }
 
-.sidebar-body {
+.sidebar-body.overlay-scroll {
   flex: 1;
-  overflow: auto;
-  padding: 6px 0;
   min-height: 0;
+  padding: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
+  position: relative;
+}
+
+.overlay-scroll {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.overlay-scroll-viewport {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0;
+  /* room for inset tree selection + overlay scrollbar */
+  padding-right: 2px;
+  scrollbar-width: none;
+}
+
+.overlay-scroll-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.overlay-scroll-rail {
+  position: absolute;
+  top: 0;
+  right: 2px;
+  bottom: 0;
+  width: var(--overlay-scrollbar-size, 8px);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.overlay-scroll-thumb {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+  pointer-events: auto;
+  cursor: default;
+  /* Match agentic-work inset pill (~2/3 of 8px gutter) */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  box-sizing: border-box;
+}
+
+.overlay-scroll-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+.overlay-scroll-viewport .file-tree {
+  flex: 0 0 auto;
+  min-height: 0;
 }
 
 .file-tree {
@@ -559,10 +672,13 @@ button.config-popover-choice.is-selected {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  margin: 1px 8px 1px 4px;
+  padding: 4px 8px;
   font-size: 13px;
   cursor: pointer;
-  border-radius: 0;
+  border-radius: 4px;
+  box-sizing: border-box;
+  max-width: calc(100% - 12px);
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
@@ -580,9 +696,9 @@ button.config-popover-choice.is-selected {
 
 .tree-item.selected {
   background: var(--bg-active);
-  outline: 1px solid rgba(88, 166, 255, 0.35);
-  outline-offset: -1px;
-  border-radius: 4px;
+  /* inset ring so highlight stays inside the panel, not past the divider */
+  box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.35);
+  outline: none;
 }
 
 .tree-item.drop-over,
@@ -794,6 +910,28 @@ button.config-popover-choice.is-selected {
   overflow-y: auto;
   min-height: 0;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.content::-webkit-scrollbar {
+  width: var(--overlay-scrollbar-size, 8px);
+}
+
+.content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.content::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.content::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
 }
 
 .editor-pane,
@@ -1243,6 +1381,9 @@ button.config-popover-choice.is-selected {
     box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
   }
   .sidebar.collapsed {
+    display: none;
+  }
+  .sidebar-resizer {
     display: none;
   }
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { api } from "./api";
 import { FileTree, acceptDrop, hasExternalFileDrag, isVaultMoveDrag } from "./components/FileTree";
 import {
@@ -20,6 +20,7 @@ import {
   type PanelMenuAction,
 } from "./components/FolderContextMenu";
 import { TabContextMenu, type TabContextMenuState, type TabMenuAction } from "./components/TabContextMenu";
+import { OverlayScroll } from "./components/OverlayScroll";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import {
   AppearanceIcon,
@@ -55,6 +56,12 @@ import {
   isImageFileName,
   setShowImages as persistShowImages,
 } from "./viewSettings";
+import {
+  SIDEBAR_W_DEFAULT,
+  clampSidebarWidth,
+  getSidebarWidth,
+  setSidebarWidth as persistSidebarWidth,
+} from "./sidebarSettings";
 import { resolveWikiTarget } from "./wikiLink";
 import type {
   FilePayload,
@@ -304,6 +311,10 @@ export default function App() {
   const [syncProgress, setSyncProgress] = useState<SyncProgressInfo | null>(null);
   const [pendingSync, setPendingSync] = useState(0);
   const [showImages, setShowImages] = useState(() => getShowImages());
+  const [sidebarWidth, setSidebarWidth] = useState(() => getSidebarWidth());
+  const [sidebarResizing, setSidebarResizing] = useState(false);
+  const sidebarWidthRef = useRef(sidebarWidth);
+  sidebarWidthRef.current = sidebarWidth;
   const [pinnedPaths, setPinnedPathsState] = useState<string[]>(() => getPinnedPaths());
   const [settingsFlyoutPos, setSettingsFlyoutPos] = useState<{ left: number; bottom: number } | null>(
     null,
@@ -1513,6 +1524,38 @@ export default function App() {
     });
   }, []);
 
+  const onSidebarResizeStart = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = sidebarWidthRef.current;
+    setSidebarResizing(true);
+    document.body.classList.add("is-resizing-sidebar");
+
+    const onMove = (ev: PointerEvent) => {
+      const next = clampSidebarWidth(startW + (ev.clientX - startX));
+      sidebarWidthRef.current = next;
+      setSidebarWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      document.body.classList.remove("is-resizing-sidebar");
+      setSidebarResizing(false);
+      persistSidebarWidth(sidebarWidthRef.current);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }, []);
+
+  const onSidebarResizeReset = useCallback(() => {
+    setSidebarWidth(SIDEBAR_W_DEFAULT);
+    persistSidebarWidth(SIDEBAR_W_DEFAULT);
+  }, []);
+
   const crumbs = useMemo(() => {
     if (!activePath) return [];
     const parts = activePath.split("/");
@@ -1579,7 +1622,10 @@ export default function App() {
   }
 
   return (
-    <div className={`app${panel === "hidden" ? " sidebar-collapsed" : ""}`}>
+    <div
+      className={`app${panel === "hidden" ? " sidebar-collapsed" : ""}${sidebarResizing ? " is-resizing" : ""}`}
+      style={{ ["--sidebar-w" as string]: `${sidebarWidth}px` }}
+    >
       {ctxMenu && (
         <FolderContextMenu
           menu={ctxMenu}
@@ -1835,7 +1881,7 @@ export default function App() {
                 </button>
               </div>
             </div>
-            <div
+            <OverlayScroll
               className="sidebar-body"
               onContextMenu={(e) => {
                 const el = e.target as HTMLElement;
@@ -1855,7 +1901,6 @@ export default function App() {
                 const el = e.target as HTMLElement;
                 if (el.closest?.(".tree-item")) return;
                 e.preventDefault();
-                // Empty panel background → vault root
                 acceptDrop(
                   e,
                   "",
@@ -1919,7 +1964,7 @@ export default function App() {
                 onRenameConfirm={(path, name) => void confirmRename(path, name)}
                 onRenameCancel={() => setRenamingPath(null)}
               />
-            </div>
+            </OverlayScroll>
           </>
         )}
         {panel === "search" && (
@@ -1935,7 +1980,7 @@ export default function App() {
                 autoFocus
               />
             </div>
-            <div className="sidebar-body">
+            <OverlayScroll className="sidebar-body">
               {hits.map((h) => (
                 <div key={h.path} className="search-hit" onClick={() => void openFile(h.path)}>
                   <div className="search-hit-title">{h.title}</div>
@@ -1943,8 +1988,19 @@ export default function App() {
                   <div className="search-hit-snippet">{h.snippet}</div>
                 </div>
               ))}
-            </div>
+            </OverlayScroll>
           </>
+        )}
+        {panel !== "hidden" && (
+          <div
+            className={`sidebar-resizer${sidebarResizing ? " is-active" : ""}`}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize file panel"
+            title="Drag to resize · double-click to reset"
+            onPointerDown={onSidebarResizeStart}
+            onDoubleClick={onSidebarResizeReset}
+          />
         )}
       </aside>
 
