@@ -17,14 +17,27 @@ const DND_PREFIX = "ob-docs-move|";
 /** Long-press duration for mobile context menu (ms). */
 const LONG_PRESS_MS = 480;
 const LONG_PRESS_MOVE_PX = 12;
-/** "" = vault root drop target */
-type DropTarget = string | null;
+
+type DropHighlight =
+  | { mode: "folder"; path: string }
+  | { mode: "insert"; path: string; place: "before" | "after" }
+  | null;
+
+type Dragging = { path: string; kind: "file" | "folder" } | null;
 
 const DropHighlightCtx = createContext<{
-  target: DropTarget;
-  setTarget: (t: DropTarget) => void;
+  highlight: DropHighlight;
+  setHighlight: (h: DropHighlight) => void;
+  dragging: Dragging;
+  setDragging: (d: Dragging) => void;
   clear: () => void;
-}>({ target: null, setTarget: () => {}, clear: () => {} });
+}>({
+  highlight: null,
+  setHighlight: () => {},
+  dragging: null,
+  setDragging: () => {},
+  clear: () => {},
+});
 
 export type DraftFolder = {
   parentPath: string; // "" = vault root
@@ -46,6 +59,8 @@ type Props = {
   /** Empty area of the tree (vault root create menu). */
   onPanelContextMenu?: (x: number, y: number) => void;
   onMove?: (fromPath: string, toParentPath: string) => void;
+  /** Same-folder custom order (basename list including folders + files). */
+  onReorder?: (folderPath: string, names: string[]) => void;
   onUploadFiles?: (parentPath: string, files: File[]) => void;
   draftFolder?: DraftFolder | null;
   onDraftConfirm?: (name: string) => void;
@@ -104,6 +119,41 @@ function canDropOnFolder(fromPath: string, fromKind: "file" | "folder", toFolder
   }
   if (parentDir(fromPath) === toFolder) return false;
   return true;
+}
+
+export function computeReorderNames(
+  siblings: TreeNode[],
+  fromPath: string,
+  targetPath: string,
+  place: "before" | "after",
+): string[] | null {
+  if (parentDir(fromPath) !== parentDir(targetPath)) return null;
+  const fromName = fromPath.split("/").pop() || fromPath;
+  const targetName = targetPath.split("/").pop() || targetPath;
+  if (fromName === targetName) return null;
+  const names = siblings.map((s) => s.name);
+  if (!names.includes(fromName) || !names.includes(targetName)) return null;
+  const without = names.filter((n) => n !== fromName);
+  let idx = without.indexOf(targetName);
+  if (idx < 0) return null;
+  if (place === "after") idx += 1;
+  without.splice(idx, 0, fromName);
+  return without;
+}
+
+function insertPlaceFromEvent(
+  e: DragEvent,
+  el: HTMLElement,
+  isFolder: boolean,
+): "before" | "after" | "into" {
+  const rect = el.getBoundingClientRect();
+  const ratio = (e.clientY - rect.top) / Math.max(rect.height, 1);
+  if (isFolder) {
+    if (ratio < 0.28) return "before";
+    if (ratio > 0.72) return "after";
+    return "into";
+  }
+  return ratio < 0.5 ? "before" : "after";
 }
 
 /** Prefer vault move over OS-file upload when both are present. */
@@ -210,8 +260,12 @@ export function FileTree(props: Props) {
 }
 
 function FileTreeRoot(props: Props) {
-  const [target, setTarget] = useState<DropTarget>(null);
-  const clear = useCallback(() => setTarget(null), []);
+  const [highlight, setHighlight] = useState<DropHighlight>(null);
+  const [dragging, setDragging] = useState<Dragging>(null);
+  const clear = useCallback(() => {
+    setHighlight(null);
+    setDragging(null);
+  }, []);
 
   useEffect(() => {
     function onDragEnd() {
@@ -224,7 +278,7 @@ function FileTreeRoot(props: Props) {
   }, [clear]);
 
   return (
-    <DropHighlightCtx.Provider value={{ target, setTarget, clear }}>
+    <DropHighlightCtx.Provider value={{ highlight, setHighlight, dragging, setDragging, clear }}>
       <FileTreeBranch {...props} depth={0} />
     </DropHighlightCtx.Provider>
   );
@@ -241,16 +295,19 @@ function FileTreeBranch(props: Props) {
     onPanelContextMenu,
     depth = 0,
   } = props;
-  const { target, setTarget, clear } = useContext(DropHighlightCtx);
+  const { highlight, setHighlight, clear } = useContext(DropHighlightCtx);
 
   const showDraftHere =
     !!draftFolder && depth === 0 && draftFolder.parentPath === "";
+
+  const rootDropActive =
+    highlight?.mode === "folder" && highlight.path === "";
 
   return (
     <div
       className={
         depth === 0
-          ? `file-tree${target === "" ? " drop-target" : ""}`
+          ? `file-tree${rootDropActive ? " drop-target" : ""}`
           : undefined
       }
       onContextMenu={
@@ -273,7 +330,7 @@ function FileTreeBranch(props: Props) {
                 e.dataTransfer.dropEffect =
                   isInternalMoveDrag(e) || !hasExternalFiles(e) ? "move" : "copy";
               }
-              if (!onChildItem) setTarget("");
+              if (!onChildItem) setHighlight({ mode: "folder", path: "" });
             }
           : undefined
       }
@@ -302,6 +359,7 @@ function FileTreeBranch(props: Props) {
         <TreeRow
           key={node.path}
           node={node}
+          siblings={nodes}
           {...props}
           draftFolder={draftFolder}
           depth={depth}
@@ -320,6 +378,7 @@ function FileTreeBranch(props: Props) {
 
 function TreeRow({
   node,
+  siblings,
   activePath,
   selectedFolder = null,
   onOpen,
@@ -327,6 +386,7 @@ function TreeRow({
   onFolderContextMenu,
   onFileContextMenu,
   onMove,
+  onReorder,
   onUploadFiles,
   draftFolder = null,
   onDraftConfirm,
@@ -338,8 +398,8 @@ function TreeRow({
   forceOpenPaths,
   pinnedPaths,
   hidePinBadge = false,
-}: Props & { node: TreeNode }) {
-  const { target, setTarget, clear } = useContext(DropHighlightCtx);
+}: Props & { node: TreeNode; siblings: TreeNode[] }) {
+  const { highlight, setHighlight, dragging, setDragging, clear } = useContext(DropHighlightCtx);
   const suppressClick = useRef(false);
   const longPress = useLongPressContextMenu(
     node.type === "folder"
@@ -381,6 +441,96 @@ function TreeRow({
     });
   }, [node.path]);
 
+  const canDnD = !!(onMove || onReorder || onUploadFiles);
+  const folderPath = parentDir(node.path);
+  const isInsertBefore =
+    highlight?.mode === "insert" &&
+    highlight.path === node.path &&
+    highlight.place === "before";
+  const isInsertAfter =
+    highlight?.mode === "insert" &&
+    highlight.path === node.path &&
+    highlight.place === "after";
+  const isFolderDrop =
+    highlight?.mode === "folder" && highlight.path === node.path;
+
+  const handleSiblingDragOver = (e: DragEvent<HTMLDivElement>, isFolder: boolean) => {
+    if (!canDnD) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect =
+      isInternalMoveDrag(e) || !hasExternalFiles(e) ? "move" : "copy";
+
+    const dragPath = dragging?.path;
+    const sameFolder =
+      !!dragPath && parentDir(dragPath) === folderPath && dragPath !== node.path;
+    const place = insertPlaceFromEvent(e, e.currentTarget, isFolder);
+
+    if (sameFolder && onReorder && (place === "before" || place === "after")) {
+      setHighlight({ mode: "insert", path: node.path, place });
+      return;
+    }
+    if (isFolder && place === "into") {
+      setHighlight({ mode: "folder", path: node.path });
+      return;
+    }
+    if (sameFolder && onReorder) {
+      setHighlight({
+        mode: "insert",
+        path: node.path,
+        place: place === "into" ? "after" : place,
+      });
+      return;
+    }
+    // Cross-folder: file row → move into parent; folder row → into folder
+    if (isFolder) {
+      setHighlight({ mode: "folder", path: node.path });
+    } else {
+      setHighlight({ mode: "folder", path: folderPath });
+    }
+  };
+
+  const handleSiblingDrop = (e: DragEvent<HTMLDivElement>, isFolder: boolean) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const place = insertPlaceFromEvent(e, e.currentTarget, isFolder);
+    const data = parseDrag(e);
+    clear();
+    if (!data) {
+      if (isFolder) acceptDrop(e, node.path, onMove, onUploadFiles);
+      else acceptDrop(e, folderPath, onMove, onUploadFiles);
+      return;
+    }
+    const sameFolder = parentDir(data.path) === folderPath && data.path !== node.path;
+    if (sameFolder && onReorder && (place === "before" || place === "after")) {
+      const names = computeReorderNames(siblings, data.path, node.path, place);
+      if (names) {
+        onReorder(folderPath, names);
+        return;
+      }
+    }
+    if (isFolder && (place === "into" || !sameFolder)) {
+      if (acceptDrop(e, node.path, onMove, onUploadFiles)) {
+        setOpen(true);
+        setFolderOpen(node.path, true);
+      }
+      return;
+    }
+    if (sameFolder && onReorder) {
+      const names = computeReorderNames(
+        siblings,
+        data.path,
+        node.path,
+        place === "into" ? "after" : place,
+      );
+      if (names) {
+        onReorder(folderPath, names);
+        return;
+      }
+    }
+    acceptDrop(e, isFolder ? node.path : folderPath, onMove, onUploadFiles);
+  };
+
   if (node.type === "folder") {
     const showDraftInside =
       !!draftFolder &&
@@ -391,7 +541,6 @@ function TreeRow({
 
     const isSelected = selectedFolder === node.path;
     const isRenaming = renamingPath === node.path;
-    const isDropOver = target === node.path;
 
     return (
       <div className="tree-folder">
@@ -405,19 +554,20 @@ function TreeRow({
           />
         ) : (
           <div
-            className={`tree-item${isSelected ? " selected" : ""}${isDropOver ? " drop-over" : ""}`}
+            className={`tree-item${isSelected ? " selected" : ""}${isFolderDrop ? " drop-over" : ""}${isInsertBefore ? " drop-insert-before" : ""}${isInsertAfter ? " drop-insert-after" : ""}`}
             style={{ paddingLeft: 10 + depth * 14 }}
-            draggable={!!onMove}
+            draggable={!!(onMove || onReorder)}
             {...longPress}
             onDragStart={(e) => {
-              if (!onMove) return;
+              if (!onMove && !onReorder) return;
               suppressClick.current = true;
               const payload: DragPayload = { path: node.path, kind: "folder" };
               const serialized = serializeDrag(payload);
               e.dataTransfer.setData(DND_TYPE, serialized);
               e.dataTransfer.setData("text/plain", serialized);
               e.dataTransfer.effectAllowed = "move";
-              clear();
+              setDragging(payload);
+              setHighlight(null);
             }}
             onDragEnd={() => {
               clear();
@@ -425,27 +575,17 @@ function TreeRow({
                 suppressClick.current = false;
               }, 0);
             }}
-            onDragOver={(e) => {
-              if (!onMove && !onUploadFiles) return;
-              e.preventDefault();
-              e.stopPropagation();
-              e.dataTransfer.dropEffect =
-                isInternalMoveDrag(e) || !hasExternalFiles(e) ? "move" : "copy";
-              setTarget(node.path);
-            }}
+            onDragOver={(e) => handleSiblingDragOver(e, true)}
             onDragLeave={(e) => {
               if (e.currentTarget.contains(e.relatedTarget as Node)) return;
-              if (target === node.path) clear();
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              clear();
-              if (acceptDrop(e, node.path, onMove, onUploadFiles)) {
-                setOpen(true);
-                setFolderOpen(node.path, true);
+              if (
+                (highlight?.mode === "folder" && highlight.path === node.path) ||
+                (highlight?.mode === "insert" && highlight.path === node.path)
+              ) {
+                setHighlight(null);
               }
             }}
+            onDrop={(e) => handleSiblingDrop(e, true)}
             onClick={() => {
               if (suppressClick.current) return;
               onSelectFolder?.(node.path);
@@ -471,7 +611,7 @@ function TreeRow({
         )}
         {open && (
           <div
-            className={`tree-children${isDropOver ? " drop-over" : ""}`}
+            className={`tree-children${isFolderDrop ? " drop-over" : ""}`}
             onDragOver={
               onMove || onUploadFiles
                 ? (e) => {
@@ -481,7 +621,7 @@ function TreeRow({
                     e.stopPropagation();
                     e.dataTransfer.dropEffect =
                       isInternalMoveDrag(e) || !hasExternalFiles(e) ? "move" : "copy";
-                    setTarget(node.path);
+                    setHighlight({ mode: "folder", path: node.path });
                   }
                 : undefined
             }
@@ -508,6 +648,7 @@ function TreeRow({
                 onFolderContextMenu={onFolderContextMenu}
                 onFileContextMenu={onFileContextMenu}
                 onMove={onMove}
+                onReorder={onReorder}
                 onUploadFiles={onUploadFiles}
                 draftFolder={draftFolder}
                 onDraftConfirm={onDraftConfirm}
@@ -550,19 +691,20 @@ function TreeRow({
 
   return (
     <div
-      className={`tree-item${activePath === node.path ? " active" : ""}`}
+      className={`tree-item${activePath === node.path ? " active" : ""}${isInsertBefore ? " drop-insert-before" : ""}${isInsertAfter ? " drop-insert-after" : ""}`}
       style={{ paddingLeft: 10 + depth * 14 + 14 }}
-      draggable={!!onMove}
+      draggable={!!(onMove || onReorder)}
       {...longPress}
       onDragStart={(e) => {
-        if (!onMove) return;
+        if (!onMove && !onReorder) return;
         suppressClick.current = true;
         const payload: DragPayload = { path: node.path, kind: "file" };
         const serialized = serializeDrag(payload);
         e.dataTransfer.setData(DND_TYPE, serialized);
         e.dataTransfer.setData("text/plain", serialized);
         e.dataTransfer.effectAllowed = "move";
-        clear();
+        setDragging(payload);
+        setHighlight(null);
       }}
       onDragEnd={() => {
         clear();
@@ -570,27 +712,18 @@ function TreeRow({
           suppressClick.current = false;
         }, 0);
       }}
-      onDragOver={
-        onMove || onUploadFiles
+      onDragOver={canDnD ? (e) => handleSiblingDragOver(e, false) : undefined}
+      onDragLeave={
+        canDnD
           ? (e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              e.dataTransfer.dropEffect =
-                isInternalMoveDrag(e) || !hasExternalFiles(e) ? "move" : "copy";
-              setTarget(parentDir(node.path));
+              if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+              if (highlight?.mode === "insert" && highlight.path === node.path) {
+                setHighlight(null);
+              }
             }
           : undefined
       }
-      onDrop={
-        onMove || onUploadFiles
-          ? (e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              clear();
-              acceptDrop(e, parentDir(node.path), onMove, onUploadFiles);
-            }
-          : undefined
-      }
+      onDrop={canDnD ? (e) => handleSiblingDrop(e, false) : undefined}
       onClick={() => {
         if (suppressClick.current) return;
         onOpen(node.path);

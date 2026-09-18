@@ -617,19 +617,22 @@ def build_tree_from_rels(rels: list[str]) -> list[dict[str, Any]]:
                     cur_children[part]["children"] = {}
                 cur_children = cur_children[part]["children"]
 
-    def finalize(children_map: dict[str, Any]) -> list[dict[str, Any]]:
+    def finalize(children_map: dict[str, Any], folder_rel: str = "") -> list[dict[str, Any]]:
+        from application import vault_order
+
         nodes = list(children_map.values())
-        nodes.sort(key=lambda n: (n.get("type") != "folder", (n.get("name") or "").lower()))
+        nodes = vault_order.apply_order(folder_rel, nodes)
         out: list[dict[str, Any]] = []
         for n in nodes:
             if n.get("type") == "folder":
                 raw_kids = n.get("children") or {}
+                child_rel = n.get("path") or ""
                 out.append(
                     {
                         "name": n["name"],
                         "path": n["path"],
                         "type": "folder",
-                        "children": finalize(raw_kids) if isinstance(raw_kids, dict) else [],
+                        "children": finalize(raw_kids, child_rel) if isinstance(raw_kids, dict) else [],
                     }
                 )
             else:
@@ -643,7 +646,7 @@ def build_tree_from_rels(rels: list[str]) -> list[dict[str, Any]]:
                 )
         return out
 
-    return finalize(root["children"])
+    return finalize(root["children"], "")
 
 
 def sync_from_s3_incremental(

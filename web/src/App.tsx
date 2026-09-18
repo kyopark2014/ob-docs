@@ -19,6 +19,7 @@ import {
   type FolderMenuAction,
   type PanelMenuAction,
 } from "./components/FolderContextMenu";
+import { TabContextMenu, type TabContextMenuState, type TabMenuAction } from "./components/TabContextMenu";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import {
   AppearanceIcon,
@@ -273,6 +274,7 @@ export default function App() {
   const [draftFolder, setDraftFolder] = useState<{ parentPath: string } | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
+  const [tabMenu, setTabMenu] = useState<TabContextMenuState | null>(null);
   const [confirmState, setConfirmState] = useState<{
     options: ConfirmOptions;
     resolve: (ok: boolean) => void;
@@ -740,12 +742,62 @@ export default function App() {
             setActivePath(null);
             setFile(null);
             setDraft("");
+            setDirty(false);
           }
         }
         return next;
       });
     },
     [activePath, openFile],
+  );
+
+  const applyTabSet = useCallback(
+    (next: OpenTab[], preferPath?: string | null) => {
+      setTabs(next);
+      if (!next.length) {
+        setActivePath(null);
+        setFile(null);
+        setDraft("");
+        setDirty(false);
+        return;
+      }
+      const stillActive =
+        preferPath && next.some((t) => t.path === preferPath)
+          ? preferPath
+          : activePathRef.current && next.some((t) => t.path === activePathRef.current)
+            ? activePathRef.current
+            : next[next.length - 1].path;
+      if (stillActive !== activePathRef.current) {
+        void openFile(stillActive);
+      }
+    },
+    [openFile],
+  );
+
+  const onTabMenuAction = useCallback(
+    (action: TabMenuAction, path: string) => {
+      const idx = tabs.findIndex((t) => t.path === path);
+      if (idx < 0) return;
+      if (action === "close") {
+        closeTab(path);
+        return;
+      }
+      if (action === "close-others") {
+        applyTabSet(
+          tabs.filter((t) => t.path === path),
+          path,
+        );
+        return;
+      }
+      if (action === "close-after") {
+        applyTabSet(tabs.slice(0, idx + 1), path);
+        return;
+      }
+      if (action === "close-all") {
+        applyTabSet([]);
+      }
+    },
+    [applyTabSet, closeTab, tabs],
   );
 
   const save = useCallback(async () => {
@@ -1221,6 +1273,49 @@ export default function App() {
     [activePath, file?.path, pinnedPaths, refreshTree, selectedFolder, showAlert, updatePinnedPaths],
   );
 
+  const reorderInFolder = useCallback(
+    async (folderPath: string, names: string[]) => {
+      // Optimistic local reorder so the tree updates immediately.
+      const applyLocal = (nodes: TreeNode[]): TreeNode[] => {
+        const rewrite = (list: TreeNode[], parent: string): TreeNode[] => {
+          if (parent === folderPath) {
+            const byName = new Map(list.map((n) => [n.name, n]));
+            const ordered: TreeNode[] = [];
+            for (const name of names) {
+              const hit = byName.get(name);
+              if (hit) {
+                ordered.push(hit);
+                byName.delete(name);
+              }
+            }
+            for (const n of list) {
+              if (byName.has(n.name)) ordered.push(n);
+            }
+            return ordered.map((n) =>
+              n.type === "folder" && n.children
+                ? { ...n, children: rewrite(n.children, n.path) }
+                : n,
+            );
+          }
+          return list.map((n) =>
+            n.type === "folder" && n.children
+              ? { ...n, children: rewrite(n.children, n.path) }
+              : n,
+          );
+        };
+        return rewrite(nodes, "");
+      };
+      setTree((prev) => applyLocal(prev));
+      try {
+        await api.reorderFolder(folderPath, names);
+      } catch (err) {
+        void showAlert(err instanceof Error ? err.message : String(err), "Reorder failed");
+        await refreshTree();
+      }
+    },
+    [refreshTree, showAlert],
+  );
+
   const uploadFilesToFolder = useCallback(
     async (parentPath: string, files: File[]) => {
       const images = files.filter(
@@ -1493,6 +1588,17 @@ export default function App() {
           onFileAction={(action, path) => void onFileMenuAction(action, path)}
           onPanelAction={(action, path) => void onPanelMenuAction(action, path)}
           onClose={() => setCtxMenu(null)}
+        />
+      )}
+      {tabMenu && (
+        <TabContextMenu
+          menu={tabMenu}
+          disableOthers={tabs.length <= 1}
+          disableAfter={
+            tabs.findIndex((t) => t.path === tabMenu.path) >= tabs.length - 1
+          }
+          onAction={onTabMenuAction}
+          onClose={() => setTabMenu(null)}
         />
       )}
       <aside className="rail">
@@ -1770,6 +1876,7 @@ export default function App() {
                     onOpen={(p) => void openFile(p)}
                     onSelectFolder={setSelectedFolder}
                     onMove={(from, toParent) => void movePath(from, toParent)}
+                    onReorder={(folder, names) => void reorderInFolder(folder, names)}
                     onUploadFiles={(parent, files) => void uploadFilesToFolder(parent, files)}
                     onFolderContextMenu={(path, x, y) =>
                       setCtxMenu({ kind: "folder", path, x, y })
@@ -1796,6 +1903,7 @@ export default function App() {
                 onOpen={(p) => void openFile(p)}
                 onSelectFolder={setSelectedFolder}
                 onMove={(from, toParent) => void movePath(from, toParent)}
+                onReorder={(folder, names) => void reorderInFolder(folder, names)}
                 onUploadFiles={(parent, files) => void uploadFilesToFolder(parent, files)}
                 onFolderContextMenu={(path, x, y) =>
                   setCtxMenu({ kind: "folder", path, x, y })
@@ -1847,6 +1955,12 @@ export default function App() {
                   key={t.path}
                   className={`tab${activePath === t.path ? " active" : ""}`}
                   onClick={() => void openFile(t.path)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setCtxMenu(null);
+                    setTabMenu({ path: t.path, x: e.clientX, y: e.clientY });
+                  }}
                 >
                   <span className="tab-title">{t.title}</span>
                   <button

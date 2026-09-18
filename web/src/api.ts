@@ -145,6 +145,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ from_path, to_path }),
     }),
+  reorderFolder: (folder: string, names: string[]) =>
+    request<{ ok: boolean; folder: string; names: string[] }>("/files/order", {
+      method: "PUT",
+      body: JSON.stringify({ folder, names }),
+    }),
   duplicate: (path: string) =>
     request<{ ok: boolean; from: string; to: string }>("/files/duplicate", {
       method: "POST",

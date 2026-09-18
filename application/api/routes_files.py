@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from application.api.routes_auth import require_user_id
-from application import vault_backend, vault_index, vault_share, vault_sync
+from application import vault_backend, vault_index, vault_order, vault_share, vault_sync
 
 router = APIRouter(prefix="/vault/api/files", tags=["files"])
 
@@ -59,16 +59,22 @@ class DuplicateBody(BaseModel):
     path: str = Field(..., min_length=1, max_length=1024)
 
 
+class ReorderBody(BaseModel):
+    folder: str = Field("", max_length=1024, description="Parent folder path; empty = vault root")
+    names: list[str] = Field(..., min_length=1, max_length=2000)
+
+
 def _tree_node(path: Path, root: Path) -> dict[str, Any]:
     rel = path.relative_to(root).as_posix()
     if path.is_dir():
         children = []
-        for child in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        for child in path.iterdir():
             if child.name in HIDDEN_SKIP:
                 continue
             if child.name == ".vault":
                 continue
             children.append(_tree_node(child, root))
+        children = vault_order.apply_order(rel, children)
         return {"name": path.name, "path": rel, "type": "folder", "children": children}
     return {
         "name": path.name,
@@ -96,10 +102,11 @@ def get_tree(request: Request) -> dict:
         }
     root = vault_backend.vault_root()
     children = []
-    for child in sorted(root.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+    for child in root.iterdir():
         if child.name in HIDDEN_SKIP or child.name == ".vault":
             continue
         children.append(_tree_node(child, root))
+    children = vault_order.apply_order("", children)
     return {
         "root": ".",
         "mode": mode,
@@ -384,6 +391,7 @@ def rename(request: Request, body: RenameBody) -> dict:
     if vault_backend.backend_mode() == "s3":
         vault_sync.enqueue_put_tree(body.to_path)
         vault_sync.schedule_flush_pending(reconcile_casing=True)
+    vault_order.notify_renamed(body.from_path, body.to_path)
     return {"ok": True, "from": body.from_path, "to": body.to_path}
 
 
@@ -414,9 +422,26 @@ def delete_path(request: Request, body: DeleteBody) -> dict:
         if body.path.endswith(".md"):
             vault_index.remove_note(body.path)
     vault_index.rebuild_index()
+    vault_order.notify_deleted(body.path)
     if vault_backend.backend_mode() == "s3":
         vault_sync.schedule_flush_pending()
     return {"ok": True, "path": body.path}
+
+
+@router.put("/order")
+def reorder_folder(request: Request, body: ReorderBody) -> dict:
+    """Persist custom sibling order for a folder (same-folder drag reorder)."""
+    require_user_id(request)
+    folder = (body.folder or "").replace("\\", "/").strip("/")
+    if folder:
+        try:
+            target = vault_backend.resolve_vault_path(folder)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if not target.is_dir():
+            raise HTTPException(status_code=404, detail="Folder not found")
+    names = vault_order.set_order(folder, body.names)
+    return {"ok": True, "folder": folder, "names": names}
 
 
 def _unique_copy_path(src: Path) -> Path:

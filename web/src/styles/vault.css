@@ -593,6 +593,14 @@ button.config-popover-choice.is-selected {
   border-radius: 4px;
 }
 
+.tree-item.drop-insert-before {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+
+.tree-item.drop-insert-after {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
 .tree-item[draggable="true"] {
   cursor: grab;
 }
@@ -637,6 +645,17 @@ button.config-popover-choice.is-selected {
 .ctx-item.danger:hover {
   background: var(--danger);
   color: #fff;
+}
+
+.ctx-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
+}
+
+.ctx-item:disabled:hover {
+  background: transparent;
+  color: inherit;
 }
 
 .ctx-sep {
