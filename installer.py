@@ -465,32 +465,150 @@ def ensure_service(
         logger.info("Created ECS service %s", SERVICE_NAME)
 
 
-def wait_service(ecs, elbv2, tg_arn: str, timeout: int = 600) -> None:
+def _ecs_primary_deployment_ready(service: dict[str, Any]) -> bool:
+    """Return True when the PRIMARY deployment is serving the desired task count.
+
+    Mirrors agentic-work/installer.py: during rolling updates the service-level
+    runningCount can exceed desiredCount while the previous deployment drains
+    (minimumHealthyPercent=100%, ALB deregistration delay). Only PRIMARY matters.
+    """
+    if service.get("status") != "ACTIVE":
+        return False
+
+    deployments = service.get("deployments") or []
+    primary = next((d for d in deployments if d.get("status") == "PRIMARY"), None)
+    if not primary:
+        return False
+
+    desired = primary.get("desiredCount", 0)
+    running = primary.get("runningCount", 0)
+    pending = primary.get("pendingCount", 0)
+    return (
+        desired > 0
+        and running == desired
+        and pending == 0
+        and service.get("pendingCount", 0) == 0
+    )
+
+
+def wait_service(
+    ecs,
+    elbv2,
+    tg_arn: str,
+    *,
+    expected_task_definition_arn: Optional[str] = None,
+    timeout: int = 600,
+    poll_interval: int = 15,
+) -> None:
+    """Wait until the PRIMARY ECS deployment is ready (and optionally on the new task def).
+
+    The boto3 ``services_stable`` waiter also blocks on DRAINING deployments while
+    ALB target deregistration (default 300s) completes. The service is already
+    usable once the PRIMARY deployment reaches the desired task count.
+    """
     deadline = time.time() + timeout
+    last_log = 0.0
+
     while time.time() < deadline:
         svc = ecs.describe_services(cluster=CLUSTER, services=[SERVICE_NAME])["services"][0]
-        running = svc.get("runningCount", 0)
-        desired = svc.get("desiredCount", 0)
-        health = elbv2.describe_target_health(TargetGroupArn=tg_arn)
-        healthy = sum(
-            1
-            for t in health.get("TargetHealthDescriptions", [])
-            if t.get("TargetHealth", {}).get("State") == "healthy"
+        deployments = svc.get("deployments") or []
+        primary = next((d for d in deployments if d.get("status") == "PRIMARY"), None)
+        draining = [d for d in deployments if d.get("status") == "DRAINING"]
+        desired = (primary or {}).get("desiredCount", 0)
+        running = (primary or {}).get("runningCount", 0)
+        pending = (primary or {}).get("pendingCount", 0)
+
+        healthy = 0
+        try:
+            health = elbv2.describe_target_health(TargetGroupArn=tg_arn)
+            healthy = sum(
+                1
+                for t in health.get("TargetHealthDescriptions", [])
+                if t.get("TargetHealth", {}).get("State") == "healthy"
+            )
+        except ClientError as exc:
+            logger.debug("  Target health check skipped: %s", exc)
+
+        if _ecs_primary_deployment_ready(svc):
+            if expected_task_definition_arn:
+                primary_task_def = (primary or {}).get("taskDefinition", "")
+                if primary_task_def != expected_task_definition_arn:
+                    now = time.time()
+                    if now - last_log > 30:
+                        logger.info(
+                            "  ... waiting for task def roll-out status=%s "
+                            "PRIMARY running=%s/%s pending=%s healthy_targets=%s "
+                            "current=%s",
+                            svc.get("status"),
+                            running,
+                            desired,
+                            pending,
+                            healthy,
+                            primary_task_def.rsplit("/", 1)[-1],
+                        )
+                        for event in (svc.get("events") or [])[:2]:
+                            logger.info("  event: %s", event.get("message", "")[:160])
+                        last_log = now
+                    time.sleep(poll_interval)
+                    continue
+            if healthy >= 1:
+                if draining:
+                    logger.info(
+                        "✓ ECS PRIMARY deployment ready (running=%s/%s); "
+                        "%s draining deployment(s) still cleaning up",
+                        running,
+                        desired,
+                        len(draining),
+                    )
+                else:
+                    logger.info("✓ ECS service is stable")
+                return
+
+        now = time.time()
+        if now - last_log > 30:
+            logger.info(
+                "  ... service status=%s PRIMARY running=%s/%s pending=%s "
+                "healthy_targets=%s failedTasks=%s",
+                svc.get("status"),
+                running,
+                desired,
+                pending,
+                healthy,
+                (primary or {}).get("failedTasks"),
+            )
+            for event in (svc.get("events") or [])[:2]:
+                logger.info("  event: %s", event.get("message", "")[:160])
+            last_log = now
+        time.sleep(poll_interval)
+
+    svc = ecs.describe_services(cluster=CLUSTER, services=[SERVICE_NAME])["services"][0]
+    deployments = svc.get("deployments") or []
+    primary = next((d for d in deployments if d.get("status") == "PRIMARY"), None)
+    if _ecs_primary_deployment_ready(svc):
+        if expected_task_definition_arn:
+            primary_task_def = (primary or {}).get("taskDefinition", "")
+            if primary_task_def != expected_task_definition_arn:
+                raise TimeoutError(
+                    f"Timed out after {timeout}s waiting for ECS service {SERVICE_NAME} "
+                    f"to roll out task definition "
+                    f"{expected_task_definition_arn.rsplit('/', 1)[-1]} "
+                    f"(PRIMARY still on {primary_task_def.rsplit('/', 1)[-1]}). "
+                    "Check ECS service events for update_service failures."
+                )
+        logger.warning(
+            "  ECS wait timed out after %ss, but PRIMARY deployment is ready; continuing",
+            timeout,
         )
-        logger.info(
-            "  ... ECS running=%s/%s healthy_targets=%s",
-            running,
-            desired,
-            healthy,
-        )
-        if running >= 1 and healthy >= 1:
-            logger.info("Service is healthy")
-            return
-        # surface stop reasons
-        for event in (svc.get("events") or [])[:2]:
-            logger.info("  event: %s", event.get("message", "")[:160])
-        time.sleep(15)
-    raise TimeoutError("Timed out waiting for ob-docs ECS service")
+        return
+
+    raise TimeoutError(
+        f"Timed out after {timeout}s waiting for ECS service {SERVICE_NAME} "
+        f"(running={svc.get('runningCount')}/{svc.get('desiredCount')}, "
+        f"pending={svc.get('pendingCount')}, "
+        f"primary={(primary or {}).get('runningCount')}/{(primary or {}).get('desiredCount')}, "
+        f"failedTasks={(primary or {}).get('failedTasks')}). "
+        f"Check ECS task stopped reason / CloudWatch logs ({LOG_GROUP})."
+    )
 
 
 def ensure_sg_ingress(ec2, ecs_sg: str, alb_sg: str) -> None:
@@ -580,8 +698,13 @@ def main() -> int:
     )
     ensure_service(c["ecs"], c["elbv2"], task_arn, tg_arn, subnets, sgs)
 
-    logger.info("[6/6] Wait for healthy")
-    wait_service(c["ecs"], c["elbv2"], tg_arn)
+    logger.info("[6/6] Wait for ECS PRIMARY deployment")
+    wait_service(
+        c["ecs"],
+        c["elbv2"],
+        tg_arn,
+        expected_task_definition_arn=task_arn,
+    )
 
     cfg["latest_image_tag"] = tag
     cfg["ecr_repository_uri"] = repo_uri
