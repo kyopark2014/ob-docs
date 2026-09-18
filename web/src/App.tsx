@@ -20,7 +20,6 @@ import {
   type PanelMenuAction,
 } from "./components/FolderContextMenu";
 import { TabContextMenu, type TabContextMenuState, type TabMenuAction } from "./components/TabContextMenu";
-import { OverlayScroll } from "./components/OverlayScroll";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import {
   AppearanceIcon,
@@ -2071,7 +2070,7 @@ export default function App() {
                 </button>
               </div>
             </div>
-            <OverlayScroll
+            <div
               className="sidebar-body"
               onContextMenu={(e) => {
                 const el = e.target as HTMLElement;
@@ -2154,7 +2153,7 @@ export default function App() {
                 onRenameConfirm={(path, name) => void confirmRename(path, name)}
                 onRenameCancel={() => setRenamingPath(null)}
               />
-            </OverlayScroll>
+            </div>
           </>
         )}
         {panel === "search" && (
@@ -2170,7 +2169,7 @@ export default function App() {
                 autoFocus
               />
             </div>
-            <OverlayScroll className="sidebar-body">
+            <div className="sidebar-body">
               {hits.map((h) => (
                 <div key={h.path} className="search-hit" onClick={() => void openFile(h.path)}>
                   <div className="search-hit-title">{h.title}</div>
@@ -2178,7 +2177,7 @@ export default function App() {
                   <div className="search-hit-snippet">{h.snippet}</div>
                 </div>
               ))}
-            </OverlayScroll>
+            </div>
           </>
         )}
         {panel === "meeting" && (

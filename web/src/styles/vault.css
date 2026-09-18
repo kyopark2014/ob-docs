@@ -13,11 +13,13 @@ html:not([data-theme]) {
   --bg: #1e1e1e;
   --bg-sidebar: #202020;
   --bg-elevated: #262626;
+  --bg-secondary: #262626;
   --bg-hover: #2c2c2c;
   --bg-active: #333333;
   --bg-rail: #161616;
   --border: #333333;
   --text: #dadada;
+  --text-secondary: #b0b0b0;
   --text-muted: #999999;
   --accent: #58a6ff;
   --accent-soft: rgba(88, 166, 255, 0.18);
@@ -47,11 +49,13 @@ html[data-theme="light"] {
   --bg: #ffffff;
   --bg-sidebar: #f3f3f6;
   --bg-elevated: #f7f7f9;
+  --bg-secondary: #f7f7f9;
   --bg-hover: #e9e9ef;
   --bg-active: #e4e4eb;
   --bg-rail: #ececf0;
   --border: #e2e2e8;
   --text: #0d0d0d;
+  --text-secondary: #5c5c66;
   --text-muted: #8a8a93;
   --accent: #4493f8;
   --accent-soft: rgba(68, 147, 248, 0.16);
@@ -578,71 +582,16 @@ body.is-resizing-sidebar iframe {
   visibility: visible;
 }
 
-.sidebar-body.overlay-scroll {
+.sidebar-body {
   flex: 1;
   min-height: 0;
-  padding: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  position: relative;
-}
-
-.overlay-scroll {
-  position: relative;
-  min-height: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-.overlay-scroll-viewport {
-  flex: 1 1 auto;
-  height: 100%;
-  min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 6px 0;
-  /* room for inset tree selection + overlay scrollbar */
-  padding-right: 2px;
-  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
 }
 
-.overlay-scroll-viewport::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-  display: none;
-}
-
-.overlay-scroll-rail {
-  position: absolute;
-  top: 0;
-  right: 2px;
-  bottom: 0;
-  width: var(--overlay-scrollbar-size, 8px);
-  pointer-events: none;
-  z-index: 3;
-}
-
-.overlay-scroll-thumb {
-  position: absolute;
-  left: 0;
-  right: 0;
-  border-radius: 999px;
-  background: var(--scrollbar-thumb);
-  pointer-events: auto;
-  cursor: default;
-  /* Match agentic-work inset pill (~2/3 of 8px gutter) */
-  border: 2px solid transparent;
-  background-clip: padding-box;
-  box-sizing: border-box;
-}
-
-.overlay-scroll-thumb:hover {
-  background: var(--scrollbar-thumb-hover);
-  background-clip: padding-box;
-}
-
-.overlay-scroll-viewport .file-tree {
+.sidebar-body .file-tree {
   flex: 0 0 auto;
   min-height: 0;
 }
@@ -937,26 +886,40 @@ html[data-theme="light"] .tree-item.selected {
   overflow-y: auto;
   min-height: 0;
   -webkit-overflow-scrolling: touch;
+}
+
+/* Shared thin scrollbar (note view baseline) for file / note / agent panels */
+.content,
+.sidebar-body,
+.agent-chat-scroll {
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
-.content::-webkit-scrollbar {
+.content::-webkit-scrollbar,
+.sidebar-body::-webkit-scrollbar,
+.agent-chat-scroll::-webkit-scrollbar {
   width: var(--overlay-scrollbar-size, 8px);
 }
 
-.content::-webkit-scrollbar-track {
+.content::-webkit-scrollbar-track,
+.sidebar-body::-webkit-scrollbar-track,
+.agent-chat-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.content::-webkit-scrollbar-thumb {
+.content::-webkit-scrollbar-thumb,
+.sidebar-body::-webkit-scrollbar-thumb,
+.agent-chat-scroll::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 
-.content::-webkit-scrollbar-thumb:hover {
+.content::-webkit-scrollbar-thumb:hover,
+.sidebar-body::-webkit-scrollbar-thumb:hover,
+.agent-chat-scroll::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
   background-clip: padding-box;
 }
@@ -2608,7 +2571,7 @@ a.agent-message-loaded-file-link:focus-visible {
 .tool-card {
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--bg-secondary, var(--surface-2, #f4f4f5));
+  background: var(--bg-secondary);
   overflow: hidden;
   font-size: 12px;
   max-width: 100%;
@@ -2618,7 +2581,7 @@ a.agent-message-loaded-file-link:focus-visible {
 .tool-card summary {
   padding: 8px 12px;
   cursor: pointer;
-  color: var(--text-secondary, var(--text-muted));
+  color: var(--text-secondary);
   list-style: none;
 }
 
