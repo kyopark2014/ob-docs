@@ -1,7 +1,7 @@
-"""HMAC-signed session cookies shared with agentic-work.
+"""HMAC-signed session cookies for ob-docs.
 
 Cookie: agent_user_id = v1.<payload_b64>.<sig_b64>
-Signing key resolution: SESSION_SIGNING_KEY → Secrets Manager ({sharedProject}/session-signing-key) → local file.
+Signing key resolution: SESSION_SIGNING_KEY → Secrets Manager ({project}/session-signing-key) → local file.
 """
 
 from __future__ import annotations
@@ -50,17 +50,21 @@ def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + padding)
 
 
-def _shared_project_name() -> str:
+def _project_name() -> str:
     try:
         from application import utils
 
-        return utils.shared_project_name()
+        return utils.project_name()
     except Exception:
-        return (os.environ.get("SHARED_PROJECT_NAME") or "agentic-work").strip() or "agentic-work"
+        return (
+            os.environ.get("PROJECT_NAME")
+            or os.environ.get("SHARED_PROJECT_NAME")
+            or "ob-docs"
+        ).strip() or "ob-docs"
 
 
 def _secret_name() -> str:
-    return f"{_shared_project_name()}/session-signing-key"
+    return f"{_project_name()}/session-signing-key"
 
 
 def _load_key_from_secrets_manager() -> Optional[bytes]:
@@ -123,9 +127,9 @@ def sign_session(
     max_age_seconds: Optional[int] = None,
     issued_at: Optional[int] = None,
 ) -> str:
-    """Return an HMAC-signed cookie value compatible with agentic-work.
+    """Return an HMAC-signed cookie value.
 
-    Payload: ``{"uid": "...", "exp": <unix>}`` (same as agentic-work).
+    Payload: ``{"uid": "...", "exp": <unix>}``.
     ``issued_at`` is accepted for callers that still pass it; expiry is
     ``now + max_age`` regardless.
     """
@@ -144,8 +148,7 @@ def sign_session(
 def verify_session(cookie_value: str | None) -> Optional[str]:
     """Return user_id if the signed cookie is valid; otherwise None.
 
-    Accepts agentic-work tokens (``uid``+``exp``) and legacy ob-docs tokens
-    (``uid``+``iat``).
+    Accepts tokens with ``uid``+``exp`` and legacy tokens with ``uid``+``iat``.
     """
     raw = (cookie_value or "").strip()
     if not raw:

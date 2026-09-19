@@ -29,7 +29,7 @@ USER appuser
 
 EXPOSE 8502
 
-HEALTHCHECK CMD curl --fail http://localhost:8502/vault/api/health
+HEALTHCHECK CMD curl --fail http://localhost:8502/api/health
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["uvicorn", "application.server:app", "--host", "0.0.0.0", "--port", "8502", "--no-server-header"]

@@ -25,7 +25,7 @@ if command -v lsof >/dev/null 2>&1; then
 fi
 
 echo "==> Starting uvicorn on 0.0.0.0:${PORT}"
-echo "    Open http://localhost:${PORT}/vault"
+echo "    Open http://localhost:${PORT}/"
 export ENABLE_API_DOCS="${ENABLE_API_DOCS:-1}"
 export ALLOW_LOCAL_AUTH_BYPASS="${ALLOW_LOCAL_AUTH_BYPASS:-1}"
 # Opt-in S3 vault sync for local (uses config.json s3_bucket). Set VAULT_S3_DISABLE=1 to force local-only.

@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Shared agentic-work-compatible infrastructure helpers for ob-docs.
+"""Standalone infrastructure helpers for ob-docs.
 
-Naming and secrets match ``agentic-work/installer.py`` so both projects can share
-the same ALB / ECS cluster / S3 bucket / Secrets Manager entries.
-
-When ``../agentic-work/application/config.json`` exists it is merged for keys
-like ``google_client_id`` / ``sharing_url``. When shared AWS resources are
-missing, this module creates them (idempotent) so ob-docs can run without a
-prior agentic-work install.
+Creates (idempotent) project-scoped ALB / ECS cluster / S3 / Secrets / CloudFront.
+Does not share or merge config with agentic-work.
 """
 
 from __future__ import annotations
@@ -23,35 +18,25 @@ from typing import Any, Optional
 import boto3
 from botocore.exceptions import ClientError
 
-logger = logging.getLogger("ob-docs-shared-infra")
+logger = logging.getLogger("ob-docs-infra")
 
 ROOT = Path(__file__).resolve().parent
-AGENTIC_WORK_ROOT = ROOT.parent / "agentic-work"
-AGENTIC_WORK_CONFIG = AGENTIC_WORK_ROOT / "application" / "config.json"
 
-SHARED = "agentic-work"
 PROJECT = "ob-docs"
 DEFAULT_REGION = "us-west-2"
+DEFAULT_CUSTOM_DOMAIN = "vault.my-agentic-ai.click"
 
-CLUSTER = f"cluster-for-{SHARED}"
-ALB_NAME = f"alb-for-{SHARED}"
-VPC_NAME = f"vpc-for-{SHARED}"
-ALB_SG_NAME = f"alb-sg-for-{SHARED}"
-ECS_SG_NAME = f"ecs-sg-for-{SHARED}"
-ORIGIN_HEADER_SECRET = f"{SHARED}/cloudfront-alb-origin-header"
-SESSION_SECRET = f"{SHARED}/session-signing-key"
+CLUSTER = f"cluster-for-{PROJECT}"
+ALB_NAME = f"alb-for-{PROJECT}"
+VPC_NAME = f"vpc-for-{PROJECT}"
+ALB_SG_NAME = f"alb-sg-for-{PROJECT}"
+ECS_SG_NAME = f"ecs-sg-for-{PROJECT}"
+ORIGIN_HEADER_SECRET = f"{PROJECT}/cloudfront-alb-origin-header"
+SESSION_SECRET = f"{PROJECT}/session-signing-key"
 CUSTOM_HEADER_NAME = "X-Custom-Header"
-
-# Keys copied from a local agentic-work config when present.
-_MERGE_FROM_AGENTIC_KEYS = (
-    "s3_bucket",
-    "s3_arn",
-    "sharing_url",
-    "google_client_id",
-    "region",
-    "accountId",
-    "hybrid_graph_search",
-)
+CF_COMMENT = f"CloudFront-for-{PROJECT}"
+CF_CACHE_POLICY_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+CF_ORIGIN_REQUEST_ALL_VIEWER = "216adef6-5c7f-47e4-b989-5492eafa07d3"
 
 
 @dataclass
@@ -73,8 +58,7 @@ def _sts_identity(region: str) -> tuple[str, str]:
 
 
 def default_bucket_name(account: str, region: str) -> str:
-    """Same pattern as agentic-work/installer.py ``bucket_name``."""
-    return f"storage-for-{SHARED}-{account}-{region}"
+    return f"storage-for-{PROJECT}-{account}-{region}"
 
 
 def load_json_if_exists(path: Path) -> dict[str, Any]:
@@ -90,36 +74,29 @@ def load_json_if_exists(path: Path) -> dict[str, Any]:
 
 
 def bootstrap_config(config_path: Path) -> dict[str, Any]:
-    """Load or create config.json; merge agentic-work config + AWS identity defaults."""
+    """Load or create config.json with ob-docs defaults (no external merge)."""
     cfg = load_json_if_exists(config_path)
-    aw_cfg = load_json_if_exists(AGENTIC_WORK_CONFIG)
-    if aw_cfg:
-        logger.info("Merging keys from %s", AGENTIC_WORK_CONFIG)
-        for key in _MERGE_FROM_AGENTIC_KEYS:
-            if key in aw_cfg and aw_cfg[key] not in (None, "") and not cfg.get(key):
-                cfg[key] = aw_cfg[key]
 
     region = str(cfg.get("region") or DEFAULT_REGION).strip() or DEFAULT_REGION
     account = str(cfg.get("accountId") or "").strip()
     if not account:
         account, _ = _sts_identity(region)
 
-    cfg.setdefault("projectName", PROJECT)
-    cfg.setdefault("sharedProjectName", SHARED)
+    cfg["projectName"] = PROJECT
+    cfg.pop("sharedProjectName", None)
+    cfg.pop("agentic_work_url", None)
     cfg["region"] = region
     cfg["accountId"] = account
     cfg.setdefault("s3_files_vault_prefix", "vault/")
     cfg.setdefault("s3_files_vault_mount_path", "/mnt/vault")
+    cfg.setdefault("custom_domain", DEFAULT_CUSTOM_DOMAIN)
 
-    if not cfg.get("s3_bucket"):
+    # Migrate away from agentic-work bucket naming if still present.
+    bucket = str(cfg.get("s3_bucket") or "").strip()
+    if not bucket or "agentic-work" in bucket:
         cfg["s3_bucket"] = default_bucket_name(account, region)
-        logger.info("config s3_bucket default → %s", cfg["s3_bucket"])
-    cfg.setdefault("s3_arn", f"arn:aws:s3:::{cfg['s3_bucket']}")
-
-    if cfg.get("sharing_url") and not cfg.get("agentic_work_url"):
-        cfg["agentic_work_url"] = cfg["sharing_url"]
-    if cfg.get("agentic_work_url") and not cfg.get("sharing_url"):
-        cfg["sharing_url"] = cfg["agentic_work_url"]
+        logger.info("config s3_bucket → %s", cfg["s3_bucket"])
+    cfg["s3_arn"] = f"arn:aws:s3:::{cfg['s3_bucket']}"
 
     config_path.write_text(
         json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -129,7 +106,7 @@ def bootstrap_config(config_path: Path) -> dict[str, Any]:
 
 
 def ensure_s3_bucket(s3, bucket: str, region: str) -> str:
-    """Create shared storage bucket if missing (agentic-work naming)."""
+    """Create project storage bucket if missing."""
     try:
         s3.head_bucket(Bucket=bucket)
         logger.info("S3 bucket exists: %s", bucket)
@@ -198,7 +175,7 @@ def ensure_s3_bucket(s3, bucket: str, region: str) -> str:
 
 
 def ensure_origin_header_secret(sm) -> str:
-    """CloudFront→ALB origin header (agentic-work/cloudfront-alb-origin-header)."""
+    """CloudFront→ALB origin header."""
     try:
         current = (
             sm.get_secret_value(SecretId=ORIGIN_HEADER_SECRET).get("SecretString") or ""
@@ -220,7 +197,7 @@ def ensure_origin_header_secret(sm) -> str:
             SecretString=value,
             Tags=[
                 {"Key": "Name", "Value": ORIGIN_HEADER_SECRET},
-                {"Key": "Project", "Value": SHARED},
+                {"Key": "Project", "Value": PROJECT},
             ],
         )
         logger.info("Created origin header secret %s", ORIGIN_HEADER_SECRET)
@@ -234,7 +211,7 @@ def ensure_origin_header_secret(sm) -> str:
 
 
 def ensure_session_signing_key(sm) -> str:
-    """HMAC session cookie key shared with agentic-work."""
+    """HMAC session cookie key for ob-docs."""
     try:
         current = (
             sm.get_secret_value(SecretId=SESSION_SECRET).get("SecretString") or ""
@@ -250,11 +227,11 @@ def ensure_session_signing_key(sm) -> str:
     try:
         sm.create_secret(
             Name=SESSION_SECRET,
-            Description=f"HMAC signing key for {SHARED} / {PROJECT} session cookies",
+            Description=f"HMAC signing key for {PROJECT} session cookies",
             SecretString=value,
             Tags=[
                 {"Key": "Name", "Value": SESSION_SECRET},
-                {"Key": "Project", "Value": SHARED},
+                {"Key": "Project", "Value": PROJECT},
             ],
         )
         logger.info("Created session signing key %s", SESSION_SECRET)
@@ -276,9 +253,9 @@ def _put_role_policy(iam, role_name: str, policy_name: str, document: dict[str, 
 
 
 def ensure_ecs_roles(iam, account: str, region: str, bucket: str) -> dict[str, str]:
-    """Create ECS task/execution roles using agentic-work naming (if missing)."""
-    task_role = f"role-ecs-task-for-{SHARED}-{region}"
-    exec_role = f"role-ecs-execution-for-{SHARED}-{region}"
+    """Create ECS task/execution roles (if missing)."""
+    task_role = f"role-ecs-task-for-{PROJECT}-{region}"
+    exec_role = f"role-ecs-execution-for-{PROJECT}-{region}"
     assume = {
         "Version": "2012-10-17",
         "Statement": [
@@ -300,10 +277,10 @@ def ensure_ecs_roles(iam, account: str, region: str, bucket: str) -> dict[str, s
             arn = iam.create_role(
                 RoleName=name,
                 AssumeRolePolicyDocument=json.dumps(assume),
-                Description=f"ECS role for {SHARED} (created by ob-docs installer)",
+                Description=f"ECS role for {PROJECT}",
                 Tags=[
                     {"Key": "Name", "Value": name},
-                    {"Key": "Project", "Value": SHARED},
+                    {"Key": "Project", "Value": PROJECT},
                 ],
             )["Role"]["Arn"]
             logger.info("Created IAM role %s", name)
@@ -325,7 +302,7 @@ def ensure_ecs_roles(iam, account: str, region: str, bucket: str) -> dict[str, s
     _put_role_policy(
         iam,
         task_role,
-        f"ecs-task-s3-vault-for-{SHARED}",
+        f"ecs-task-s3-vault-for-{PROJECT}",
         {
             "Version": "2012-10-17",
             "Statement": [
@@ -345,7 +322,7 @@ def ensure_ecs_roles(iam, account: str, region: str, bucket: str) -> dict[str, s
         },
     )
 
-    secret_arns = [f"arn:aws:secretsmanager:{region}:{account}:secret:{SHARED}/*"]
+    secret_arns = [f"arn:aws:secretsmanager:{region}:{account}:secret:{PROJECT}/*"]
     secrets_doc = {
         "Version": "2012-10-17",
         "Statement": [
@@ -357,8 +334,8 @@ def ensure_ecs_roles(iam, account: str, region: str, bucket: str) -> dict[str, s
             }
         ],
     }
-    _put_role_policy(iam, exec_role, f"ecs-execution-secrets-for-{SHARED}", secrets_doc)
-    _put_role_policy(iam, task_role, f"ecs-task-secrets-for-{SHARED}", secrets_doc)
+    _put_role_policy(iam, exec_role, f"ecs-execution-secrets-for-{PROJECT}", secrets_doc)
+    _put_role_policy(iam, task_role, f"ecs-task-secrets-for-{PROJECT}", secrets_doc)
 
     return {"task_role_arn": task_arn, "execution_role_arn": exec_arn}
 
@@ -375,7 +352,7 @@ def ensure_ecs_cluster(ecs) -> str:
         clusterName=CLUSTER,
         capacityProviders=["FARGATE", "FARGATE_SPOT"],
         defaultCapacityProviderStrategy=[{"capacityProvider": "FARGATE", "weight": 1}],
-        tags=[{"key": "Name", "value": CLUSTER}, {"key": "Project", "value": SHARED}],
+        tags=[{"key": "Name", "value": CLUSTER}, {"key": "Project", "value": PROJECT}],
     )
     logger.info("Created ECS cluster %s", CLUSTER)
     return CLUSTER
@@ -421,11 +398,8 @@ def _find_named_sg(ec2, vpc_id: str, name_substr: str) -> Optional[str]:
 
 
 def _create_minimal_network(ec2, elbv2, region: str) -> NetworkInfo:
-    """Create a minimal VPC+ALB for Fargate (public subnets).
-
-    Resource names match agentic-work so a later agentic-work install can reuse them.
-    """
-    logger.info("Creating minimal shared network (%s / %s) …", VPC_NAME, ALB_NAME)
+    """Create a minimal VPC+ALB for Fargate (public subnets)."""
+    logger.info("Creating network (%s / %s) …", VPC_NAME, ALB_NAME)
     azs = [
         a["ZoneName"]
         for a in ec2.describe_availability_zones(
@@ -436,12 +410,12 @@ def _create_minimal_network(ec2, elbv2, region: str) -> NetworkInfo:
     if len(azs) < 2:
         raise RuntimeError(f"Need ≥2 AZs in {region} to create ALB")
 
-    vpc_id = ec2.create_vpc(CidrBlock="10.91.0.0/16")["Vpc"]["VpcId"]
+    vpc_id = ec2.create_vpc(CidrBlock="10.92.0.0/16")["Vpc"]["VpcId"]
     ec2.create_tags(
         Resources=[vpc_id],
         Tags=[
             {"Key": "Name", "Value": VPC_NAME},
-            {"Key": "Project", "Value": SHARED},
+            {"Key": "Project", "Value": PROJECT},
         ],
     )
     ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsSupport={"Value": True})
@@ -451,21 +425,21 @@ def _create_minimal_network(ec2, elbv2, region: str) -> NetworkInfo:
     ec2.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
     ec2.create_tags(
         Resources=[igw_id],
-        Tags=[{"Key": "Name", "Value": f"igw-for-{SHARED}"}],
+        Tags=[{"Key": "Name", "Value": f"igw-for-{PROJECT}"}],
     )
 
     public_subnets: list[str] = []
     for i, az in enumerate(azs):
         sid = ec2.create_subnet(
             VpcId=vpc_id,
-            CidrBlock=f"10.91.{i}.0/24",
+            CidrBlock=f"10.92.{i}.0/24",
             AvailabilityZone=az,
         )["Subnet"]["SubnetId"]
         ec2.create_tags(
             Resources=[sid],
             Tags=[
-                {"Key": "Name", "Value": f"public-subnet-{i}-for-{SHARED}"},
-                {"Key": "Project", "Value": SHARED},
+                {"Key": "Name", "Value": f"public-subnet-{i}-for-{PROJECT}"},
+                {"Key": "Project", "Value": PROJECT},
             ],
         )
         ec2.modify_subnet_attribute(SubnetId=sid, MapPublicIpOnLaunch={"Value": True})
@@ -473,7 +447,7 @@ def _create_minimal_network(ec2, elbv2, region: str) -> NetworkInfo:
 
     rt = ec2.create_route_table(VpcId=vpc_id)["RouteTable"]["RouteTableId"]
     ec2.create_tags(
-        Resources=[rt], Tags=[{"Key": "Name", "Value": f"public-rt-for-{SHARED}"}]
+        Resources=[rt], Tags=[{"Key": "Name", "Value": f"public-rt-for-{PROJECT}"}]
     )
     ec2.create_route(RouteTableId=rt, DestinationCidrBlock="0.0.0.0/0", GatewayId=igw_id)
     for sid in public_subnets:
@@ -481,14 +455,14 @@ def _create_minimal_network(ec2, elbv2, region: str) -> NetworkInfo:
 
     alb_sg = ec2.create_security_group(
         GroupName=ALB_SG_NAME,
-        Description="ALB SG for shared agentic-work / ob-docs",
+        Description=f"ALB SG for {PROJECT}",
         VpcId=vpc_id,
         TagSpecifications=[
             {
                 "ResourceType": "security-group",
                 "Tags": [
                     {"Key": "Name", "Value": ALB_SG_NAME},
-                    {"Key": "Project", "Value": SHARED},
+                    {"Key": "Project", "Value": PROJECT},
                 ],
             }
         ],
@@ -507,14 +481,14 @@ def _create_minimal_network(ec2, elbv2, region: str) -> NetworkInfo:
 
     ecs_sg = ec2.create_security_group(
         GroupName=ECS_SG_NAME,
-        Description="ECS SG for shared agentic-work / ob-docs",
+        Description=f"ECS SG for {PROJECT}",
         VpcId=vpc_id,
         TagSpecifications=[
             {
                 "ResourceType": "security-group",
                 "Tags": [
                     {"Key": "Name", "Value": ECS_SG_NAME},
-                    {"Key": "Project", "Value": SHARED},
+                    {"Key": "Project", "Value": PROJECT},
                 ],
             }
         ],
@@ -524,7 +498,7 @@ def _create_minimal_network(ec2, elbv2, region: str) -> NetworkInfo:
         IpPermissions=[
             {
                 "IpProtocol": "tcp",
-                "FromPort": 8501,
+                "FromPort": 8502,
                 "ToPort": 8502,
                 "UserIdGroupPairs": [{"GroupId": alb_sg, "Description": "ALB to ECS"}],
             }
@@ -540,7 +514,7 @@ def _create_minimal_network(ec2, elbv2, region: str) -> NetworkInfo:
         IpAddressType="ipv4",
         Tags=[
             {"Key": "Name", "Value": ALB_NAME},
-            {"Key": "Project", "Value": SHARED},
+            {"Key": "Project", "Value": PROJECT},
         ],
     )["LoadBalancers"][0]
 
@@ -574,27 +548,27 @@ def _create_minimal_network(ec2, elbv2, region: str) -> NetworkInfo:
 
 
 def discover_or_create_network(ecs, elbv2, ec2, region: str) -> NetworkInfo:
-    """Prefer existing agentic-work ECS/ALB; otherwise create a minimal shared stack."""
+    """Reuse existing ob-docs ALB/ECS network, or create a minimal stack."""
     try:
         services = ecs.describe_services(
-            cluster=CLUSTER, services=[f"service-for-{SHARED}"]
+            cluster=CLUSTER, services=[f"service-for-{PROJECT}"]
         ).get("services") or []
-        aw = next((s for s in services if s.get("status") != "INACTIVE"), None)
-        if aw and aw.get("networkConfiguration"):
-            net = aw["networkConfiguration"]["awsvpcConfiguration"]
+        svc = next((s for s in services if s.get("status") != "INACTIVE"), None)
+        if svc and svc.get("networkConfiguration"):
+            net = svc["networkConfiguration"]["awsvpcConfiguration"]
             subnets = list(net.get("subnets") or [])
             sgs = list(net.get("securityGroups") or [])
-            aw_tg = (aw.get("loadBalancers") or [{}])[0].get("targetGroupArn")
+            tg = (svc.get("loadBalancers") or [{}])[0].get("targetGroupArn")
             vpc_id = None
-            if aw_tg:
-                vpc_id = elbv2.describe_target_groups(TargetGroupArns=[aw_tg])[
+            if tg:
+                vpc_id = elbv2.describe_target_groups(TargetGroupArns=[tg])[
                     "TargetGroups"
                 ][0]["VpcId"]
             alb = elbv2.describe_load_balancers(Names=[ALB_NAME])["LoadBalancers"][0]
             listener = elbv2.describe_listeners(LoadBalancerArn=alb["LoadBalancerArn"])[
                 "Listeners"
             ][0]
-            logger.info("Using network from ECS service-for-%s", SHARED)
+            logger.info("Using network from ECS service-for-%s", PROJECT)
             return NetworkInfo(
                 vpc_id=vpc_id or alb["VpcId"],
                 subnets=subnets,
@@ -607,7 +581,7 @@ def discover_or_create_network(ecs, elbv2, ec2, region: str) -> NetworkInfo:
             )
     except ClientError as e:
         logger.info(
-            "No shared ECS service yet (%s)",
+            "No ECS service yet (%s)",
             e.response.get("Error", {}).get("Code"),
         )
 
@@ -654,7 +628,434 @@ def discover_or_create_network(ecs, elbv2, ec2, region: str) -> NetworkInfo:
     return _create_minimal_network(ec2, elbv2, region)
 
 
-def ensure_shared_stack(
+def _find_cloudfront(cloudfront) -> Optional[dict[str, Any]]:
+    marker = None
+    while True:
+        kwargs: dict[str, Any] = {}
+        if marker:
+            kwargs["Marker"] = marker
+        resp = cloudfront.list_distributions(**kwargs)
+        listing = resp.get("DistributionList") or {}
+        for item in listing.get("Items") or []:
+            if item.get("Comment") == CF_COMMENT:
+                return item
+        if not listing.get("IsTruncated"):
+            return None
+        marker = listing.get("NextMarker")
+
+
+def _log_acm_validation_records(acm, certificate_arn: str) -> list[dict[str, str]]:
+    """Print DNS validation CNAMEs; return list of {Name, Type, Value}."""
+    desc = acm.describe_certificate(CertificateArn=certificate_arn)["Certificate"]
+    records: list[dict[str, str]] = []
+    for opt in desc.get("DomainValidationOptions") or []:
+        rr = opt.get("ResourceRecord") or {}
+        name = (rr.get("Name") or "").strip()
+        value = (rr.get("Value") or "").strip()
+        rtype = (rr.get("Type") or "CNAME").strip()
+        if name and value:
+            records.append({"Name": name, "Type": rtype, "Value": value})
+            logger.info(
+                "ACM DNS validation → add %s %s → %s",
+                rtype,
+                name.rstrip("."),
+                value.rstrip("."),
+            )
+    return records
+
+
+def ensure_acm_certificate(
+    acm,
+    domain: str,
+    *,
+    wait_seconds: int = 120,
+) -> tuple[str, str, list[dict[str, str]]]:
+    """Find or request an ACM cert (us-east-1) for ``domain``.
+
+    Returns ``(certificate_arn, status, validation_records)``.
+    Status is typically ``ISSUED`` or ``PENDING_VALIDATION``.
+    """
+    domain = (domain or "").strip().lower().rstrip(".")
+    if not domain:
+        raise ValueError("custom domain is empty")
+
+    # Prefer an already-issued cert that covers this exact domain.
+    for status_filter in ("ISSUED", "PENDING_VALIDATION"):
+        try:
+            paginator = acm.get_paginator("list_certificates")
+            for page in paginator.paginate(CertificateStatuses=[status_filter]):
+                for summary in page.get("CertificateSummaryList") or []:
+                    arn = summary["CertificateArn"]
+                    detail = acm.describe_certificate(CertificateArn=arn)["Certificate"]
+                    names = {
+                        (detail.get("DomainName") or "").lower().rstrip("."),
+                        *[
+                            (n or "").lower().rstrip(".")
+                            for n in (detail.get("SubjectAlternativeNames") or [])
+                        ],
+                    }
+                    parent = ".".join(domain.split(".")[1:])
+                    covers = domain in names or (parent and f"*.{parent}" in names)
+                    if covers:
+                        st = detail.get("Status") or status_filter
+                        logger.info(
+                            "Reusing ACM certificate %s (%s) for %s",
+                            arn,
+                            st,
+                            domain,
+                        )
+                        return arn, st, _log_acm_validation_records(acm, arn)
+        except ClientError as e:
+            logger.warning("list_certificates(%s): %s", status_filter, e)
+
+    logger.info("Requesting ACM certificate for %s …", domain)
+    resp = acm.request_certificate(
+        DomainName=domain,
+        ValidationMethod="DNS",
+        SubjectAlternativeNames=[domain],
+        Tags=[
+            {"Key": "Name", "Value": domain},
+            {"Key": "Project", "Value": PROJECT},
+        ],
+    )
+    arn = resp["CertificateArn"]
+    # Validation options appear shortly after request.
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        records = _log_acm_validation_records(acm, arn)
+        if records:
+            break
+        time.sleep(3)
+    else:
+        records = _log_acm_validation_records(acm, arn)
+
+    status = "PENDING_VALIDATION"
+    if wait_seconds > 0:
+        logger.info(
+            "Waiting up to %ss for ACM certificate to become ISSUED …", wait_seconds
+        )
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
+            detail = acm.describe_certificate(CertificateArn=arn)["Certificate"]
+            status = detail.get("Status") or status
+            if status == "ISSUED":
+                logger.info("ACM certificate ISSUED: %s", arn)
+                return arn, status, records
+            if status in {"FAILED", "VALIDATION_TIMED_OUT", "REVOKED"}:
+                raise RuntimeError(f"ACM certificate {arn} status={status}")
+            time.sleep(10)
+        logger.warning(
+            "ACM still %s after %ss — attach alias after DNS validation completes",
+            status,
+            wait_seconds,
+        )
+    return arn, status, records
+
+
+def ensure_route53_records(
+    *,
+    domain: str,
+    cloudfront_domain: str,
+    validation_records: list[dict[str, str]] | None = None,
+    profile: str = "stock",
+    hosted_zone_id: str = "",
+) -> Optional[str]:
+    """Upsert ACM validation CNAMEs + A/AAAA alias in Route53 (often stock account).
+
+    Domain zone ``my-agentic-ai.click`` lives in profile ``stock`` while
+    CloudFront/ACM live in the infra account — same pattern as cowork.
+    Returns hosted zone id when successful.
+    """
+    domain = (domain or "").strip().lower().rstrip(".")
+    cf_dns = (cloudfront_domain or "").strip().rstrip(".")
+    if not domain:
+        return None
+
+    try:
+        session = boto3.Session(profile_name=profile) if profile else boto3.Session()
+        r53 = session.client("route53")
+    except Exception as e:
+        logger.warning("Route53 session (profile=%s) unavailable: %s", profile, e)
+        return None
+
+    zone_id = (hosted_zone_id or "").strip()
+    if not zone_id:
+        parent = ".".join(domain.split(".")[1:]) or domain
+        try:
+            zones = r53.list_hosted_zones().get("HostedZones") or []
+            for z in zones:
+                name = (z.get("Name") or "").rstrip(".").lower()
+                if name == parent or name == domain:
+                    zone_id = (z.get("Id") or "").rsplit("/", 1)[-1]
+                    break
+        except ClientError as e:
+            logger.warning("list_hosted_zones: %s", e)
+            return None
+    if not zone_id:
+        logger.warning(
+            "No Route53 hosted zone for %s (profile=%s) — add DNS manually",
+            domain,
+            profile,
+        )
+        return None
+
+    changes: list[dict[str, Any]] = []
+    for rr in validation_records or []:
+        name = (rr.get("Name") or "").strip()
+        value = (rr.get("Value") or "").strip()
+        rtype = (rr.get("Type") or "CNAME").strip() or "CNAME"
+        if not name or not value:
+            continue
+        changes.append(
+            {
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                    "Name": name,
+                    "Type": rtype,
+                    "TTL": 300,
+                    "ResourceRecords": [{"Value": value}],
+                },
+            }
+        )
+
+    if cf_dns:
+        # CloudFront alias target hosted zone id is global.
+        cf_zone = "Z2FDTNDATAQYW2"
+        target = cf_dns if cf_dns.endswith(".") else f"{cf_dns}."
+        for rtype in ("A", "AAAA"):
+            changes.append(
+                {
+                    "Action": "UPSERT",
+                    "ResourceRecordSet": {
+                        "Name": f"{domain}.",
+                        "Type": rtype,
+                        "AliasTarget": {
+                            "HostedZoneId": cf_zone,
+                            "DNSName": target,
+                            "EvaluateTargetHealth": False,
+                        },
+                    },
+                }
+            )
+
+    if not changes:
+        return zone_id
+
+    try:
+        r53.change_resource_record_sets(
+            HostedZoneId=zone_id,
+            ChangeBatch={
+                "Comment": f"{PROJECT} custom domain {domain}",
+                "Changes": changes,
+            },
+        )
+        logger.info(
+            "Upserted %d Route53 record(s) in zone %s (profile=%s) for %s",
+            len(changes),
+            zone_id,
+            profile,
+            domain,
+        )
+    except ClientError as e:
+        logger.warning("Route53 change_resource_record_sets failed: %s", e)
+        return None
+    return zone_id
+
+
+def _apply_custom_domain(
+    cfg: dict[str, Any],
+    *,
+    custom_domain: str,
+    certificate_arn: str,
+    certificate_status: str,
+    cloudfront_domain: str,
+) -> str:
+    """Return public sharing_url; prefer custom domain when cert is ready."""
+    domain = (custom_domain or "").strip().lower().rstrip(".")
+    if domain and certificate_status == "ISSUED" and certificate_arn:
+        url = f"https://{domain}"
+        logger.info("Custom domain ready: %s → %s", domain, cloudfront_domain)
+        return url
+    if domain:
+        logger.warning(
+            "custom_domain=%s but ACM status=%s — using CloudFront domain until ISSUED. "
+            "After validating the ACM CNAME, re-run installer (or attach alias).",
+            domain,
+            certificate_status,
+        )
+    return f"https://{cloudfront_domain}"
+
+
+def ensure_cloudfront(
+    cloudfront,
+    *,
+    alb_dns: str,
+    origin_header: str,
+    custom_domain: str = "",
+    certificate_arn: str = "",
+) -> dict[str, str]:
+    """Create or reuse CloudFront distribution with ALB origin (+ optional alias)."""
+    origin_id = f"alb-{PROJECT}"
+    alias = (custom_domain or "").strip().lower().rstrip(".")
+    use_alias = bool(alias and certificate_arn)
+
+    def _viewer_cert() -> dict[str, Any]:
+        if use_alias:
+            return {
+                "CloudFrontDefaultCertificate": False,
+                "ACMCertificateArn": certificate_arn,
+                "SSLSupportMethod": "sni-only",
+                "MinimumProtocolVersion": "TLSv1.2_2021",
+            }
+        return {"CloudFrontDefaultCertificate": True}
+
+    def _aliases() -> dict[str, Any]:
+        if use_alias:
+            return {"Quantity": 1, "Items": [alias]}
+        return {"Quantity": 0}
+
+    existing = _find_cloudfront(cloudfront)
+    if existing:
+        dist_id = existing["Id"]
+        domain = existing["DomainName"]
+        logger.info("Reusing CloudFront %s (%s)", domain, dist_id)
+        try:
+            cfg_resp = cloudfront.get_distribution_config(Id=dist_id)
+            etag = cfg_resp["ETag"]
+            cfg = cfg_resp["DistributionConfig"]
+            updated = False
+            for origin in cfg.get("Origins", {}).get("Items") or []:
+                if origin.get("Id") != origin_id and origin.get("DomainName") != alb_dns:
+                    continue
+                if origin.get("DomainName") != alb_dns:
+                    origin["DomainName"] = alb_dns
+                    updated = True
+                headers = origin.setdefault("CustomHeaders", {"Quantity": 0, "Items": []})
+                items = headers.get("Items") or []
+                found = False
+                for h in items:
+                    if h.get("HeaderName") == CUSTOM_HEADER_NAME:
+                        if h.get("HeaderValue") != origin_header:
+                            h["HeaderValue"] = origin_header
+                            updated = True
+                        found = True
+                        break
+                if not found:
+                    items.append(
+                        {
+                            "HeaderName": CUSTOM_HEADER_NAME,
+                            "HeaderValue": origin_header,
+                        }
+                    )
+                    updated = True
+                headers["Items"] = items
+                headers["Quantity"] = len(items)
+
+            desired_aliases = _aliases()
+            if cfg.get("Aliases") != desired_aliases:
+                cfg["Aliases"] = desired_aliases
+                updated = True
+            desired_viewer = _viewer_cert()
+            current_viewer = cfg.get("ViewerCertificate") or {}
+            if use_alias:
+                if (
+                    current_viewer.get("ACMCertificateArn") != certificate_arn
+                    or current_viewer.get("CloudFrontDefaultCertificate")
+                ):
+                    cfg["ViewerCertificate"] = desired_viewer
+                    updated = True
+            # Keep existing ACM alias cert if already set and we are not attaching yet.
+
+            if updated:
+                cloudfront.update_distribution(
+                    Id=dist_id, IfMatch=etag, DistributionConfig=cfg
+                )
+                logger.info("Updated CloudFront origin / alias / certificate")
+        except ClientError as e:
+            logger.warning("Could not refresh CloudFront: %s", e)
+        public_url = f"https://{alias}" if use_alias else f"https://{domain}"
+        return {
+            "id": dist_id,
+            "domain": domain,
+            "url": public_url,
+            "alias": alias if use_alias else "",
+        }
+
+    config = {
+        "CallerReference": f"{PROJECT}-ui-{int(time.time())}",
+        "Comment": CF_COMMENT,
+        "Enabled": True,
+        "DefaultRootObject": "",
+        "Aliases": _aliases(),
+        "Origins": {
+            "Quantity": 1,
+            "Items": [
+                {
+                    "Id": origin_id,
+                    "DomainName": alb_dns,
+                    "OriginPath": "",
+                    "CustomHeaders": {
+                        "Quantity": 1,
+                        "Items": [
+                            {
+                                "HeaderName": CUSTOM_HEADER_NAME,
+                                "HeaderValue": origin_header,
+                            }
+                        ],
+                    },
+                    "CustomOriginConfig": {
+                        "HTTPPort": 80,
+                        "HTTPSPort": 443,
+                        "OriginProtocolPolicy": "http-only",
+                        "OriginSslProtocols": {
+                            "Quantity": 1,
+                            "Items": ["TLSv1.2"],
+                        },
+                        "OriginReadTimeout": 60,
+                        "OriginKeepaliveTimeout": 60,
+                    },
+                }
+            ],
+        },
+        "DefaultCacheBehavior": {
+            "TargetOriginId": origin_id,
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "AllowedMethods": {
+                "Quantity": 7,
+                "Items": [
+                    "GET",
+                    "HEAD",
+                    "OPTIONS",
+                    "PUT",
+                    "POST",
+                    "PATCH",
+                    "DELETE",
+                ],
+                "CachedMethods": {"Quantity": 2, "Items": ["GET", "HEAD"]},
+            },
+            "Compress": True,
+            "CachePolicyId": CF_CACHE_POLICY_DISABLED,
+            "OriginRequestPolicyId": CF_ORIGIN_REQUEST_ALL_VIEWER,
+        },
+        "PriceClass": "PriceClass_200",
+        "ViewerCertificate": _viewer_cert(),
+        "HttpVersion": "http2",
+        "IsIPV6Enabled": True,
+    }
+    resp = cloudfront.create_distribution(DistributionConfig=config)
+    dist = resp["Distribution"]
+    domain = dist["DomainName"]
+    logger.info("Created CloudFront %s (%s)", domain, dist["Id"])
+    public_url = f"https://{alias}" if use_alias else f"https://{domain}"
+    return {
+        "id": dist["Id"],
+        "domain": domain,
+        "url": public_url,
+        "alias": alias if use_alias else "",
+    }
+
+
+def ensure_infra_stack(
     *,
     cfg: dict[str, Any],
     s3,
@@ -663,35 +1064,112 @@ def ensure_shared_stack(
     ecs,
     elbv2,
     ec2,
+    cloudfront,
+    acm=None,
 ) -> tuple[dict[str, Any], NetworkInfo, str]:
-    """Ensure config + shared AWS resources. Returns (cfg, network, origin_header)."""
+    """Ensure config + AWS resources. Returns (cfg, network, origin_header)."""
     region = str(cfg["region"])
     account = str(cfg["accountId"])
     bucket = str(cfg["s3_bucket"])
+    custom_domain = (
+        str(cfg.get("custom_domain") or DEFAULT_CUSTOM_DOMAIN).strip().lower().rstrip(".")
+    )
+    cfg["custom_domain"] = custom_domain
 
-    logger.info("[shared] S3 bucket")
+    logger.info("[infra] S3 bucket")
     ensure_s3_bucket(s3, bucket, region)
     cfg["s3_arn"] = f"arn:aws:s3:::{bucket}"
 
-    logger.info("[shared] Secrets (origin header + session signing key)")
+    logger.info("[infra] Secrets (origin header + session signing key)")
     origin_header = ensure_origin_header_secret(sm)
     ensure_session_signing_key(sm)
 
-    logger.info("[shared] ECS IAM roles")
+    logger.info("[infra] ECS IAM roles")
     ensure_ecs_roles(iam, account, region, bucket)
 
-    logger.info("[shared] ECS cluster")
+    logger.info("[infra] ECS cluster")
     ensure_ecs_cluster(ecs)
 
-    logger.info("[shared] Network (discover or create)")
+    logger.info("[infra] Network (discover or create)")
     network = discover_or_create_network(ecs, elbv2, ec2, region)
 
-    if not cfg.get("sharing_url"):
-        cfg["sharing_url"] = f"http://{network.alb_dns}"
-        cfg.setdefault("agentic_work_url", cfg["sharing_url"])
-        logger.warning(
-            "sharing_url not set — using ALB DNS %s (add CloudFront later for HTTPS)",
-            network.alb_dns,
+    if acm is None:
+        acm = boto3.client("acm", region_name="us-east-1")
+
+    logger.info("[infra] ACM certificate for %s", custom_domain)
+    cert_arn, cert_status, validation = ensure_acm_certificate(
+        acm, custom_domain, wait_seconds=90
+    )
+    cfg["acm_certificate_arn"] = cert_arn
+    cfg["acm_certificate_status"] = cert_status
+
+    logger.info("[infra] CloudFront (ALB origin + custom domain)")
+    attach_alias = cert_status == "ISSUED"
+    cf = ensure_cloudfront(
+        cloudfront,
+        alb_dns=network.alb_dns,
+        origin_header=origin_header,
+        custom_domain=custom_domain if attach_alias else "",
+        certificate_arn=cert_arn if attach_alias else "",
+    )
+    cfg["cloudfront_id"] = cf["id"]
+    cfg["cloudfront_domain"] = cf["domain"]
+
+    # DNS often lives in a separate account (AWS_PROFILE=stock).
+    r53_profile = str(cfg.get("route53_profile") or "stock").strip() or "stock"
+    zone = ensure_route53_records(
+        domain=custom_domain,
+        cloudfront_domain=cf["domain"],
+        validation_records=validation if cert_status != "ISSUED" else None,
+        profile=r53_profile,
+        hosted_zone_id=str(cfg.get("route53_hosted_zone_id") or ""),
+    )
+    if zone:
+        cfg["route53_hosted_zone_id"] = zone
+        cfg["route53_profile"] = r53_profile
+        if cert_status != "ISSUED":
+            logger.info("[infra] Re-checking ACM after Route53 validation records…")
+            cert_arn, cert_status, _ = ensure_acm_certificate(
+                acm, custom_domain, wait_seconds=180
+            )
+            cfg["acm_certificate_arn"] = cert_arn
+            cfg["acm_certificate_status"] = cert_status
+            if cert_status == "ISSUED":
+                cf = ensure_cloudfront(
+                    cloudfront,
+                    alb_dns=network.alb_dns,
+                    origin_header=origin_header,
+                    custom_domain=custom_domain,
+                    certificate_arn=cert_arn,
+                )
+                cfg["cloudfront_id"] = cf["id"]
+                cfg["cloudfront_domain"] = cf["domain"]
+                ensure_route53_records(
+                    domain=custom_domain,
+                    cloudfront_domain=cf["domain"],
+                    validation_records=None,
+                    profile=r53_profile,
+                    hosted_zone_id=zone,
+                )
+
+    cfg["sharing_url"] = _apply_custom_domain(
+        cfg,
+        custom_domain=custom_domain,
+        certificate_arn=cert_arn,
+        certificate_status=cert_status,
+        cloudfront_domain=cf["domain"],
+    )
+    logger.info("sharing_url → %s", cfg["sharing_url"])
+    if custom_domain:
+        logger.info(
+            "DNS: %s → %s (Route53 profile=%s)",
+            custom_domain,
+            cf["domain"],
+            r53_profile,
         )
 
     return cfg, network, origin_header
+
+
+# Backward-compatible alias
+ensure_shared_stack = ensure_infra_stack

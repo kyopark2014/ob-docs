@@ -3,13 +3,12 @@
 Obsidian형 **Local-first Plain Text** vault 웹 앱입니다.  
 노트는 `.md`가 Source of Truth이고, 설정은 `.vault/`에 격리되며, 그래프·검색·백링크는 파생 캐시입니다.
 
-agentic-work와 **같은 CloudFront / ALB / S3 버킷**을 공유할 수 있습니다.  
-agentic-work가 없어도 `python installer.py`만으로 공유 인프라를 만들고 `/vault`를 배포할 수 있습니다.
+`python installer.py`로 CloudFront / ALB / ECS / S3를 만들고 사이트 루트에 배포합니다 (다른 프로젝트와 인프라를 공유하지 않음).
 
 | 항목 | 값 |
 |---|---|
-| 접속 경로 | `{cloudfront}/vault` |
-| React 앱 | [`web/`](web/) (`base: /vault/`) |
+| 접속 경로 | `https://vault.my-agentic-ai.click` |
+| React 앱 | [`web/`](web/) (`base: /`) |
 | Vault mount | S3 `vault/` → `/mnt/vault` |
 | 로컬 working copy | `data/vault/` |
 | 설정 폴더 | `.vault/` (`.obsidian` 대체) |
@@ -17,10 +16,10 @@ agentic-work가 없어도 `python installer.py`만으로 공유 인프라를 만
 ## 아키텍처
 
 ```text
-CloudFront
-  └─ ALB
-       ├─ /vault*  → ob-docs ECS  (/mnt/vault ← S3 Files vault/)
-       └─ /*       → agentic-work ECS
+CloudFront-for-ob-docs
+  └─ ALB (alb-for-ob-docs)
+       └─ /*       → ECS service-for-ob-docs
+            └─ /mnt/vault ← S3 storage-for-ob-docs-…/vault/
 ```
 
 - **mount 모드 (ECS)**: `/mnt/vault`에 직접 읽고 씀 (S3 Files가 비동기 동기화)
@@ -40,7 +39,7 @@ chmod +x run_local.sh
 ./run_local.sh
 ```
 
-브라우저: [http://localhost:8502/vault](http://localhost:8502/vault)
+브라우저: [http://localhost:8502/](http://localhost:8502/)
 
 로컬에서는 `ALLOW_LOCAL_AUTH_BYPASS=1`로 세션 없이 동작합니다.
 
@@ -52,7 +51,7 @@ PYTHONPATH=. ALLOW_LOCAL_AUTH_BYPASS=1 uvicorn application.server:app --port 850
 
 # 터미널 2 — Vite
 cd web && npm install && npm run dev
-# http://localhost:5174/vault/
+# http://localhost:5174/
 ```
 
 ## Vault 구조
@@ -72,57 +71,57 @@ data/vault/                 # 또는 /mnt/vault
 
 위키링크 `[[Note]]`, frontmatter(`aliases`, `tags`)를 파싱해 그래프·검색·백링크를 만듭니다.
 
-**좌측 rail → Graph** (agentic-work Wiki 메뉴를 Notes로 이식)
+**좌측 rail → Graph**
 
 | 메뉴 | 동작 |
 |---|---|
 | Sync | vault markdown 위키링크 인덱스를 갱신하고 Notes Graph HTML 생성 |
 | Rebuild | 캐시를 비우고 전체 재빌드 |
-| Graph | Notes Graph 모달 (agentic-work와 동일한 Force Atlas / Neo4j Explore / Holistic View · 검색·범례) |
+| Graph | Notes Graph 모달 (Force Atlas / Neo4j Explore / Holistic View · 검색·범례) |
 | Configure | 포함할 폴더·미해결 링크 표시 설정 |
 
 ## API
 
 | Method | Path | 설명 |
 |---|---|---|
-| GET | `/vault/api/health` | 헬스체크 |
-| GET | `/vault/api/session` | 공유 세션 확인 |
-| GET | `/vault/api/files/tree` | 파일 트리 |
-| GET | `/vault/api/files/list?prefix=&ext=` | 플랫 파일 목록 |
-| GET | `/vault/api/files/read?path=` | 노트 읽기 |
-| PUT | `/vault/api/files/write` | 노트 저장(덮어쓰기) |
-| POST | `/vault/api/files/append` | 노트 이어쓰기 |
-| POST | `/vault/api/files/sync` | pending flush 후 S3→로컬 incremental pull |
-| GET | `/vault/api/files/sync` | pending 큐 상태 |
-| POST | `/vault/api/files/share` | 노트 public 공유 링크 생성/재사용 |
-| GET | `/vault/api/files/shares` | 공유 목록 |
-| POST | `/vault/api/files/share/delete` | 공유 토큰 삭제 |
-| GET | `/vault/s/{token}` | **공개** markdown viewer (쿠키 불필요) |
-| GET | `/vault/s/{token}/raw?path=` | **공개** 상대 이미지/첨부 |
-| POST | `/vault/api/files/mkdir` | 폴더 생성 |
-| POST | `/vault/api/files/rename` | 이동/이름변경 |
-| POST | `/vault/api/files/delete` | 삭제 |
-| GET | `/vault/api/search?q=` | 검색 |
-| GET | `/vault/api/graph` | Notes 위키링크 그래프 JSON |
-| GET | `/vault/api/graph/status` | Notes 그래프 동기화 상태 |
-| POST | `/vault/api/graph/sync` | Notes Sync (`?full=1` = Rebuild) |
-| POST | `/vault/api/graph/rebuild` | Notes 전체 재빌드 |
-| GET | `/vault/api/graph/graph` | Notes Graph HTML (iframe) |
-| PATCH | `/vault/api/graph/pattern` | 그래프 뷰 패턴 전환 |
-| GET/PUT | `/vault/api/graph/sources` | Notes Configure (포함 폴더) |
-| GET | `/vault/api/graph/backlinks` | 백링크 |
-| GET | `/vault/api/agent/health` | Open Agent harness 설정 여부 |
-| GET | `/vault/api/agent/models` | 선택 가능한 모델 목록 |
-| GET | `/vault/api/agent/note-meta?path=` | 에이전트 칩용 노트 메타 |
-| POST | `/vault/api/agent/chat` | Open Agent SSE (`token` / `tool` / `note_updated` / `done`) |
+| GET | `/api/health` | 헬스체크 |
+| GET | `/api/session` | 공유 세션 확인 |
+| GET | `/api/files/tree` | 파일 트리 |
+| GET | `/api/files/list?prefix=&ext=` | 플랫 파일 목록 |
+| GET | `/api/files/read?path=` | 노트 읽기 |
+| PUT | `/api/files/write` | 노트 저장(덮어쓰기) |
+| POST | `/api/files/append` | 노트 이어쓰기 |
+| POST | `/api/files/sync` | pending flush 후 S3→로컬 incremental pull |
+| GET | `/api/files/sync` | pending 큐 상태 |
+| POST | `/api/files/share` | 노트 public 공유 링크 생성/재사용 |
+| GET | `/api/files/shares` | 공유 목록 |
+| POST | `/api/files/share/delete` | 공유 토큰 삭제 |
+| GET | `/s/{token}` | **공개** markdown viewer (쿠키 불필요) |
+| GET | `/s/{token}/raw?path=` | **공개** 상대 이미지/첨부 |
+| POST | `/api/files/mkdir` | 폴더 생성 |
+| POST | `/api/files/rename` | 이동/이름변경 |
+| POST | `/api/files/delete` | 삭제 |
+| GET | `/api/search?q=` | 검색 |
+| GET | `/api/graph` | Notes 위키링크 그래프 JSON |
+| GET | `/api/graph/status` | Notes 그래프 동기화 상태 |
+| POST | `/api/graph/sync` | Notes Sync (`?full=1` = Rebuild) |
+| POST | `/api/graph/rebuild` | Notes 전체 재빌드 |
+| GET | `/api/graph/graph` | Notes Graph HTML (iframe) |
+| PATCH | `/api/graph/pattern` | 그래프 뷰 패턴 전환 |
+| GET/PUT | `/api/graph/sources` | Notes Configure (포함 폴더) |
+| GET | `/api/graph/backlinks` | 백링크 |
+| GET | `/api/agent/health` | Open Agent harness 설정 여부 |
+| GET | `/api/agent/models` | 선택 가능한 모델 목록 |
+| GET | `/api/agent/note-meta?path=` | 에이전트 칩용 노트 메타 |
+| POST | `/api/agent/chat` | Open Agent SSE (`token` / `tool` / `note_updated` / `done`) |
 
-인증: `agent_user_id` 쿠키, `Authorization: Bearer <session>`, 또는 AgentCore용 `Authorization: VaultAgent v1.<payload>.<sig>` (`agentic-work/vault-agent-token`).
+인증: `agent_user_id` 쿠키, `Authorization: Bearer <session>`, 또는 AgentCore용 `Authorization: VaultAgent v1.<payload>.<sig>` (`ob-docs/vault-agent-token`).
 
-- Secrets Manager 키: `{sharedProjectName}/session-signing-key` (웹 세션)
-- Secrets Manager 키: `{sharedProjectName}/vault-agent-token` (my-vaults skill / AgentCore)
+- Secrets Manager 키: `ob-docs/session-signing-key` (웹 세션)
+- Secrets Manager 키: `ob-docs/vault-agent-token` (use-vault skill / AgentCore)
 - 또는 환경변수 `SESSION_SIGNING_KEY` / `VAULT_AGENT_TOKEN`
-- 미인증 시 agentic-work 로그인 URL로 안내
-- `/vault/s/*` 공개 viewer만 세션 없이 접근 가능
+- 미인증 시 같은 앱의 Google 로그인 UI 표시
+- `/s/*` 공개 viewer만 세션 없이 접근 가능
 
 Open Agent 사용법·동작은 [Agent로 Note 수정하기](#agent로-note-수정하기)를 보세요.
 
@@ -130,7 +129,7 @@ Open Agent 사용법·동작은 [Agent로 Note 수정하기](#agent로-note-수�
 
 선택한 마크다운 노트를 **Bedrock AgentCore InvokeHarness**로 요약·수정합니다.  
 웹 검색(Exa)·code interpreter를 쓸 수 있고, vault 저장은 **`VAULT_WRITE` 마커**(서버 파싱)를 사용합니다.  
-첨부/선택 노트는 **본문 전체를 넣지 않고** S3 업로드 후 **presigned URL·s3 URI**만 전달합니다 (agentic-work와 유사).
+첨부/선택 노트는 **본문 전체를 넣지 않고** S3 업로드 후 **presigned URL·s3 URI**만 전달합니다.
 
 ### 여는 방법
 
@@ -139,7 +138,7 @@ Open Agent 사용법·동작은 [Agent로 Note 수정하기](#agent로-note-수�
 | 노트 우클릭 → **Open agent** | 문서 창 오른쪽에 Agent 패널 오픈 |
 | 문서 툴바 **Agent** 아이콘 | 현재 열린 노트로 동일하게 오픈 |
 
-패널 UI는 agentic-work 채팅과 비슷한 톤(타임라인 · tool 카드 · 입력창)입니다.
+패널 UI는 타임라인 · tool 카드 · 입력창 구성입니다.
 
 ### 구성 (Harness)
 
@@ -157,7 +156,7 @@ Open Agent 사용법·동작은 [Agent로 Note 수정하기](#agent로-note-수�
 
 ```text
 UI (Agent 패널)
-  → POST /vault/api/agent/chat  (SSE)
+  → POST /api/agent/chat  (SSE)
   → build_user_prompt (선택 노트 본문 + 첨부)
   → InvokeHarness (model override + exa + code + use-vault)
   → 스트림: token / text / tool / tool_result
@@ -213,16 +212,16 @@ UI (Agent 패널)
 
 | Method | Path | 설명 |
 |---|---|---|
-| GET | `/vault/api/agent/health` | harness·skill·모델 기본값 |
-| GET | `/vault/api/agent/models` | 선택 가능 모델 목록 |
-| GET | `/vault/api/agent/note-meta?path=` | 칩용 name/size |
-| POST | `/vault/api/agent/chat` | SSE 채팅 (`prompt`, `note_path`, `session_id`, `model_name`, `image_paths`, `file_paths`) |
+| GET | `/api/agent/health` | harness·skill·모델 기본값 |
+| GET | `/api/agent/models` | 선택 가능 모델 목록 |
+| GET | `/api/agent/note-meta?path=` | 칩용 name/size |
+| POST | `/api/agent/chat` | SSE 채팅 (`prompt`, `note_path`, `session_id`, `model_name`, `image_paths`, `file_paths`) |
 
 SSE 이벤트 예: `session`, `token`, `text`, `tool`, `tool_result`, `note_updated`, `done`, `error`.
 
 ## 노트의 public 공유
 
-로그인된 사용자가 markdown 노트를 **쿠키 없이** 볼 수 있는 CloudFront URL로 공유합니다. agentic-work markdown viewer와 비슷한 HTML 페이지를 서버가 렌더합니다.
+로그인된 사용자가 markdown 노트를 **쿠키 없이** 볼 수 있는 CloudFront URL로 공유합니다. 서버가 HTML markdown viewer를 렌더합니다.
 
 **UI**
 
@@ -237,13 +236,13 @@ SSE 이벤트 예: `session`, `token`, `text`, `tool`, `tool_result`, `note_upda
 **URL 형식** (`config.json`의 `sharing_url`)
 
 ```text
-https://cowork.my-agentic-ai.click/vault/s/{token}
+https://vault.my-agentic-ai.click/s/{token}
 ```
 
 **생성 흐름** (인증 필요)
 
 ```text
-POST /vault/api/files/share  { "path": "folder/Note.md" }
+POST /api/files/share  { "path": "folder/Note.md" }
   → .vault/shares.json 에 token 등록 (같은 경로면 기존 token 재사용)
   → s3 모드면 shares.json 을 S3 vault/ 에도 반영
   → { url, url_path, token, title, created_at } 반환
@@ -268,37 +267,29 @@ POST /vault/api/files/share  { "path": "folder/Note.md" }
 ```text
 브라우저
   → CloudFront (sharing_url)
-  → ALB /vault* → ob-docs ECS
-  → GET /vault/s/{token}
+  → ALB /* → ob-docs ECS
+  → GET /s/{token}
   → shares.json 에서 token → vault 상대경로 조회
   → .md 를 HTML markdown viewer 로 반환
 ```
 
-- 본문 상대 이미지(`![](img.png)`)는 `/vault/s/{token}/raw?path=…` 로 다시 쓰여 공개 제공됩니다.
-- SPA catch-all(`/vault/{path}`)은 `api/`, `s/` 를 제외합니다. 공개 URL이 vault 앱 전체가 보이면 **구버전 배포**이거나 롤아웃 전일 수 있습니다.
+- 본문 상대 이미지(`![](img.png)`)는 `/s/{token}/raw?path=…` 로 다시 쓰여 공개 제공됩니다.
+- SPA catch-all(`/{path}`)은 `api/`, `s/` 를 제외합니다. 공개 URL이 vault 앱 전체가 보이면 **구버전 배포**이거나 롤아웃 전일 수 있습니다.
 
-## ECS / ALB 연동 (agentic-work installer 확장)
+## ECS / ALB
 
-1. **S3 Files**: 공유 버킷에 prefix `vault/` Access Point 생성 → ECS 태스크에 `/mnt/vault` 마운트
-2. **ECS 서비스**: 이 이미지, 포트 `8502`, health `/vault/api/health`
-3. **ALB listener rule**: path `/vault*` → ob-docs target group (default보다 높은 priority)
-4. CloudFront default origin이 ALB이므로 `/vault`는 ALB rule만으로 전달됩니다.  
-   (`/images|/docs|/artifacts`처럼 S3 signed path에 vault를 넣지 마세요 — vault **콘텐츠**는 S3 Files, SPA는 ECS)
+1. **S3**: 프로젝트 버킷에 prefix `vault/` — ECS가 동기화/마운트
+2. **ECS 서비스**: 이 이미지, 포트 `8502`, health `/api/health`
+3. **ALB listener rule**: path `/*` (+ CloudFront origin header) → ob-docs target group
+4. **CloudFront**: ALB origin (`CloudFront-for-ob-docs`) + alias `vault.my-agentic-ai.click`  
+   (`config.json`의 `custom_domain` / `sharing_url`)
 
 환경변수 예:
 
 ```bash
 APP_CONFIG_JSON='{...config.json...}'
-SESSION_SIGNING_KEY=...   # agentic-work와 동일
+SESSION_SIGNING_KEY=...
 VAULT_MOUNT=/mnt/vault
-```
-
-## agentic-work 연동
-
-agentic-work의 `my-vaults` skill이 이 API로 vault 노트를 CRUD합니다.
-
-```text
-agentic-work ──skill:my-vaults──▶ ob-docs API ──▶ /mnt/vault (.md)
 ```
 
 ## Docker
@@ -313,47 +304,54 @@ docker run --rm -p 8502:8502 \
 
 ## 배포 (installer)
 
-agentic-work와 **같은 리소스 이름**을 사용합니다. `config.json`이 없거나 일부만 있어도
-`installer.py`가 부족한 공유 인프라를 만들어 준 뒤 ob-docs를 배포합니다.
+`config.json`이 없거나 일부만 있어도 `installer.py`가 전용 인프라를 만든 뒤 배포합니다.
 
 ```bash
 python installer.py
 ```
 
-배포 후 URL: `{sharing_url}/vault`  
-(기존 환경 예: https://cowork.my-agentic-ai.click/vault)
+배포 후 URL: `https://vault.my-agentic-ai.click`  
+(`custom_domain`이 비어 있거나 ACM이 미발급이면 CloudFront 기본 도메인 사용)
 
+### 커스텀 도메인 (`vault.my-agentic-ai.click`)
+
+- **인프라 계정** (`default` / `262976740991`): CloudFront + ACM(us-east-1)
+- **DNS 계정** (`stock` / `567536745292`): Route53 `my-agentic-ai.click`
+
+installer가 `route53_profile`(`stock`)으로 ACM 검증 CNAME과 A/AAAA alias를 자동 등록합니다.
+
+Google OAuth 콘솔 Authorized JavaScript origin에 `https://vault.my-agentic-ai.click` 을 추가하세요.
 ### config.json
 
 - 없으면 생성합니다. `accountId` / `region` / `s3_bucket` 등은 STS·기본값으로 채웁니다.
-- 옆에 `../agentic-work/application/config.json`이 있으면 `s3_bucket`, `sharing_url`,
-  `google_client_id` 등을 병합합니다.
+- 버킷 기본값: `storage-for-ob-docs-{account}-{region}`
+- `custom_domain` 기본값: `vault.my-agentic-ai.click` → `sharing_url`
 - Google 로그인에는 `google_client_id`가 필요합니다 (비어 있으면 배포는 되지만 로그인 불가).
 
 ### installer가 수행하는 일
 
-0. **공유 인프라 ensure** (`shared_infra.py`, agentic-work와 동일 네이밍)
-   - S3 `storage-for-agentic-work-{account}-{region}`
-   - Secrets: `agentic-work/cloudfront-alb-origin-header`, `session-signing-key`
-   - IAM: `role-ecs-{task,execution}-for-agentic-work-{region}`
-   - ECS cluster `cluster-for-agentic-work`
-   - 기존 ALB/ECS가 없으면 최소 VPC + `alb-for-agentic-work` 생성
+0. **인프라 ensure** (`shared_infra.py`)
+   - S3 `storage-for-ob-docs-{account}-{region}`
+   - Secrets: `ob-docs/cloudfront-alb-origin-header`, `ob-docs/session-signing-key`
+   - IAM: `role-ecs-{task,execution}-for-ob-docs-{region}`
+   - ECS cluster `cluster-for-ob-docs`
+   - VPC + `alb-for-ob-docs` (없으면 생성)
+   - ACM + CloudFront `CloudFront-for-ob-docs` (alias → `custom_domain`) → `sharing_url`
 1. **skills 업로드** (`use-vault` → `s3://…/skills/`)
 2. **AgentCore Harness** (`ob_docs`, skill=`use-vault`, tools=`exa` + `code`) → `HARNESS_ARN`
 3. ECR `ecr-for-ob-docs` 빌드/푸시
-4. ALB rule `/vault*` → `TG-for-ob-docs`  
-   (CloudFront HTTPS면 origin header 조건 유지, ALB HTTP면 path only)
-5. ECS `service-for-ob-docs` on `cluster-for-agentic-work` (`APP_CONFIG_JSON`에 `HARNESS_ARN`)
-6. 샘플 vault를 `s3://…/vault/`에 seed (`VAULT_S3_ENABLE=1` sync)
+4. ALB rule `/*` → `TG-for-ob-docs` (CloudFront origin header 조건)
+5. ECS `service-for-ob-docs` on `cluster-for-ob-docs`
+6. 샘플 vault를 `s3://…/vault/`에 seed
 
 ### 제거 (uninstaller)
 
 ```bash
 python uninstaller.py
 python uninstaller.py --yes
+python uninstaller.py --yes --keep-s3              # 버킷 유지
+python uninstaller.py --yes --keep-s3 --purge-vault-prefix
 ```
 
-- **항상 삭제**: `service-for-ob-docs`, `TG-for-ob-docs`, `/vault*` listener rule, ECR, 로그 그룹, `vault-agent-token`
-- **공유 중**(agentic-work 서비스가 살아 있으면) ALB·VPC·클러스터·S3·IAM·origin/session secret은 **유지**
-- **공유가 없으면** installer가 만든 공유 이름 인프라까지 삭제
-- 공유 중인데 vault 객체만 지우려면: `--purge-vault-prefix`
+- ECS · TG · `/*` rule · ECR · 로그 · secrets · CloudFront · ALB/VPC/cluster/IAM · S3 삭제
+- `--keep-s3`면 버킷만 남깁니다

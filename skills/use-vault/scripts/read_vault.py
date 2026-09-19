@@ -23,19 +23,19 @@ import lib_vault as vault  # noqa: E402
 
 
 def cmd_health(args: argparse.Namespace) -> int:
-    payload = vault.api_request("GET", "/vault/api/health", user_id=args.user_id)
+    payload = vault.api_request("GET", "/api/health", user_id=args.user_id)
     vault.print_json(payload)
     return 0
 
 
 def cmd_session(args: argparse.Namespace) -> int:
-    payload = vault.api_request("GET", "/vault/api/session", user_id=args.user_id)
+    payload = vault.api_request("GET", "/api/session", user_id=args.user_id)
     vault.print_json(payload)
     return 0
 
 
 def cmd_tree(args: argparse.Namespace) -> int:
-    payload = vault.api_request("GET", "/vault/api/files/tree", user_id=args.user_id)
+    payload = vault.api_request("GET", "/api/files/tree", user_id=args.user_id)
     vault.print_json(payload)
     return 0
 
@@ -43,7 +43,7 @@ def cmd_tree(args: argparse.Namespace) -> int:
 def cmd_list(args: argparse.Namespace) -> int:
     payload = vault.api_request(
         "GET",
-        "/vault/api/files/list",
+        "/api/files/list",
         user_id=args.user_id,
         query={"prefix": args.prefix or "", "ext": args.ext},
     )
@@ -54,7 +54,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 def cmd_read(args: argparse.Namespace) -> int:
     payload = vault.api_request(
         "GET",
-        "/vault/api/files/read",
+        "/api/files/read",
         user_id=args.user_id,
         query={"path": args.path},
     )
@@ -68,7 +68,7 @@ def cmd_read(args: argparse.Namespace) -> int:
 def cmd_search(args: argparse.Namespace) -> int:
     payload = vault.api_request(
         "GET",
-        "/vault/api/search",
+        "/api/search",
         user_id=args.user_id,
         query={"q": args.query, "limit": args.limit},
     )
@@ -77,7 +77,7 @@ def cmd_search(args: argparse.Namespace) -> int:
 
 
 def cmd_graph(args: argparse.Namespace) -> int:
-    payload = vault.api_request("GET", "/vault/api/graph", user_id=args.user_id)
+    payload = vault.api_request("GET", "/api/graph", user_id=args.user_id)
     vault.print_json(payload)
     return 0
 
@@ -85,7 +85,7 @@ def cmd_graph(args: argparse.Namespace) -> int:
 def cmd_backlinks(args: argparse.Namespace) -> int:
     payload = vault.api_request(
         "GET",
-        "/vault/api/graph/backlinks",
+        "/api/graph/backlinks",
         user_id=args.user_id,
         query={"path": args.path},
     )
@@ -98,34 +98,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--user-id", default=None, help="Override USER_ID / CURRENT_USER_ID")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("health", help="GET /vault/api/health")
+    p = sub.add_parser("health", help="GET /api/health")
     p.set_defaults(func=cmd_health)
 
-    p = sub.add_parser("session", help="GET /vault/api/session")
+    p = sub.add_parser("session", help="GET /api/session")
     p.set_defaults(func=cmd_session)
 
-    p = sub.add_parser("tree", help="GET /vault/api/files/tree")
+    p = sub.add_parser("tree", help="GET /api/files/tree")
     p.set_defaults(func=cmd_tree)
 
-    p = sub.add_parser("list", help="GET /vault/api/files/list")
+    p = sub.add_parser("list", help="GET /api/files/list")
     p.add_argument("--prefix", default="", help="Folder prefix (e.g. notes)")
     p.add_argument("--ext", default="md", help="Extension filter (md|txt|* )")
     p.set_defaults(func=cmd_list)
 
-    p = sub.add_parser("read", help="GET /vault/api/files/read")
+    p = sub.add_parser("read", help="GET /api/files/read")
     p.add_argument("path", help="Vault-relative path, e.g. notes/Welcome.md")
     p.add_argument("--raw", action="store_true", help="Print markdown body only")
     p.set_defaults(func=cmd_read)
 
-    p = sub.add_parser("search", help="GET /vault/api/search")
+    p = sub.add_parser("search", help="GET /api/search")
     p.add_argument("query", help="Search query")
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(func=cmd_search)
 
-    p = sub.add_parser("graph", help="GET /vault/api/graph")
+    p = sub.add_parser("graph", help="GET /api/graph")
     p.set_defaults(func=cmd_graph)
 
-    p = sub.add_parser("backlinks", help="GET /vault/api/graph/backlinks")
+    p = sub.add_parser("backlinks", help="GET /api/graph/backlinks")
     p.add_argument("path", help="Vault-relative note path")
     p.set_defaults(func=cmd_backlinks)
 

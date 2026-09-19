@@ -13,11 +13,11 @@ from pydantic import BaseModel, Field
 from application.api.routes_auth import require_user_id
 from application import vault_backend, vault_share, viewer_html
 
-# Authenticated create endpoint lives under /vault/api
-api_router = APIRouter(prefix="/vault/api/files", tags=["share"])
+# Authenticated create endpoint lives under /api
+api_router = APIRouter(prefix="/api/files", tags=["share"])
 
-# Public pages under /vault/s/… (no auth)
-public_router = APIRouter(prefix="/vault/s", tags=["share-public"])
+# Public pages under /s/… (no auth)
+public_router = APIRouter(prefix="/s", tags=["share-public"])
 
 
 class ShareBody(BaseModel):

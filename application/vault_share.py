@@ -296,7 +296,7 @@ def revoke_share_if_missing(token: str, note_path: str) -> None:
 
 
 def public_share_path(token: str) -> str:
-    return f"/vault/s/{quote(token, safe='')}"
+    return f"/s/{quote(token, safe='')}"
 
 
 def public_share_url(token: str) -> str:
@@ -475,7 +475,7 @@ def rewrite_md_assets_for_share(text: str, token: str) -> str:
             or inner.startswith("#")
         ):
             return match.group(0)
-        url = f"/vault/s/{quote(token, safe='')}/raw?path={quote(inner, safe='')}"
+        url = f"/s/{quote(token, safe='')}/raw?path={quote(inner, safe='')}"
         if wrapped:
             return f"![{alt}](<{url}>)"
         return f"![{alt}]({url})"

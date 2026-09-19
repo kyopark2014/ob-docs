@@ -96,7 +96,7 @@ def write_use_vault_skill_config(
     s3_bucket: str,
     sharing_url: str = "",
     region: str = "us-west-2",
-    shared_project: str = "agentic-work",
+    project: str = "ob-docs",
 ) -> Path:
     """Write skills/use-vault/config.json (optional sidecar for local/scripts)."""
     skill_dir = SKILLS_DIR / USE_VAULT_SKILL
@@ -107,8 +107,7 @@ def write_use_vault_skill_config(
         "sharing_url": url,
         "ob_docs_url": url,
         "region": (region or "us-west-2").strip() or "us-west-2",
-        "shared_project_name": (shared_project or "agentic-work").strip()
-        or "agentic-work",
+        "project_name": (project or "ob-docs").strip() or "ob-docs",
     }
     path = skill_dir / "config.json"
     path.write_text(
@@ -139,7 +138,7 @@ def upload_skills_to_s3(
     *,
     sharing_url: str = "",
     region: str = "us-west-2",
-    shared_project: str = "agentic-work",
+    project: str = "ob-docs",
 ) -> int:
     """Upload ob-docs/skills/ to s3://{bucket}/skills/."""
     bucket = (s3_bucket or "").strip()
@@ -153,7 +152,7 @@ def upload_skills_to_s3(
         s3_bucket=bucket,
         sharing_url=sharing_url,
         region=region,
-        shared_project=shared_project,
+        project=project,
     )
 
     s3 = boto3.client("s3")
@@ -224,12 +223,12 @@ def _harness_env_vars(
     region: str,
     s3_bucket: str,
     sharing_url: str,
-    shared_project: str,
+    project_secret_prefix: str,
 ) -> dict[str, str]:
     env = {
         "LOG_LEVEL": "info",
         "BEDROCK_REGION": region,
-        "SHARED_PROJECT_NAME": shared_project or "agentic-work",
+        "PROJECT_NAME": project_secret_prefix or "ob-docs",
     }
     if s3_bucket:
         env["S3_BUCKET"] = s3_bucket
@@ -246,7 +245,7 @@ def create_harness_execution_role(
     project: str,
     *,
     s3_bucket: str = "",
-    shared_project: str = "agentic-work",
+    project_secret_prefix: str = "ob-docs",
 ) -> str:
     """IAM role assumed by AgentCore for the harness (PUBLIC)."""
     role_name = f"role-harness-for-{project}-{region}"
@@ -285,6 +284,7 @@ def create_harness_execution_role(
         )["Role"]["Arn"]
         logger.info("Created harness execution role %s", role_name)
 
+    secret_prefix = (project_secret_prefix or project or "ob-docs").strip() or "ob-docs"
     statements: list[dict[str, Any]] = [
         {
             "Sid": "BedrockModelInvocation",
@@ -340,7 +340,7 @@ def create_harness_execution_role(
             "Effect": "Allow",
             "Action": ["secretsmanager:GetSecretValue"],
             "Resource": [
-                f"arn:aws:secretsmanager:{region}:{account}:secret:{shared_project}/vault-agent-token*"
+                f"arn:aws:secretsmanager:{region}:{account}:secret:{secret_prefix}/vault-agent-token*"
             ],
         },
     ]
@@ -379,14 +379,14 @@ def create_harness_execution_role(
 def ensure_ecs_invoke_harness(
     iam,
     *,
-    shared: str,
+    project: str,
     region: str,
     account: str,
     harness_arn: str,
 ) -> None:
-    """Allow the shared ECS task role to call InvokeHarness."""
-    task_role = f"role-ecs-task-for-{shared}-{region}"
-    policy_name = f"ecs-task-invoke-harness-for-ob-docs"
+    """Allow the ECS task role to call InvokeHarness."""
+    task_role = f"role-ecs-task-for-{project}-{region}"
+    policy_name = f"ecs-task-invoke-harness-for-{project}"
     document = {
         "Version": "2012-10-17",
         "Statement": [
@@ -560,13 +560,13 @@ def ensure_harness_environment_variables(
     region: str,
     s3_bucket: str,
     sharing_url: str,
-    shared_project: str,
+    project_secret_prefix: str,
 ) -> None:
     desired = _harness_env_vars(
         region=region,
         s3_bucket=s3_bucket,
         sharing_url=sharing_url,
-        shared_project=shared_project,
+        project_secret_prefix=project_secret_prefix,
     )
     reserved = {"AWS_REGION", "AWS_DEFAULT_REGION"}
     h = control.get_harness(harnessId=harness_id)["harness"]
@@ -600,7 +600,7 @@ def create_or_get_harness(
     execution_role_arn: str,
     s3_bucket: str = "",
     sharing_url: str = "",
-    shared_project: str = "agentic-work",
+    project_secret_prefix: str = "ob-docs",
 ) -> dict[str, str]:
     """Create PUBLIC harness with websearch + code interpreter + use-vault."""
     control = _control_client(region)
@@ -615,7 +615,7 @@ def create_or_get_harness(
         region=region,
         s3_bucket=s3_bucket,
         sharing_url=sharing_url,
-        shared_project=shared_project,
+        project_secret_prefix=project_secret_prefix,
     )
     environment = {
         "agentCoreRuntimeEnvironment": {
@@ -712,7 +712,7 @@ def create_or_get_harness(
         region=region,
         s3_bucket=s3_bucket,
         sharing_url=sharing_url,
-        shared_project=shared_project,
+        project_secret_prefix=project_secret_prefix,
     )
     harness_arn = wait_for_harness_ready(control, harness_id)
     return {

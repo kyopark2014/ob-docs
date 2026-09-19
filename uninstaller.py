@@ -1,28 +1,21 @@
 #!/usr/bin/env python3
 """Remove infrastructure created by ob-docs/installer.py.
 
-Always deletes **ob-docs-owned** resources:
+Deletes the full standalone stack:
   - ECS service ``service-for-ob-docs``
   - Task definitions ``task-for-ob-docs``
   - Target group ``TG-for-ob-docs``
   - ALB listener rules for ``/vault*``
   - ECR ``ecr-for-ob-docs``
   - Log group ``/ecs/app-for-ob-docs``
-  - Secret ``agentic-work/vault-agent-token`` (created by ob-docs)
-
-**Shared** agentic-work resources (ALB, VPC, cluster, S3 bucket, IAM roles,
-origin/session secrets) are left alone when sharing is detected
-(``service-for-agentic-work`` is ACTIVE, or other non-ob-docs services exist
-on the cluster).
-
-When the stack is **not** shared (standalone install via shared_infra), those
-shared-named resources are deleted as well — same idea as
-``agentic-work/uninstaller.py``, scoped to what this installer may have created.
+  - Secrets ``ob-docs/vault-agent-token``, origin header, session signing key
+  - CloudFront ``CloudFront-for-ob-docs``
+  - ALB / VPC / ECS cluster / S3 bucket / IAM roles
 
 Usage:
   python uninstaller.py
   python uninstaller.py --yes
-  python uninstaller.py --yes --purge-vault-prefix   # also empty s3://…/vault/ when shared
+  python uninstaller.py --yes --keep-s3   # keep bucket (empty vault/ only if --purge-vault-prefix)
 """
 
 from __future__ import annotations
@@ -40,12 +33,12 @@ from botocore.exceptions import ClientError
 
 from shared_infra import (
     ALB_NAME,
+    CF_COMMENT,
     CLUSTER,
     DEFAULT_REGION,
     ORIGIN_HEADER_SECRET,
     PROJECT,
     SESSION_SECRET,
-    SHARED,
     VPC_NAME,
     default_bucket_name,
     load_json_if_exists,
@@ -55,12 +48,11 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 
 SERVICE_NAME = f"service-for-{PROJECT}"
-SHARED_SERVICE = f"service-for-{SHARED}"
 TASK_FAMILY = f"task-for-{PROJECT}"
 TG_NAME = f"TG-for-{PROJECT}"
 ECR_NAME = f"ecr-for-{PROJECT}"
 LOG_GROUP = f"/ecs/app-for-{PROJECT}"
-VAULT_AGENT_SECRET = f"{SHARED}/vault-agent-token"
+VAULT_AGENT_SECRET = f"{PROJECT}/vault-agent-token"
 
 
 def setup_logging() -> logging.Logger:
@@ -90,47 +82,12 @@ def clients(region: str) -> dict[str, Any]:
         "sm": boto3.client("secretsmanager", region_name=region),
         "iam": boto3.client("iam"),
         "sts": boto3.client("sts", region_name=region),
+        "cloudfront": boto3.client("cloudfront", region_name="us-east-1"),
     }
 
 
-def _service_active(ecs, cluster: str, service: str) -> bool:
-    try:
-        services = ecs.describe_services(cluster=cluster, services=[service]).get(
-            "services"
-        ) or []
-        return any(s.get("status") == "ACTIVE" for s in services)
-    except ClientError:
-        return False
-
-
-def is_stack_shared(ecs) -> bool:
-    """True when agentic-work (or another non-ob-docs service) still uses the cluster."""
-    if _service_active(ecs, CLUSTER, SHARED_SERVICE):
-        logger.info("  Sharing detected: %s is ACTIVE — shared infra will be kept", SHARED_SERVICE)
-        return True
-    try:
-        arns = ecs.list_services(cluster=CLUSTER).get("serviceArns") or []
-        if not arns:
-            return False
-        names = [a.rsplit("/", 1)[-1] for a in arns]
-        others = [n for n in names if n != SERVICE_NAME]
-        if others:
-            logger.info(
-                "  Sharing detected: other ECS services on %s: %s — shared infra kept",
-                CLUSTER,
-                ", ".join(others),
-            )
-            return True
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        if code != "ClusterNotFoundException":
-            logger.warning("  Could not list cluster services: %s", e)
-    logger.info("  No sharing detected — shared-named infra may be deleted")
-    return False
-
-
 def delete_ob_docs_ecs_service(ecs) -> None:
-    logger.info("[1/8] Deleting ECS service %s", SERVICE_NAME)
+    logger.info("[1/9] Deleting ECS service %s", SERVICE_NAME)
     try:
         services = ecs.describe_services(cluster=CLUSTER, services=[SERVICE_NAME]).get(
             "services"
@@ -152,7 +109,7 @@ def delete_ob_docs_ecs_service(ecs) -> None:
 
 
 def deregister_task_definitions(ecs) -> None:
-    logger.info("[2/8] Deregistering task definitions %s*", TASK_FAMILY)
+    logger.info("[2/9] Deregistering task definitions %s*", TASK_FAMILY)
     try:
         paginator = ecs.get_paginator("list_task_definitions")
         for page in paginator.paginate(familyPrefix=TASK_FAMILY, sort="DESC"):
@@ -167,7 +124,7 @@ def deregister_task_definitions(ecs) -> None:
 
 
 def delete_vault_listener_rules(elbv2) -> None:
-    logger.info("[3/8] Deleting ALB /vault* listener rules")
+    logger.info("[3/9] Deleting ALB app listener rules (/* and legacy /vault*)")
     try:
         alb = elbv2.describe_load_balancers(Names=[ALB_NAME])["LoadBalancers"][0]
     except ClientError as e:
@@ -185,16 +142,19 @@ def delete_vault_listener_rules(elbv2) -> None:
         for rule in rules:
             if rule.get("Priority") == "default":
                 continue
-            has_vault = False
+            has_app = False
             for cond in rule.get("Conditions") or []:
                 if cond.get("Field") != "path-pattern":
                     continue
                 for v in cond.get("Values") or []:
                     s = str(v)
-                    if s == "/vault" or s.startswith("/vault/") or s == "/vault/*":
-                        has_vault = True
+                    if (
+                        s in {"/*", "/", "/vault", "/vault/*"}
+                        or s.startswith("/vault/")
+                    ):
+                        has_app = True
                         break
-            if not has_vault:
+            if not has_app:
                 continue
             try:
                 elbv2.delete_rule(RuleArn=rule["RuleArn"])
@@ -203,11 +163,11 @@ def delete_vault_listener_rules(elbv2) -> None:
             except ClientError as e:
                 logger.warning("  Could not delete rule: %s", e)
     if not deleted:
-        logger.info("  No /vault rules found")
+        logger.info("  No app path rules found")
 
 
 def delete_ob_docs_target_group(elbv2) -> None:
-    logger.info("[4/8] Deleting target group %s", TG_NAME)
+    logger.info("[4/9] Deleting target group %s", TG_NAME)
     try:
         tgs = elbv2.describe_target_groups(Names=[TG_NAME])["TargetGroups"]
     except ClientError as e:
@@ -217,7 +177,6 @@ def delete_ob_docs_target_group(elbv2) -> None:
         raise
     for tg in tgs:
         arn = tg["TargetGroupArn"]
-        # Wait briefly if still draining from service delete
         for _ in range(12):
             try:
                 elbv2.delete_target_group(TargetGroupArn=arn)
@@ -233,7 +192,7 @@ def delete_ob_docs_target_group(elbv2) -> None:
 
 
 def delete_ecr_and_logs(ecr, logs) -> None:
-    logger.info("[5/8] Deleting ECR %s + log group %s", ECR_NAME, LOG_GROUP)
+    logger.info("[5/9] Deleting ECR %s + log group %s", ECR_NAME, LOG_GROUP)
     try:
         ecr.delete_repository(repositoryName=ECR_NAME, force=True)
         logger.info("  ✓ Deleted ECR %s", ECR_NAME)
@@ -253,16 +212,17 @@ def delete_ecr_and_logs(ecr, logs) -> None:
             logger.info("  Log group not found")
 
 
-def delete_vault_agent_secret(sm) -> None:
-    logger.info("[6/8] Deleting secret %s", VAULT_AGENT_SECRET)
-    try:
-        sm.delete_secret(SecretId=VAULT_AGENT_SECRET, ForceDeleteWithoutRecovery=True)
-        logger.info("  ✓ Deleted %s", VAULT_AGENT_SECRET)
-    except ClientError as e:
-        if e.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
-            logger.warning("  Secret: %s", e)
-        else:
-            logger.info("  Secret not found")
+def delete_secrets(sm) -> None:
+    logger.info("[6/9] Deleting secrets")
+    for name in (VAULT_AGENT_SECRET, ORIGIN_HEADER_SECRET, SESSION_SECRET):
+        try:
+            sm.delete_secret(SecretId=name, ForceDeleteWithoutRecovery=True)
+            logger.info("  ✓ Deleted %s", name)
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
+                logger.warning("  Secret %s: %s", name, e)
+            else:
+                logger.info("  Secret not found: %s", name)
 
 
 def empty_s3_prefix(s3, bucket: str, prefix: str) -> int:
@@ -286,7 +246,6 @@ def empty_s3_prefix(s3, bucket: str, prefix: str) -> int:
         code = e.response.get("Error", {}).get("Code", "")
         if code in {"NoSuchBucket", "404"}:
             return 0
-        # Fallback without versioning
         if code in {"InvalidArgument", "NotImplemented"}:
             paginator2 = s3.get_paginator("list_objects_v2")
             for page in paginator2.paginate(Bucket=bucket, Prefix=prefix):
@@ -315,15 +274,6 @@ def delete_s3_bucket_fully(s3, bucket: str) -> None:
             logger.warning("  Bucket delete: %s", e)
 
 
-def delete_secret_if_exists(sm, name: str) -> None:
-    try:
-        sm.delete_secret(SecretId=name, ForceDeleteWithoutRecovery=True)
-        logger.info("  ✓ Deleted secret %s", name)
-    except ClientError as e:
-        if e.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
-            logger.warning("  Secret %s: %s", name, e)
-
-
 def delete_iam_role(iam, role_name: str) -> None:
     try:
         for p in iam.list_attached_role_policies(RoleName=role_name).get(
@@ -340,7 +290,7 @@ def delete_iam_role(iam, role_name: str) -> None:
 
 
 def delete_alb_fully(elbv2) -> Optional[str]:
-    """Delete shared ALB + listeners. Returns VPC id if known."""
+    """Delete ALB + listeners. Returns VPC id if known."""
     vpc_id: Optional[str] = None
     try:
         alb = elbv2.describe_load_balancers(Names=[ALB_NAME])["LoadBalancers"][0]
@@ -364,10 +314,9 @@ def delete_alb_fully(elbv2) -> Optional[str]:
 
 
 def delete_vpc_by_id(ec2, vpc_id: str) -> None:
-    """Best-effort delete of a VPC created for the shared stack (minimal install)."""
+    """Best-effort delete of the project VPC."""
     logger.info("  Cleaning VPC %s …", vpc_id)
     try:
-        # ENIs
         for eni in ec2.describe_network_interfaces(
             Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
         ).get("NetworkInterfaces") or []:
@@ -432,22 +381,68 @@ def find_vpc_id(ec2) -> Optional[str]:
     return None
 
 
-def delete_unshared_stack(
+def _find_cloudfront(cloudfront) -> Optional[dict[str, Any]]:
+    marker = None
+    while True:
+        kwargs: dict[str, Any] = {}
+        if marker:
+            kwargs["Marker"] = marker
+        resp = cloudfront.list_distributions(**kwargs)
+        listing = resp.get("DistributionList") or {}
+        for item in listing.get("Items") or []:
+            if item.get("Comment") == CF_COMMENT:
+                return item
+        if not listing.get("IsTruncated"):
+            return None
+        marker = listing.get("NextMarker")
+
+
+def delete_cloudfront(cloudfront) -> None:
+    logger.info("[7/9] Disabling/deleting CloudFront %s", CF_COMMENT)
+    dist = _find_cloudfront(cloudfront)
+    if not dist:
+        logger.info("  CloudFront not found")
+        return
+    dist_id = dist["Id"]
+    try:
+        cfg_resp = cloudfront.get_distribution_config(Id=dist_id)
+        cfg = cfg_resp["DistributionConfig"]
+        if cfg.get("Enabled"):
+            cfg["Enabled"] = False
+            cloudfront.update_distribution(
+                Id=dist_id, IfMatch=cfg_resp["ETag"], DistributionConfig=cfg
+            )
+            logger.info("  Disabled %s — waiting for Deployed…", dist_id)
+            deadline = time.time() + 1800
+            while time.time() < deadline:
+                d = cloudfront.get_distribution(Id=dist_id)["Distribution"]
+                if d.get("Status") == "Deployed" and not d.get("DistributionConfig", {}).get(
+                    "Enabled"
+                ):
+                    break
+                time.sleep(20)
+        etag = cloudfront.get_distribution_config(Id=dist_id)["ETag"]
+        cloudfront.delete_distribution(Id=dist_id, IfMatch=etag)
+        logger.info("  ✓ Deleted CloudFront %s", dist_id)
+    except ClientError as e:
+        logger.warning("  CloudFront: %s", e)
+
+
+def delete_stack(
     *,
     ecs,
     elbv2,
     ec2,
     s3,
-    sm,
     iam,
     region: str,
     account: str,
     bucket: str,
+    keep_s3: bool,
+    purge_vault_prefix: bool,
 ) -> None:
-    """Delete shared-named resources when nothing else shares them."""
-    logger.info("[7/8] Deleting unshared agentic-work-compatible stack")
+    logger.info("[8/9] Deleting network / cluster / IAM / S3")
 
-    # Cluster (ob-docs service already gone)
     try:
         ecs.delete_cluster(cluster=CLUSTER)
         logger.info("  ✓ Deleted cluster %s", CLUSTER)
@@ -457,7 +452,6 @@ def delete_unshared_stack(
 
     vpc_id = delete_alb_fully(elbv2) or find_vpc_id(ec2)
     if vpc_id:
-        # Remaining TGs in VPC that might block (should be gone)
         try:
             for tg in elbv2.describe_target_groups().get("TargetGroups") or []:
                 if tg.get("VpcId") == vpc_id and PROJECT in tg.get("TargetGroupName", ""):
@@ -470,29 +464,26 @@ def delete_unshared_stack(
         time.sleep(5)
         delete_vpc_by_id(ec2, vpc_id)
 
-    delete_secret_if_exists(sm, ORIGIN_HEADER_SECRET)
-    delete_secret_if_exists(sm, SESSION_SECRET)
+    delete_iam_role(iam, f"role-ecs-task-for-{PROJECT}-{region}")
+    delete_iam_role(iam, f"role-ecs-execution-for-{PROJECT}-{region}")
+    delete_iam_role(iam, f"role-harness-for-{PROJECT}-{region}")
 
-    delete_iam_role(iam, f"role-ecs-task-for-{SHARED}-{region}")
-    delete_iam_role(iam, f"role-ecs-execution-for-{SHARED}-{region}")
-
-    if bucket:
-        delete_s3_bucket_fully(s3, bucket)
+    target = bucket or default_bucket_name(account, region)
+    if keep_s3:
+        if purge_vault_prefix:
+            try:
+                n = empty_s3_prefix(s3, target, "vault/")
+                logger.info("  ✓ Purged %d objects under vault/ (bucket kept)", n)
+            except ClientError as e:
+                logger.warning("  vault/ purge: %s", e)
+        else:
+            logger.info("  Keeping S3 bucket %s", target)
     else:
-        delete_s3_bucket_fully(s3, default_bucket_name(account, region))
-
-
-def purge_vault_prefix(s3, bucket: str) -> None:
-    logger.info("[7/8] Purging shared bucket prefix vault/ (bucket kept)")
-    try:
-        n = empty_s3_prefix(s3, bucket, "vault/")
-        logger.info("  ✓ Removed %d objects under vault/", n)
-    except ClientError as e:
-        logger.warning("  vault/ purge: %s", e)
+        delete_s3_bucket_fully(s3, target)
 
 
 def clean_local_config(cfg: dict[str, Any]) -> None:
-    logger.info("[8/8] Cleaning deploy metadata in config.json")
+    logger.info("[9/9] Cleaning deploy metadata in config.json")
     if not CONFIG_PATH.is_file():
         logger.info("  No config.json")
         return
@@ -503,6 +494,12 @@ def clean_local_config(cfg: dict[str, Any]) -> None:
         "ecs_cluster",
         "target_group",
         "alb_dns",
+        "cloudfront_id",
+        "cloudfront_domain",
+        "HARNESS_ARN",
+        "harnessName",
+        "sharedProjectName",
+        "agentic_work_url",
     }
     changed = False
     for k in drop:
@@ -520,7 +517,7 @@ def clean_local_config(cfg: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Uninstall ob-docs AWS resources (keeps shared agentic-work infra when in use)"
+        description="Uninstall standalone ob-docs AWS resources"
     )
     parser.add_argument(
         "--yes",
@@ -528,14 +525,14 @@ def main() -> int:
         help="Skip confirmation prompt",
     )
     parser.add_argument(
-        "--purge-vault-prefix",
+        "--keep-s3",
         action="store_true",
-        help="When stack is shared, also delete s3://{bucket}/vault/ objects (bucket kept)",
+        help="Do not delete the S3 bucket",
     )
     parser.add_argument(
-        "--force-unshared",
+        "--purge-vault-prefix",
         action="store_true",
-        help="Delete shared-named ALB/VPC/cluster/S3/roles even if sharing is detected (dangerous)",
+        help="With --keep-s3, also delete s3://{bucket}/vault/ objects",
     )
     args = parser.parse_args()
 
@@ -549,28 +546,20 @@ def main() -> int:
     logger.info("ob-docs Infrastructure Cleanup")
     logger.info("=" * 60)
     logger.info("Project: %s", PROJECT)
-    logger.info("Shared:  %s", SHARED)
     logger.info("Region:  %s", region)
     logger.info("Account: %s", account)
     logger.info("Bucket:  %s", bucket)
     logger.info("=" * 60)
 
-    shared = is_stack_shared(c["ecs"])
-    if args.force_unshared and shared:
-        logger.warning("--force-unshared: will delete shared-named stack despite sharing")
-        shared = False
-
     if not args.yes:
         logger.info("")
-        logger.info("Will delete ob-docs: service, TG, /vault rules, ECR, logs, vault-agent-token")
-        if shared:
-            logger.info("Shared stack KEEP (agentic-work still in use)")
-            if args.purge_vault_prefix:
-                logger.info("Also purge s3://%s/vault/", bucket)
-        else:
-            logger.info(
-                "Shared stack DELETE (ALB/VPC/cluster/S3/IAM/origin+session secrets)"
-            )
+        logger.info(
+            "Will delete: ECS, TG, /vault rules, ECR, logs, secrets, "
+            "CloudFront, ALB/VPC/cluster/IAM%s",
+            "" if args.keep_s3 else ", S3 bucket",
+        )
+        if args.keep_s3 and args.purge_vault_prefix:
+            logger.info("Also purge s3://%s/vault/", bucket)
         response = input("\nAre you sure you want to continue? (yes/no): ")
         if response.lower() != "yes":
             logger.info("Uninstallation cancelled.")
@@ -583,26 +572,20 @@ def main() -> int:
         delete_vault_listener_rules(c["elbv2"])
         delete_ob_docs_target_group(c["elbv2"])
         delete_ecr_and_logs(c["ecr"], c["logs"])
-        delete_vault_agent_secret(c["sm"])
-
-        if shared:
-            if args.purge_vault_prefix:
-                purge_vault_prefix(c["s3"], bucket)
-            else:
-                logger.info("[7/8] Skipping shared S3/ALB/VPC/cluster/IAM/secrets")
-        else:
-            delete_unshared_stack(
-                ecs=c["ecs"],
-                elbv2=c["elbv2"],
-                ec2=c["ec2"],
-                s3=c["s3"],
-                sm=c["sm"],
-                iam=c["iam"],
-                region=region,
-                account=account,
-                bucket=bucket,
-            )
-
+        delete_secrets(c["sm"])
+        delete_cloudfront(c["cloudfront"])
+        delete_stack(
+            ecs=c["ecs"],
+            elbv2=c["elbv2"],
+            ec2=c["ec2"],
+            s3=c["s3"],
+            iam=c["iam"],
+            region=region,
+            account=account,
+            bucket=bucket,
+            keep_s3=args.keep_s3,
+            purge_vault_prefix=args.purge_vault_prefix,
+        )
         clean_local_config(cfg)
 
         elapsed = time.time() - start

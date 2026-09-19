@@ -1,7 +1,7 @@
-"""Session auth — Google sign-in + shared agent_user_id cookie with agentic-work.
+"""Session auth — Google sign-in + agent_user_id cookie.
 
 Also accepts AgentCore ``Authorization: VaultAgent …`` credentials signed with
-the shared ``vault-agent-token`` (runtime is denied session-signing-key).
+``vault-agent-token`` (runtime is denied session-signing-key).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from application import session_cookie, utils, vault_agent_auth
 
 logger = logging.getLogger("routes_auth")
 
-router = APIRouter(prefix="/vault/api", tags=["session"])
+router = APIRouter(prefix="/api", tags=["session"])
 
 TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 
@@ -45,14 +45,14 @@ class SessionRequest(BaseModel):
 
 class SessionResponse(BaseModel):
     user_id: str
-    agentic_work_url: str
+    sharing_url: str
     authenticated: bool = True
 
 
 class PublicConfigResponse(BaseModel):
     google_client_id: str
     local_auth_bypass: bool
-    agentic_work_url: str
+    sharing_url: str
     project_name: str = "ob-docs"
 
 
@@ -222,7 +222,7 @@ def require_user_id(request: Request) -> str:
         status_code=401,
         detail={
             "error": "unauthorized",
-            "login_url": utils.agentic_work_url(),
+            "login_url": utils.sharing_url() or "/",
             "message": "Sign in with Google to continue",
         },
     )
@@ -234,7 +234,7 @@ def get_public_config(request: Request) -> PublicConfigResponse:
     return PublicConfigResponse(
         google_client_id=(cfg.get("google_client_id") or "").strip(),
         local_auth_bypass=local_auth_bypass_enabled(request),
-        agentic_work_url=utils.agentic_work_url(),
+        sharing_url=utils.sharing_url(),
         project_name=(cfg.get("projectName") or "ob-docs").strip() or "ob-docs",
     )
 
@@ -245,20 +245,20 @@ def get_session(request: Request) -> SessionResponse:
     if user_id:
         return SessionResponse(
             user_id=user_id,
-            agentic_work_url=utils.agentic_work_url(),
+            sharing_url=utils.sharing_url(),
             authenticated=True,
         )
     if local_auth_bypass_enabled(request):
         return SessionResponse(
             user_id="local-dev",
-            agentic_work_url=utils.agentic_work_url(),
+            sharing_url=utils.sharing_url(),
             authenticated=True,
         )
     raise HTTPException(
         status_code=401,
         detail={
             "error": "unauthorized",
-            "login_url": utils.agentic_work_url(),
+            "login_url": utils.sharing_url() or "/",
         },
     )
 
@@ -286,7 +286,7 @@ def set_session(
         _set_user_cookie(response, request, user_id)
         return SessionResponse(
             user_id=user_id,
-            agentic_work_url=utils.agentic_work_url(),
+            sharing_url=utils.sharing_url(),
             authenticated=True,
         )
 
@@ -299,7 +299,7 @@ def set_session(
     _set_user_cookie(response, request, user_id)
     return SessionResponse(
         user_id=user_id,
-        agentic_work_url=utils.agentic_work_url(),
+        sharing_url=utils.sharing_url(),
         authenticated=True,
     )
 

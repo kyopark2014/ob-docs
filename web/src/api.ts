@@ -46,7 +46,7 @@ export type NotesSourcesConfig = {
   max_sources: number;
 };
 
-const BASE = "/vault/api";
+const BASE = "/api";
 
 async function readResponseBody(res: Response): Promise<unknown> {
   const raw = await res.text();
@@ -101,16 +101,16 @@ function formatApiError(detail: unknown, status: number): string {
 
 export const api = {
   getSession: () =>
-    request<{ user_id: string; agentic_work_url: string; authenticated: boolean }>(
+    request<{ user_id: string; sharing_url: string; authenticated: boolean }>(
       "/session",
     ),
   createLocalSession: (user_id = "local-dev") =>
-    request<{ user_id: string; agentic_work_url: string }>("/session", {
+    request<{ user_id: string; sharing_url: string }>("/session", {
       method: "POST",
       body: JSON.stringify({ user_id }),
     }),
   setSessionWithAccessToken: (access_token: string) =>
-    request<{ user_id: string; agentic_work_url: string; authenticated: boolean }>(
+    request<{ user_id: string; sharing_url: string; authenticated: boolean }>(
       "/session",
       {
         method: "POST",
@@ -121,7 +121,7 @@ export const api = {
     request<{
       google_client_id: string;
       local_auth_bypass: boolean;
-      agentic_work_url: string;
+      sharing_url: string;
       project_name: string;
     }>("/config"),
   clearSession: () =>

@@ -36,7 +36,7 @@ def cmd_write(args: argparse.Namespace) -> int:
     content = _read_content(args)
     payload = vault.api_request(
         "PUT",
-        "/vault/api/files/write",
+        "/api/files/write",
         user_id=args.user_id,
         body={"path": args.path, "content": content},
     )
@@ -48,7 +48,7 @@ def cmd_append(args: argparse.Namespace) -> int:
     content = _read_content(args)
     payload = vault.api_request(
         "POST",
-        "/vault/api/files/append",
+        "/api/files/append",
         user_id=args.user_id,
         body={
             "path": args.path,
@@ -64,7 +64,7 @@ def cmd_append(args: argparse.Namespace) -> int:
 def cmd_mkdir(args: argparse.Namespace) -> int:
     payload = vault.api_request(
         "POST",
-        "/vault/api/files/mkdir",
+        "/api/files/mkdir",
         user_id=args.user_id,
         body={"path": args.path},
     )
@@ -75,7 +75,7 @@ def cmd_mkdir(args: argparse.Namespace) -> int:
 def cmd_rename(args: argparse.Namespace) -> int:
     payload = vault.api_request(
         "POST",
-        "/vault/api/files/rename",
+        "/api/files/rename",
         user_id=args.user_id,
         body={"from_path": args.from_path, "to_path": args.to_path},
     )
@@ -86,7 +86,7 @@ def cmd_rename(args: argparse.Namespace) -> int:
 def cmd_delete(args: argparse.Namespace) -> int:
     payload = vault.api_request(
         "POST",
-        "/vault/api/files/delete",
+        "/api/files/delete",
         user_id=args.user_id,
         body={"path": args.path},
     )
@@ -97,7 +97,7 @@ def cmd_delete(args: argparse.Namespace) -> int:
 def cmd_rebuild(args: argparse.Namespace) -> int:
     payload = vault.api_request(
         "POST",
-        "/vault/api/graph/rebuild",
+        "/api/graph/rebuild",
         user_id=args.user_id,
     )
     vault.print_json(payload)
@@ -119,12 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--user-id", default=None, help="Override USER_ID / CURRENT_USER_ID")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("write", help="PUT /vault/api/files/write (overwrite)")
+    p = sub.add_parser("write", help="PUT /api/files/write (overwrite)")
     p.add_argument("path", help="Vault-relative path")
     _add_content_flags(p)
     p.set_defaults(func=cmd_write)
 
-    p = sub.add_parser("append", help="POST /vault/api/files/append")
+    p = sub.add_parser("append", help="POST /api/files/append")
     p.add_argument("path", help="Vault-relative path")
     _add_content_flags(p)
     p.add_argument("--no-create", action="store_true", help="Fail if file missing")
@@ -135,20 +135,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_append)
 
-    p = sub.add_parser("mkdir", help="POST /vault/api/files/mkdir")
+    p = sub.add_parser("mkdir", help="POST /api/files/mkdir")
     p.add_argument("path", help="Folder path")
     p.set_defaults(func=cmd_mkdir)
 
-    p = sub.add_parser("rename", help="POST /vault/api/files/rename")
+    p = sub.add_parser("rename", help="POST /api/files/rename")
     p.add_argument("from_path", help="Source path")
     p.add_argument("to_path", help="Destination path")
     p.set_defaults(func=cmd_rename)
 
-    p = sub.add_parser("delete", help="POST /vault/api/files/delete")
+    p = sub.add_parser("delete", help="POST /api/files/delete")
     p.add_argument("path", help="File or folder path")
     p.set_defaults(func=cmd_delete)
 
-    p = sub.add_parser("rebuild", help="POST /vault/api/graph/rebuild")
+    p = sub.add_parser("rebuild", help="POST /api/graph/rebuild")
     p.set_defaults(func=cmd_rebuild)
 
     return parser

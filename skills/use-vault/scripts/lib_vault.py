@@ -51,7 +51,7 @@ def load_skill_config() -> dict[str, Any]:
     return {}
 
 
-def load_agentic_config() -> dict[str, Any]:
+def load_app_config() -> dict[str, Any]:
     env_json = (os.environ.get("APP_CONFIG_JSON") or "").strip()
     if env_json:
         try:
@@ -63,32 +63,29 @@ def load_agentic_config() -> dict[str, Any]:
 
     skill_cfg = load_skill_config()
     if skill_cfg:
-        # Normalize skill sidecar keys into the shape loaders below expect.
         return {
             "s3_bucket": skill_cfg.get("s3_bucket"),
             "sharing_url": skill_cfg.get("sharing_url") or skill_cfg.get("ob_docs_url"),
-            "agentic_work_url": skill_cfg.get("ob_docs_url")
-            or skill_cfg.get("sharing_url"),
             "region": skill_cfg.get("region"),
-            "sharedProjectName": skill_cfg.get("shared_project_name"),
-            "projectName": skill_cfg.get("shared_project_name"),
+            "projectName": skill_cfg.get("project_name") or "ob-docs",
         }
 
     candidates: list[Path] = []
-    for key in ("AGENTIC_WORK_ROOT", "WORKING_DIR", "APP_ROOT"):
+    for key in ("OB_DOCS_ROOT", "WORKING_DIR", "APP_ROOT"):
         raw = (os.environ.get(key) or "").strip()
         if raw:
             candidates.append(Path(raw) / "config.json")
             candidates.append(Path(raw) / "application" / "config.json")
 
     here = Path(__file__).resolve()
-    langgraph_root = here.parents[3]  # runtime_agent/langgraph
-    agentic_root = here.parents[5] if len(here.parents) > 5 else here.parents[3]
+    # skills/use-vault/scripts → ob-docs root is parents[3]
+    try:
+        ob_docs_root = here.parents[3]
+        candidates.append(ob_docs_root / "config.json")
+    except IndexError:
+        pass
     candidates.extend(
         [
-            langgraph_root / "config.json",
-            agentic_root / "application" / "config.json",
-            agentic_root / "config.json",
             Path.cwd() / "config.json",
             Path.cwd() / "application" / "config.json",
         ]
@@ -100,25 +97,24 @@ def load_agentic_config() -> dict[str, Any]:
 
 
 def _project_name(cfg: Optional[dict[str, Any]] = None) -> str:
-    """Secrets Manager prefix for vault-agent-token (shared with agentic-work)."""
-    cfg = cfg if cfg is not None else load_agentic_config()
+    """Secrets Manager prefix for vault-agent-token."""
+    cfg = cfg if cfg is not None else load_app_config()
     skill = load_skill_config()
     return (
         (
-            os.environ.get("SHARED_PROJECT_NAME")
-            or os.environ.get("VAULT_SHARED_PROJECT")
-            or skill.get("shared_project_name")
-            or cfg.get("sharedProjectName")
+            os.environ.get("PROJECT_NAME")
+            or os.environ.get("SHARED_PROJECT_NAME")
+            or skill.get("project_name")
             or cfg.get("projectName")
-            or "agentic-work"
+            or "ob-docs"
         )
         .strip()
-        or "agentic-work"
+        or "ob-docs"
     )
 
 
 def _region(cfg: Optional[dict[str, Any]] = None) -> str:
-    cfg = cfg if cfg is not None else load_agentic_config()
+    cfg = cfg if cfg is not None else load_app_config()
     skill = load_skill_config()
     return (
         os.environ.get("AWS_REGION")
@@ -143,9 +139,9 @@ def vault_base_url() -> str:
     if skill_url:
         return skill_url.rstrip("/")
 
-    cfg = load_agentic_config()
+    cfg = load_app_config()
     sharing = (
-        (cfg.get("sharing_url") or cfg.get("agentic_work_url") or "").strip()
+        (cfg.get("sharing_url") or "").strip()
         or (os.environ.get("SHARING_URL") or "").strip()
     )
     if sharing:
@@ -224,11 +220,9 @@ def _session_signing_key() -> tuple[Optional[bytes], list[str]]:
     if err:
         errors.append(err)
 
-    here = Path(__file__).resolve()
-    agentic_root = here.parents[5] if len(here.parents) > 5 else Path.cwd()
     for path in (
         Path.cwd() / "application" / "data" / ".session_signing_key",
-        agentic_root / "application" / "data" / ".session_signing_key",
+        Path.cwd() / "data" / ".session_signing_key",
     ):
         if path.is_file():
             text = path.read_text(encoding="utf-8").strip()
@@ -312,7 +306,7 @@ def api_request(
             url = f"{url}?{urllib.parse.urlencode(filtered)}"
 
     # health is public
-    require_auth = path.rstrip("/") != "/vault/api/health"
+    require_auth = path.rstrip("/") != "/api/health"
     data = None
     headers = _auth_headers(uid, require_auth=require_auth)
     if body is not None:

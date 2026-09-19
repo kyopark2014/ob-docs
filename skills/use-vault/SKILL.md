@@ -54,4 +54,4 @@ Open Agent에서는 위 `VAULT_WRITE` 경로를 사용하세요.
 | 키 / 변수 | 설명 |
 | --- | --- |
 | `OB_DOCS_URL` / `SHARING_URL` | vault API base |
-| `VAULT_AGENT_TOKEN` | 스크립트 인증 (Secrets Manager `agentic-work/vault-agent-token`) |
+| `VAULT_AGENT_TOKEN` | 스크립트 인증 (Secrets Manager `ob-docs/vault-agent-token`) |

@@ -4,17 +4,17 @@ Pure ASGI middleware (not BaseHTTPMiddleware): Starlette's BaseHTTPMiddleware
 buffers/re-streams bodies and breaks FileResponse with
 "Response content longer than Content-Length" (e.g. Notes Graph iframe).
 
-CloudFront ``agentic-work-security-headers`` forces ``X-Frame-Options: DENY``
+CloudFront security headers may force ``X-Frame-Options: DENY``
 (Override: true) on all paths. Modern browsers ignore XFO when CSP
 ``frame-ancestors`` is present, so Notes Graph HTML must send
-``frame-ancestors 'self'`` (same approach as agentic-work Wiki Graph).
+``frame-ancestors 'self'``.
 """
 
 from __future__ import annotations
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-# Graph HTML loads vis-network from unpkg + inline scripts; must be frameable by /vault.
+# Graph HTML loads vis-network from unpkg + inline scripts; must be frameable by the app.
 _GRAPH_CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline' https://unpkg.com; "
@@ -55,7 +55,7 @@ def _is_notes_graph_html(scope: Scope) -> bool:
     """Exact Notes Graph iframe HTML (not /status|/sync|/query)."""
     path = scope.get("path") or "/"
     path = path.rstrip("/") or "/"
-    return path == "/vault/api/graph/graph"
+    return path == "/api/graph/graph"
 
 
 def _header_names(headers: list[tuple[bytes, bytes]]) -> set[bytes]:

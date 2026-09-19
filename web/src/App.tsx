@@ -285,7 +285,7 @@ export default function App() {
   const [publicConfig, setPublicConfig] = useState<{
     google_client_id: string;
     local_auth_bypass: boolean;
-    agentic_work_url: string;
+    sharing_url: string;
     project_name: string;
   } | null>(null);
   const [userId, setUserId] = useState<string | null>(null);

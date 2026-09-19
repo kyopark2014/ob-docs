@@ -212,7 +212,7 @@ def build_text_viewer_page(
     as_markdown: bool,
     download_href: str = "",
 ) -> str:
-    """CSP-safe text/markdown viewer for Load-files ``/vault/api/files/view``."""
+    """CSP-safe text/markdown viewer for Load-files ``/api/files/view``."""
     download_link = ""
     if download_href:
         download_link = (

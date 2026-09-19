@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query, Request
 from application.api.routes_auth import require_user_id
 from application import vault_index
 
-router = APIRouter(prefix="/vault/api/search", tags=["search"])
+router = APIRouter(prefix="/api/search", tags=["search"])
 
 
 @router.get("")

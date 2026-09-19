@@ -43,29 +43,18 @@ def load_config() -> dict[str, Any]:
 
 def project_name() -> str:
     cfg = load_config()
-    name = (cfg.get("projectName") or "").strip()
-    return name or "ob-docs"
-
-
-def shared_project_name() -> str:
-    cfg = load_config()
-    name = (cfg.get("sharedProjectName") or "").strip()
-    return name or "agentic-work"
-
-
-def agentic_work_url() -> str:
-    cfg = load_config()
-    return (
-        (cfg.get("agentic_work_url") or cfg.get("sharing_url") or "").strip()
-        or "http://localhost:8501"
+    name = (
+        (cfg.get("projectName") or "").strip()
+        or (os.environ.get("PROJECT_NAME") or "").strip()
     )
+    return name or "ob-docs"
 
 
 def sharing_url() -> str:
     """Public CloudFront (or custom domain) base URL for share links."""
     cfg = load_config()
-    env = (os.environ.get("SHARING_URL") or "").strip()
-    return (env or cfg.get("sharing_url") or cfg.get("agentic_work_url") or "").strip().rstrip("/")
+    env = (os.environ.get("SHARING_URL") or os.environ.get("OB_DOCS_URL") or "").strip()
+    return (env or cfg.get("sharing_url") or "").strip().rstrip("/")
 
 
 def is_hybrid_graph_search_enabled() -> bool:

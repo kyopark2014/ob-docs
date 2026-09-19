@@ -1,6 +1,6 @@
 """Vault storage backend: S3 Files mount, optional S3 API sync, or local disk.
 
-ECS mounts vault/ at /mnt/vault (shared agentic-work bucket).
+ECS mounts vault/ at /mnt/vault (project S3 bucket).
 Locally: data/vault/ is the working copy. Opt-in S3 sync with VAULT_S3_ENABLE=1.
 """
 

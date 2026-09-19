@@ -18,7 +18,7 @@ from application import harness_client, models as model_catalog, vault_backend, 
 
 logger = logging.getLogger("routes_agent")
 
-router = APIRouter(prefix="/vault/api/agent", tags=["agent"])
+router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 SSE_HEARTBEAT_INTERVAL_SECONDS = 15
 

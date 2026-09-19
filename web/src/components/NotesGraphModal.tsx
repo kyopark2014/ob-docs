@@ -26,7 +26,7 @@ export function NotesGraphModal({
         const bust = next.last_success_at
           ? encodeURIComponent(next.last_success_at)
           : String(Date.now());
-        const nextSrc = `/vault/api/graph/graph?t=${bust}`;
+        const nextSrc = `/api/graph/graph?t=${bust}`;
         return prev === nextSrc ? prev : nextSrc;
       });
     }
@@ -92,7 +92,7 @@ export function NotesGraphModal({
       setPatternBusy(true);
       try {
         await api.setNotesGraphPattern(pattern);
-        setFrameSrc(`/vault/api/graph/graph?t=${Date.now()}`);
+        setFrameSrc(`/api/graph/graph?t=${Date.now()}`);
       } catch (err) {
         setPollError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -141,7 +141,7 @@ export function NotesGraphModal({
                   Notes 그래프 동기화 중
                 </p>
                 <p className="knowledge-graph-placeholder-body">
-                  vault markdown 위키링크를 인덱싱하고 agentic-work Graph UI를
+                  vault markdown 위키링크를 인덱싱하고 Notes Graph UI를
                   생성하고 있습니다.
                 </p>
               </>

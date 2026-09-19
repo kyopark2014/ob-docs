@@ -404,7 +404,7 @@ def _write_pattern_html_file(
             f"({G.number_of_nodes()} nodes / {G.number_of_edges()} edges) · "
             "더블클릭으로 노트 열기"
         ),
-        query_url="/vault/api/graph/query",
+        query_url="/api/graph/query",
     )
     # Append Notes open hook (double-click → parent postMessage)
     try:

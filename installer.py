@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""Deploy ob-docs onto the shared agentic-work ALB / ECS / S3 stack.
+"""Deploy standalone ob-docs (own CloudFront / ALB / ECS / S3).
 
 Creates (idempotent):
-  - Shared infra if missing (S3, secrets, IAM roles, ECS cluster, VPC/ALB)
-    via ``shared_infra.py`` (same naming as agentic-work/installer.py)
+  - Infra if missing (S3, secrets, IAM roles, ECS cluster, VPC/ALB, CloudFront)
+    via ``shared_infra.py`` (``ob-docs`` resource naming)
   - ECR repository
   - ALB target group TG-for-ob-docs (port 8502)
-  - Listener rule: path /vault* (+ optional CloudFront origin header) → ob-docs TG
-  - ECS task definition + Fargate service on cluster-for-agentic-work
+  - Listener rule: path /* (+ CloudFront origin header) → ob-docs TG
+  - ECS task definition + Fargate service on cluster-for-ob-docs
   - Seeds s3://{bucket}/vault/ from data/vault/
 
-``config.json`` may be missing or partial — installer bootstraps it (and will
-merge keys from ``../agentic-work/application/config.json`` when present).
+``config.json`` may be missing or partial — installer bootstraps it.
 
 Usage:
   python installer.py
@@ -43,9 +42,8 @@ from shared_infra import (
     ORIGIN_HEADER_SECRET,
     PROJECT,
     SESSION_SECRET,
-    SHARED,
     bootstrap_config,
-    ensure_shared_stack,
+    ensure_infra_stack,
 )
 
 logging.basicConfig(
@@ -64,7 +62,7 @@ TG_NAME = f"TG-for-{PROJECT}"
 ECR_NAME = f"ecr-for-{PROJECT}"
 CONTAINER_PORT = 8502
 LOG_GROUP = f"/ecs/app-for-{PROJECT}"
-VAULT_AGENT_SECRET = f"{SHARED}/vault-agent-token"
+VAULT_AGENT_SECRET = f"{PROJECT}/vault-agent-token"
 
 
 def load_config() -> dict[str, Any]:
@@ -86,6 +84,8 @@ def clients(region: str):
         "sm": boto3.client("secretsmanager", region_name=region),
         "sts": boto3.client("sts", region_name=region),
         "iam": boto3.client("iam"),
+        "cloudfront": boto3.client("cloudfront", region_name="us-east-1"),
+        "acm": boto3.client("acm", region_name="us-east-1"),
     }
 
 
@@ -190,7 +190,7 @@ def get_secret_arn(sm, name: str) -> str:
 
 
 def ensure_vault_agent_token(sm) -> str:
-    """Create or reuse shared vault-agent-token; return secret ARN."""
+    """Create or reuse vault-agent-token; return secret ARN."""
     import secrets as py_secrets
 
     try:
@@ -202,50 +202,192 @@ def ensure_vault_agent_token(sm) -> str:
     resp = sm.create_secret(
         Name=VAULT_AGENT_SECRET,
         SecretString=value,
-        Description="Shared HMAC token for AgentCore my-vaults → ob-docs auth",
+        Description="HMAC token for AgentCore use-vault → ob-docs auth",
+        Tags=[
+            {"Key": "Name", "Value": VAULT_AGENT_SECRET},
+            {"Key": "Project", "Value": PROJECT},
+        ],
     )
     logger.info("Created secret %s", VAULT_AGENT_SECRET)
     return resp["ARN"]
 
 
 def ensure_target_group(elbv2, vpc_id: str) -> str:
+    """Create or reuse TG-for-ob-docs in ``vpc_id`` (recreate if VPC mismatch)."""
+
+    def _create() -> str:
+        resp = elbv2.create_target_group(
+            Name=TG_NAME,
+            Protocol="HTTP",
+            Port=CONTAINER_PORT,
+            VpcId=vpc_id,
+            TargetType="ip",
+            HealthCheckProtocol="HTTP",
+            HealthCheckPath="/api/health",
+            HealthCheckIntervalSeconds=30,
+            HealthCheckTimeoutSeconds=5,
+            HealthyThresholdCount=2,
+            UnhealthyThresholdCount=3,
+            Matcher={"HttpCode": "200"},
+        )
+        arn = resp["TargetGroups"][0]["TargetGroupArn"]
+        logger.info("Created target group %s in %s", TG_NAME, vpc_id)
+        try:
+            elbv2.modify_target_group_attributes(
+                TargetGroupArn=arn,
+                Attributes=[
+                    {"Key": "stickiness.enabled", "Value": "true"},
+                    {"Key": "stickiness.type", "Value": "app_cookie"},
+                    {
+                        "Key": "stickiness.app_cookie.cookie_name",
+                        "Value": "agent_user_id",
+                    },
+                    {
+                        "Key": "stickiness.app_cookie.duration_seconds",
+                        "Value": "86400",
+                    },
+                ],
+            )
+        except ClientError as e:
+            logger.warning("Could not enable stickiness: %s", e)
+        return arn
+
+    def _detach_and_delete(arn: str) -> None:
+        """Detach TG from ECS/listener rules, then delete it."""
+        # ECS services cannot change loadBalancers in-place; scale down & delete
+        # any service still bound to this TG so delete_target_group can succeed.
+        try:
+            ecs = boto3.client(
+                "ecs",
+                region_name=elbv2.meta.region_name,
+            )
+            try:
+                arns = ecs.list_services(cluster=CLUSTER).get("serviceArns") or []
+            except ClientError:
+                arns = []
+            if arns:
+                for page_start in range(0, len(arns), 10):
+                    batch = arns[page_start : page_start + 10]
+                    for svc in ecs.describe_services(
+                        cluster=CLUSTER, services=batch
+                    ).get("services") or []:
+                        if svc.get("status") == "INACTIVE":
+                            continue
+                        bound = any(
+                            (lb.get("targetGroupArn") or "") == arn
+                            for lb in (svc.get("loadBalancers") or [])
+                        )
+                        if not bound:
+                            continue
+                        name = svc["serviceName"]
+                        logger.info(
+                            "Detaching ECS service %s from mismatched TG…", name
+                        )
+                        try:
+                            ecs.update_service(
+                                cluster=CLUSTER, service=name, desiredCount=0
+                            )
+                            time.sleep(8)
+                            ecs.delete_service(
+                                cluster=CLUSTER, service=name, force=True
+                            )
+                            deadline = time.time() + 180
+                            while time.time() < deadline:
+                                check = ecs.describe_services(
+                                    cluster=CLUSTER, services=[name]
+                                ).get("services") or []
+                                live = [
+                                    s for s in check if s.get("status") != "INACTIVE"
+                                ]
+                                if not live:
+                                    break
+                                time.sleep(5)
+                        except ClientError as e:
+                            logger.warning("Could not delete ECS service %s: %s", name, e)
+        except Exception as e:
+            logger.warning("ECS detach for TG recreate skipped: %s", e)
+
+        try:
+            for lb in elbv2.describe_load_balancers().get("LoadBalancers") or []:
+                for listener in elbv2.describe_listeners(
+                    LoadBalancerArn=lb["LoadBalancerArn"]
+                ).get("Listeners") or []:
+                    for rule in elbv2.describe_rules(
+                        ListenerArn=listener["ListenerArn"]
+                    ).get("Rules") or []:
+                        for action in rule.get("Actions") or []:
+                            if action.get("TargetGroupArn") != arn:
+                                continue
+                            try:
+                                if rule.get("Priority") == "default":
+                                    elbv2.modify_listener(
+                                        ListenerArn=listener["ListenerArn"],
+                                        DefaultActions=[
+                                            {
+                                                "Type": "fixed-response",
+                                                "FixedResponseConfig": {
+                                                    "StatusCode": "404",
+                                                    "ContentType": "text/plain",
+                                                    "MessageBody": "Not Found",
+                                                },
+                                            }
+                                        ],
+                                    )
+                                else:
+                                    elbv2.delete_rule(RuleArn=rule["RuleArn"])
+                                logger.info(
+                                    "Detached old TG from rule %s",
+                                    rule.get("RuleArn") or listener["ListenerArn"],
+                                )
+                            except ClientError as e:
+                                logger.warning("Could not detach TG from rule: %s", e)
+        except ClientError as e:
+            logger.warning("Could not scan listeners for old TG: %s", e)
+
+        for _ in range(18):
+            try:
+                elbv2.delete_target_group(TargetGroupArn=arn)
+                logger.info("Deleted mismatched target group %s", arn.rsplit("/", 1)[-1])
+                time.sleep(3)
+                return
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "")
+                if code == "ResourceInUse":
+                    logger.info("TG still in use, waiting…")
+                    time.sleep(10)
+                    continue
+                if code == "TargetGroupNotFound":
+                    return
+                raise
+        raise RuntimeError(f"Timed out deleting mismatched target group {arn}")
+
     try:
-        tgs = elbv2.describe_target_groups(Names=[TG_NAME])
-        arn = tgs["TargetGroups"][0]["TargetGroupArn"]
+        tg = elbv2.describe_target_groups(Names=[TG_NAME])["TargetGroups"][0]
+        arn = tg["TargetGroupArn"]
+        existing_vpc = tg.get("VpcId") or ""
+        if existing_vpc and existing_vpc != vpc_id:
+            logger.warning(
+                "Target group %s is in VPC %s but ALB is in %s — recreating",
+                TG_NAME,
+                existing_vpc,
+                vpc_id,
+            )
+            _detach_and_delete(arn)
+            return _create()
         logger.info("Target group exists: %s", TG_NAME)
+        try:
+            elbv2.modify_target_group(
+                TargetGroupArn=arn,
+                HealthCheckPath="/api/health",
+                Matcher={"HttpCode": "200"},
+            )
+        except ClientError as e:
+            logger.warning("Could not update TG health path: %s", e)
         return arn
     except ClientError as e:
         if e.response["Error"]["Code"] != "TargetGroupNotFound":
             raise
-    resp = elbv2.create_target_group(
-        Name=TG_NAME,
-        Protocol="HTTP",
-        Port=CONTAINER_PORT,
-        VpcId=vpc_id,
-        TargetType="ip",
-        HealthCheckProtocol="HTTP",
-        HealthCheckPath="/vault/api/health",
-        HealthCheckIntervalSeconds=30,
-        HealthCheckTimeoutSeconds=5,
-        HealthyThresholdCount=2,
-        UnhealthyThresholdCount=3,
-        Matcher={"HttpCode": "200"},
-    )
-    arn = resp["TargetGroups"][0]["TargetGroupArn"]
-    logger.info("Created target group %s", TG_NAME)
-    try:
-        elbv2.modify_target_group_attributes(
-            TargetGroupArn=arn,
-            Attributes=[
-                {"Key": "stickiness.enabled", "Value": "true"},
-                {"Key": "stickiness.type", "Value": "app_cookie"},
-                {"Key": "stickiness.app_cookie.cookie_name", "Value": "agent_user_id"},
-                {"Key": "stickiness.app_cookie.duration_seconds", "Value": "86400"},
-            ],
-        )
-    except ClientError as e:
-        logger.warning("Could not enable stickiness: %s", e)
-    return arn
+    return _create()
 
 
 def ensure_listener_rule(
@@ -256,53 +398,47 @@ def ensure_listener_rule(
     *,
     require_origin_header: bool = True,
 ) -> str:
-    """Path /vault* (+ optional origin header) → ob-docs TG.
-
-    Must be a *higher* priority (lower number) than the agentic-work catch-all
-    header-only rule, otherwise /vault never reaches ob-docs.
-
-    Prefer priority 1 so agentic-work's header-only rules (often 4/5/10) cannot
-    steal /vault traffic. Also refuse to treat header-only rules as the vault rule.
+    """Path /* (+ optional origin header) → ob-docs TG.
 
     When ``require_origin_header`` is False (ALB-only / no CloudFront), the rule
     matches path only so browsers can hit the ALB DNS directly.
     """
     rules = elbv2.describe_rules(ListenerArn=listener_arn)["Rules"]
-    vault_rule = None
+    app_rule = None
     for rule in rules:
         if rule.get("Priority") == "default":
             continue
         conds = rule.get("Conditions") or []
-        has_vault_path = False
+        has_app_path = False
         for c in conds:
             if c.get("Field") != "path-pattern":
                 continue
-            values = c.get("Values") or []
+            values = [str(v) for v in (c.get("Values") or [])]
             if any(
-                str(v) == "/vault" or str(v).startswith("/vault/") or str(v) == "/vault/*"
+                v in {"/*", "/", "/vault", "/vault/*"} or v.startswith("/vault/")
                 for v in values
             ):
-                has_vault_path = True
+                has_app_path = True
                 break
-        if has_vault_path:
-            vault_rule = rule
+        if has_app_path:
+            app_rule = rule
             break
 
     desired_priority = 1
     used = {
         int(r["Priority"])
         for r in rules
-        if r.get("Priority", "default").isdigit() and r is not vault_rule
+        if r.get("Priority", "default").isdigit() and r is not app_rule
     }
     while desired_priority in used:
         desired_priority += 1
         if desired_priority > 10:
-            raise RuntimeError("No free ALB listener priority for /vault rule")
+            raise RuntimeError("No free ALB listener priority for app rule")
 
     conditions: list[dict[str, Any]] = [
         {
             "Field": "path-pattern",
-            "Values": ["/vault", "/vault/*"],
+            "Values": ["/*"],
         },
     ]
     if require_origin_header and origin_header:
@@ -317,36 +453,36 @@ def ensure_listener_rule(
         )
     actions = [{"Type": "forward", "TargetGroupArn": tg_arn}]
 
-    if vault_rule:
+    if app_rule:
         elbv2.modify_rule(
-            RuleArn=vault_rule["RuleArn"],
+            RuleArn=app_rule["RuleArn"],
             Conditions=conditions,
             Actions=actions,
         )
-        current = vault_rule.get("Priority")
+        current = app_rule.get("Priority")
         if str(current) != str(desired_priority):
             try:
                 elbv2.set_rule_priorities(
                     RulePriorities=[
-                        {"RuleArn": vault_rule["RuleArn"], "Priority": desired_priority}
+                        {"RuleArn": app_rule["RuleArn"], "Priority": desired_priority}
                     ]
                 )
                 logger.info(
-                    "Updated /vault listener rule %s priority %s → %s",
-                    vault_rule["RuleArn"],
+                    "Updated /* listener rule %s priority %s → %s",
+                    app_rule["RuleArn"],
                     current,
                     desired_priority,
                 )
             except ClientError as e:
                 logger.warning(
-                    "Could not move /vault rule to priority %s (kept %s): %s",
+                    "Could not move /* rule to priority %s (kept %s): %s",
                     desired_priority,
                     current,
                     e,
                 )
         else:
-            logger.info("Updated existing /vault listener rule %s", vault_rule["RuleArn"])
-        return vault_rule["RuleArn"]
+            logger.info("Updated existing /* listener rule %s", app_rule["RuleArn"])
+        return app_rule["RuleArn"]
 
     resp = elbv2.create_rule(
         ListenerArn=listener_arn,
@@ -368,11 +504,10 @@ def register_task_definition(
 ) -> str:
     account = str(cfg["accountId"])
     region = str(cfg["region"])
-    exec_role = f"role-ecs-execution-for-{SHARED}-{region}"
-    task_role = f"role-ecs-task-for-{SHARED}-{region}"
+    exec_role = f"role-ecs-execution-for-{PROJECT}-{region}"
+    task_role = f"role-ecs-task-for-{PROJECT}-{region}"
     app_config = {
         "projectName": PROJECT,
-        "sharedProjectName": SHARED,
         "accountId": account,
         "region": region,
         "s3_bucket": cfg["s3_bucket"],
@@ -380,8 +515,7 @@ def register_task_definition(
         "s3_files_vault_prefix": "vault/",
         "s3_files_vault_mount_path": "/mnt/vault",
         "google_client_id": cfg.get("google_client_id", ""),
-        "sharing_url": cfg.get("sharing_url") or cfg.get("agentic_work_url"),
-        "agentic_work_url": cfg.get("agentic_work_url") or cfg.get("sharing_url"),
+        "sharing_url": cfg.get("sharing_url") or "",
         "HARNESS_ARN": cfg.get("HARNESS_ARN") or "",
         "harnessName": cfg.get("harnessName") or "",
     }
@@ -394,7 +528,7 @@ def register_task_definition(
             {"name": "APP_CONFIG_JSON", "value": json.dumps(app_config)},
             {"name": "VAULT_S3_ENABLE", "value": "1"},
             {"name": "VAULT_DIR", "value": "/app/data/vault"},
-            {"name": "SHARED_PROJECT_NAME", "value": SHARED},
+            {"name": "PROJECT_NAME", "value": PROJECT},
         ],
         "secrets": [
             {"name": "SESSION_SIGNING_KEY", "valueFrom": session_secret_arn},
@@ -411,7 +545,7 @@ def register_task_definition(
         "healthCheck": {
             "command": [
                 "CMD-SHELL",
-                f"curl -f http://localhost:{CONTAINER_PORT}/vault/api/health || exit 1",
+                f"curl -f http://localhost:{CONTAINER_PORT}/api/health || exit 1",
             ],
             "interval": 30,
             "timeout": 5,
@@ -460,21 +594,7 @@ def ensure_service(
         }
     }
 
-    if services:
-        ecs.update_service(
-            cluster=CLUSTER,
-            service=SERVICE_NAME,
-            taskDefinition=task_def_arn,
-            desiredCount=1,
-            forceNewDeployment=True,
-            networkConfiguration=network,
-            deploymentConfiguration={
-                "minimumHealthyPercent": 100,
-                "maximumPercent": 200,
-            },
-        )
-        logger.info("Updated ECS service %s", SERVICE_NAME)
-    else:
+    def _create() -> None:
         ecs.create_service(
             cluster=CLUSTER,
             serviceName=SERVICE_NAME,
@@ -498,13 +618,61 @@ def ensure_service(
         )
         logger.info("Created ECS service %s", SERVICE_NAME)
 
+    if services:
+        svc = services[0]
+        current_tg = (svc.get("loadBalancers") or [{}])[0].get("targetGroupArn") or ""
+        if current_tg and current_tg != tg_arn:
+            logger.warning(
+                "ECS service TG mismatch (%s → %s) — recreating service",
+                current_tg.rsplit("/", 1)[-1],
+                tg_arn.rsplit("/", 1)[-1],
+            )
+            try:
+                ecs.update_service(
+                    cluster=CLUSTER, service=SERVICE_NAME, desiredCount=0
+                )
+                time.sleep(8)
+                ecs.delete_service(
+                    cluster=CLUSTER, service=SERVICE_NAME, force=True
+                )
+                logger.info("Deleted ECS service %s for TG swap", SERVICE_NAME)
+                # Wait until inactive so create_service can reuse the name.
+                deadline = time.time() + 180
+                while time.time() < deadline:
+                    check = ecs.describe_services(
+                        cluster=CLUSTER, services=[SERVICE_NAME]
+                    ).get("services") or []
+                    live = [s for s in check if s.get("status") != "INACTIVE"]
+                    if not live:
+                        break
+                    time.sleep(5)
+            except ClientError as e:
+                logger.warning("Could not delete service for TG swap: %s", e)
+            _create()
+            return
+
+        ecs.update_service(
+            cluster=CLUSTER,
+            service=SERVICE_NAME,
+            taskDefinition=task_def_arn,
+            desiredCount=1,
+            forceNewDeployment=True,
+            networkConfiguration=network,
+            deploymentConfiguration={
+                "minimumHealthyPercent": 100,
+                "maximumPercent": 200,
+            },
+        )
+        logger.info("Updated ECS service %s", SERVICE_NAME)
+    else:
+        _create()
+
 
 def _ecs_primary_deployment_ready(service: dict[str, Any]) -> bool:
     """Return True when the PRIMARY deployment is serving the desired task count.
 
-    Mirrors agentic-work/installer.py: during rolling updates the service-level
-    runningCount can exceed desiredCount while the previous deployment drains
-    (minimumHealthyPercent=100%, ALB deregistration delay). Only PRIMARY matters.
+    During rolling updates the service-level runningCount can exceed desiredCount
+    while the previous deployment drains. Only PRIMARY matters.
     """
     if service.get("status") != "ACTIVE":
         return False
@@ -704,8 +872,8 @@ def main() -> int:
         )
         cfg["accountId"] = str(ident["Account"])
 
-    logger.info("[0/6] Ensure shared agentic-work-compatible infra")
-    cfg, network, origin_header = ensure_shared_stack(
+    logger.info("[0/8] Ensure standalone ob-docs infra (S3/ALB/CF/secrets)")
+    cfg, network, origin_header = ensure_infra_stack(
         cfg=cfg,
         s3=c["s3"],
         sm=c["sm"],
@@ -713,9 +881,12 @@ def main() -> int:
         ecs=c["ecs"],
         elbv2=c["elbv2"],
         ec2=c["ec2"],
+        cloudfront=c["cloudfront"],
+        acm=c["acm"],
     )
     save_config(cfg)
     bucket = cfg["s3_bucket"]
+    sharing_url = str(cfg.get("sharing_url") or "")
 
     if not origin_header:
         raise RuntimeError(f"Empty origin header secret: {ORIGIN_HEADER_SECRET}")
@@ -731,9 +902,9 @@ def main() -> int:
     logger.info("[1/8] Upload skills (use-vault) → s3://%s/skills/", bucket)
     n_skills = upload_skills_to_s3(
         bucket,
-        sharing_url=str(cfg.get("sharing_url") or cfg.get("agentic_work_url") or ""),
+        sharing_url=sharing_url,
         region=region,
-        shared_project=SHARED,
+        project=PROJECT,
     )
     logger.info("Uploaded %d skill files", n_skills)
 
@@ -743,7 +914,7 @@ def main() -> int:
         region,
         PROJECT,
         s3_bucket=bucket,
-        shared_project=SHARED,
+        project_secret_prefix=PROJECT,
     )
     harness_info = create_or_get_harness(
         account=account,
@@ -751,15 +922,15 @@ def main() -> int:
         project=PROJECT,
         execution_role_arn=exec_role_arn,
         s3_bucket=bucket,
-        sharing_url=str(cfg.get("sharing_url") or cfg.get("agentic_work_url") or ""),
-        shared_project=SHARED,
+        sharing_url=sharing_url,
+        project_secret_prefix=PROJECT,
     )
     cfg["HARNESS_ARN"] = harness_info["harness_arn"]
     cfg["harnessName"] = harness_info["harness_name"]
     save_config(cfg)
     ensure_ecs_invoke_harness(
         c["iam"],
-        shared=SHARED,
+        project=PROJECT,
         region=region,
         account=account,
         harness_arn=harness_info["harness_arn"],
@@ -781,7 +952,7 @@ def main() -> int:
     logger.info("[6/8] Target group + listener rule")
     ensure_log_group(c["logs"])
     tg_arn = ensure_target_group(c["elbv2"], network.vpc_id)
-    require_header = _uses_cloudfront(str(cfg.get("sharing_url") or ""), network.alb_dns)
+    require_header = _uses_cloudfront(sharing_url, network.alb_dns)
     ensure_listener_rule(
         c["elbv2"],
         network.listener_arn,
@@ -790,7 +961,7 @@ def main() -> int:
         require_origin_header=require_header,
     )
     if not require_header:
-        logger.info("ALB-only mode: /vault listener rule without origin header")
+        logger.info("ALB-only mode: /* listener rule without origin header")
 
     logger.info("[7/8] Task definition + service")
     task_arn = register_task_definition(
@@ -822,7 +993,7 @@ def main() -> int:
     cfg["alb_dns"] = network.alb_dns
     save_config(cfg)
 
-    url = f"{cfg.get('sharing_url', '').rstrip('/')}/vault"
+    url = (cfg.get("sharing_url") or "").rstrip("/") or "http://localhost:8502"
     logger.info("Deployed: %s", url)
     if not cfg.get("google_client_id"):
         logger.warning(

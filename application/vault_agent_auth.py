@@ -1,12 +1,12 @@
-"""Shared vault agent-token auth (AgentCore → ob-docs).
+"""Vault agent-token auth (AgentCore → ob-docs).
 
 AgentCore runtime is denied access to session-signing-key by design.
-Instead it reads ``{sharedProject}/vault-agent-token`` and sends:
+Instead it reads ``{project}/vault-agent-token`` and sends:
 
   Authorization: VaultAgent v1.<payload_b64>.<sig_b64>
 
 Payload is JSON ``{"uid":"<user_id>","exp":<unix>}`` HMAC-SHA256 signed with
-the shared vault agent token.
+the vault agent token.
 """
 
 from __future__ import annotations
@@ -41,17 +41,21 @@ def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + padding)
 
 
-def _shared_project_name() -> str:
+def _project_name() -> str:
     try:
         from application import utils
 
-        return utils.shared_project_name()
+        return utils.project_name()
     except Exception:
-        return (os.environ.get("SHARED_PROJECT_NAME") or "agentic-work").strip() or "agentic-work"
+        return (
+            os.environ.get("PROJECT_NAME")
+            or os.environ.get("SHARED_PROJECT_NAME")
+            or "ob-docs"
+        ).strip() or "ob-docs"
 
 
 def _secret_name() -> str:
-    return f"{_shared_project_name()}/vault-agent-token"
+    return f"{_project_name()}/vault-agent-token"
 
 
 def _load_token_from_secrets_manager() -> Optional[bytes]:

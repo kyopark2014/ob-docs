@@ -1,4 +1,4 @@
-"""ob-docs FastAPI server — Obsidian-like vault at /vault."""
+"""ob-docs FastAPI server — Obsidian-like vault at site root."""
 
 from __future__ import annotations
 
@@ -64,9 +64,9 @@ app = FastAPI(
     title="ob-docs",
     version="0.1.0",
     lifespan=lifespan,
-    docs_url="/vault/api/docs" if _ENABLE_API_DOCS else None,
-    redoc_url="/vault/api/redoc" if _ENABLE_API_DOCS else None,
-    openapi_url="/vault/api/openapi.json" if _ENABLE_API_DOCS else None,
+    docs_url="/api/docs" if _ENABLE_API_DOCS else None,
+    redoc_url="/api/redoc" if _ENABLE_API_DOCS else None,
+    openapi_url="/api/openapi.json" if _ENABLE_API_DOCS else None,
 )
 
 # Must allow same-origin iframe for Notes Graph despite CloudFront XFO DENY.
@@ -81,7 +81,7 @@ app.include_router(search_router)
 app.include_router(graph_router)
 
 
-@app.get("/vault/api/health")
+@app.get("/api/health")
 def health() -> dict:
     return {
         "status": "ok",
@@ -90,47 +90,51 @@ def health() -> dict:
     }
 
 
-@app.get("/api/health")
-def health_alias() -> dict:
-    """ALB-friendly alias."""
-    return health()
-
-
-@app.get("/")
-def root_redirect():
-    """Local convenience: app lives under /vault."""
-    return RedirectResponse(url="/vault/", status_code=302)
-
-
 @app.get("/favicon.ico")
-@app.get("/vault/favicon.ico")
-@app.get("/vault/favicon.svg")
+@app.get("/favicon.svg")
 def favicon():
-    """Serve under /vault/* so CloudFront (/vault* → ob-docs) can reach it."""
     icon = _WEB_DIST / "favicon.svg"
     if icon.is_file():
         return FileResponse(icon, media_type="image/svg+xml")
     return HTMLResponse("", status_code=204)
 
 
+# Legacy /vault/* bookmarks → root paths
+@app.get("/vault")
+@app.get("/vault/")
+def legacy_vault_root():
+    return RedirectResponse(url="/", status_code=302)
+
+
+@app.get("/vault/{full_path:path}")
+def legacy_vault_get(full_path: str):
+    target = f"/{full_path}" if full_path else "/"
+    return RedirectResponse(url=target, status_code=302)
+
+
+@app.head("/vault/{full_path:path}")
+def legacy_vault_head(full_path: str):
+    target = f"/{full_path}" if full_path else "/"
+    return RedirectResponse(url=target, status_code=302)
+
+
 if _WEB_DIST.is_dir():
     assets = _WEB_DIST / "assets"
     if assets.is_dir():
-        app.mount("/vault/assets", StaticFiles(directory=str(assets)), name="vault-assets")
+        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
 
-    @app.get("/vault")
-    @app.get("/vault/")
-    def vault_index_page():
+    @app.get("/")
+    def spa_index():
         index = _WEB_DIST / "index.html"
         if index.is_file():
             return FileResponse(index)
         return HTMLResponse("<h1>ob-docs</h1><p>Build web/ first.</p>", status_code=503)
 
-    @app.get("/vault/{full_path:path}")
-    def vault_spa(full_path: str):
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str):
+        # API / public share / legacy vault handled by earlier routes.
         if full_path.startswith("api/") or full_path.startswith("s/"):
             return HTMLResponse("Not Found", status_code=404)
-        # static file from dist
         candidate = _WEB_DIST / full_path
         if candidate.is_file():
             return FileResponse(candidate)
@@ -140,9 +144,8 @@ if _WEB_DIST.is_dir():
         return HTMLResponse("Build web/ first", status_code=503)
 else:
 
-    @app.get("/vault")
-    @app.get("/vault/")
-    def vault_missing():
+    @app.get("/")
+    def spa_missing():
         return HTMLResponse(
             "<h1>ob-docs</h1><p>Frontend not built. Run <code>cd web && npm run build</code>.</p>",
             status_code=503,

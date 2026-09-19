@@ -152,7 +152,7 @@ export function MarkdownPreview({ content, notePath, onWikiClick }: Props) {
         src.startsWith("http://") ||
         src.startsWith("https://") ||
         src.startsWith("data:") ||
-        src.startsWith("/vault/")
+        src.startsWith("/")
       ) {
         return <img src={src} alt={alt || ""} />;
       }

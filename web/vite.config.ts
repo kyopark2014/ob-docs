@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
-  base: "/vault/",
+  base: "/",
   build: {
     outDir: "dist",
     emptyOutDir: true,
@@ -11,7 +11,7 @@ export default defineConfig({
   server: {
     port: 5174,
     proxy: {
-      "/vault/api": {
+      "/api": {
         target: "http://localhost:8502",
         changeOrigin: true,
       },

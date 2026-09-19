@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from application.api.routes_auth import require_user_id
 from application import vault_backend, vault_index, vault_order, vault_share, vault_sync, viewer_html
 
-router = APIRouter(prefix="/vault/api/files", tags=["files"])
+router = APIRouter(prefix="/api/files", tags=["files"])
 
 HIDDEN_SKIP = {".git", ".keep", ".gitkeep"}
 # Empty folders need a marker object so they survive S3 sync / tree rebuild.
@@ -291,7 +291,7 @@ def view_vault_file(
     ext = target.suffix.lower()
     force_download = bool(download)
     encoded = quote(path, safe="")
-    download_href = f"/vault/api/files/view?path={encoded}&download=1"
+    download_href = f"/api/files/view?path={encoded}&download=1"
 
     if force_download or (
         ext not in TEXT_VIEWER_EXTENSIONS and ext not in INLINE_BINARY_EXTENSIONS

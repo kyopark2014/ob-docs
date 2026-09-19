@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from application import notes_graph, vault_backend, vault_index
 from application.api.routes_auth import require_user_id
 
-router = APIRouter(prefix="/vault/api/graph", tags=["graph"])
+router = APIRouter(prefix="/api/graph", tags=["graph"])
 
 
 class NotesPatternPatch(BaseModel):
