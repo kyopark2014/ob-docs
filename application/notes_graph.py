@@ -223,10 +223,23 @@ def _load_persisted_state() -> None:
             _state["message"] = "Notes sync interrupted (server restart)."
 
 
-_load_persisted_state()
+_state_loaded = False
+
+
+def _ensure_state_loaded() -> None:
+    global _state_loaded
+    if _state_loaded:
+        return
+    try:
+        _load_persisted_state()
+    except RuntimeError:
+        # No vault user bound yet (import / health check).
+        return
+    _state_loaded = True
 
 
 def get_job_status() -> dict[str, Any]:
+    _ensure_state_loaded()
     with _lock:
         return dict(_state)
 
@@ -600,8 +613,11 @@ def ensure_sync(*, full: bool = False) -> dict[str, Any]:
         _state["started_at"] = _now_iso()
         _persist_state()
 
+    user_id = vault_backend.current_user_id()
+
     def worker() -> None:
-        _run_sync(full=full)
+        with vault_backend.user_scope(user_id):
+            _run_sync(full=full)
 
     threading.Thread(target=worker, name="notes-graph-sync", daemon=True).start()
     return get_job_status()

@@ -1,4 +1,9 @@
-"""Public share links for vault notes (token → path, no cookie required)."""
+"""Public share links for vault notes (token → path, no cookie required).
+
+Per-user registry: ``{user}/.vault/shares.json`` (list/create/delete).
+Global index: ``_public/shares_index.json`` (token → user_id + path) so
+anonymous ``/s/{token}`` can resolve the owning vault without scanning users.
+"""
 
 from __future__ import annotations
 
@@ -15,15 +20,19 @@ from application import vault_backend
 
 _lock = threading.Lock()
 _TOKEN_RE = re.compile(r"^[a-zA-Z0-9_-]{16,64}$")
+_INDEX_NAME = "shares_index.json"
 
 
 def _shares_path() -> Path:
-    path = vault_backend.settings_dir() / "shares.json"
-    return path
+    return vault_backend.settings_dir() / "shares.json"
+
+
+def _index_path() -> Path:
+    return vault_backend.public_dir() / _INDEX_NAME
 
 
 def _s3_shares_location() -> Optional[tuple[str, str, str]]:
-    """Return (bucket, region, key) when vault S3 bucket is configured."""
+    """Return (bucket, region, key) for the current user's shares.json."""
     bucket, region = vault_backend.s3_bucket_and_region()
     if not bucket:
         return None
@@ -31,8 +40,27 @@ def _s3_shares_location() -> Optional[tuple[str, str, str]]:
     return bucket, region, key
 
 
+def _s3_index_location() -> Optional[tuple[str, str, str]]:
+    bucket, region = vault_backend.s3_bucket_and_region()
+    if not bucket:
+        return None
+    key = vault_backend.s3_public_prefix() + _INDEX_NAME
+    return bucket, region, key
+
+
 def _publish_shares_to_s3(path: Path) -> None:
     loc = _s3_shares_location()
+    if not loc:
+        return
+    bucket, region, key = loc
+    import boto3
+
+    client = boto3.client("s3", region_name=region)
+    client.upload_file(str(path), bucket, key)
+
+
+def _publish_index_to_s3(path: Path) -> None:
+    loc = _s3_index_location()
     if not loc:
         return
     bucket, region, key = loc
@@ -50,7 +78,6 @@ def pull_shares_registry() -> bool:
     bucket, region, key = loc
     try:
         import boto3
-        from botocore.exceptions import ClientError
 
         client = boto3.client("s3", region_name=region)
         obj = client.get_object(Bucket=bucket, Key=key)
@@ -62,7 +89,6 @@ def pull_shares_registry() -> bool:
         tmp.replace(path)
         return True
     except Exception as e:
-        # NoSuchKey / network: keep local copy
         err = getattr(e, "response", None)
         code = ""
         if isinstance(err, dict):
@@ -72,8 +98,46 @@ def pull_shares_registry() -> bool:
         return False
 
 
+def pull_shares_index() -> bool:
+    """Refresh global token→user index from S3."""
+    loc = _s3_index_location()
+    if not loc:
+        return False
+    bucket, region, key = loc
+    try:
+        import boto3
+
+        client = boto3.client("s3", region_name=region)
+        obj = client.get_object(Bucket=bucket, Key=key)
+        body = obj["Body"].read()
+        path = _index_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(body)
+        tmp.replace(path)
+        return True
+    except Exception:
+        return False
+
+
 def _load() -> dict[str, Any]:
     path = _shares_path()
+    if not path.is_file():
+        return {"shares": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"shares": {}}
+    if not isinstance(data, dict):
+        return {"shares": {}}
+    shares = data.get("shares")
+    if not isinstance(shares, dict):
+        data["shares"] = {}
+    return data
+
+
+def _load_index() -> dict[str, Any]:
+    path = _index_path()
     if not path.is_file():
         return {"shares": {}}
     try:
@@ -94,8 +158,6 @@ def _save(data: dict[str, Any]) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
-    # Publish registry to S3 whenever a bucket is configured so CloudFront/ECS
-    # can revoke links immediately after Shared List delete.
     try:
         _publish_shares_to_s3(path)
     except Exception:
@@ -107,6 +169,70 @@ def _save(data: dict[str, Any]) -> None:
                 vault_sync.flush_pending_to_s3()
         except Exception:
             pass
+
+
+def _save_index(data: dict[str, Any]) -> None:
+    path = _index_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    try:
+        _publish_index_to_s3(path)
+    except Exception:
+        pass
+
+
+def _index_upsert(token: str, entry: dict[str, Any]) -> None:
+    user_id = entry.get("user_id") or vault_backend.current_user_id()
+    if not user_id:
+        return
+    index = _load_index()
+    index.setdefault("shares", {})[token] = {
+        "user_id": user_id,
+        "path": entry.get("path"),
+        "title": entry.get("title"),
+        "created_at": entry.get("created_at"),
+    }
+    _save_index(index)
+
+
+def _index_remove(tokens: list[str]) -> None:
+    if not tokens:
+        return
+    index = _load_index()
+    shares = index.get("shares") or {}
+    changed = False
+    for tok in tokens:
+        if shares.pop(tok, None) is not None:
+            changed = True
+    if changed:
+        index["shares"] = shares
+        _save_index(index)
+
+
+def _index_update_paths(from_path: str, to_path: str, user_id: Optional[str]) -> None:
+    if not user_id:
+        return
+    index = _load_index()
+    shares = index.get("shares") or {}
+    updated = 0
+    for entry in shares.values():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("user_id") != user_id:
+            continue
+        path = (entry.get("path") or "").replace("\\", "/").lstrip("/")
+        if path == from_path:
+            entry["path"] = to_path
+            entry["title"] = Path(to_path).stem
+            updated += 1
+        elif path.startswith(from_path + "/"):
+            entry["path"] = to_path + path[len(from_path) :]
+            entry["title"] = Path(entry["path"]).stem
+            updated += 1
+    if updated:
+        _save_index(index)
 
 
 def is_valid_token(token: str) -> bool:
@@ -124,16 +250,28 @@ def find_share_by_path(path: str) -> Optional[dict[str, Any]]:
 
 
 def get_share(token: str, *, refresh: bool = True) -> Optional[dict[str, Any]]:
+    """Resolve a share token via the global index (public) or user registry."""
     if not is_valid_token(token):
         return None
     with _lock:
         if refresh:
-            pull_shares_registry()
-        data = _load()
-        entry = (data.get("shares") or {}).get(token)
-        if not isinstance(entry, dict):
-            return None
-        return {"token": token, **entry}
+            pull_shares_index()
+        index = _load_index()
+        entry = (index.get("shares") or {}).get(token)
+        if isinstance(entry, dict) and entry.get("user_id") and entry.get("path"):
+            return {"token": token, **entry}
+        if vault_backend.current_user_id():
+            if refresh:
+                pull_shares_registry()
+            data = _load()
+            local = (data.get("shares") or {}).get(token)
+            if isinstance(local, dict):
+                return {
+                    "token": token,
+                    "user_id": vault_backend.current_user_id(),
+                    **local,
+                }
+    return None
 
 
 def create_or_get_share(path: str) -> dict[str, Any]:
@@ -145,9 +283,11 @@ def create_or_get_share(path: str) -> dict[str, Any]:
     if not target.is_file():
         raise FileNotFoundError("Note not found")
 
+    user_id = vault_backend.current_user_id()
+    if not user_id:
+        raise ValueError("vault user_id is required to create a share")
+
     title = target.stem
-    # Ensure note bytes are on S3 before publishing the share registry
-    # (ECS mount may lag behind S3 API uploads from local).
     try:
         publish_vault_file_to_s3(cleaned)
     except Exception:
@@ -155,6 +295,11 @@ def create_or_get_share(path: str) -> dict[str, Any]:
 
     existing = find_share_by_path(cleaned)
     if existing:
+        if "user_id" not in existing:
+            existing = {**existing, "user_id": user_id}
+        with _lock:
+            pull_shares_index()
+            _index_upsert(existing["token"], existing)
         return existing
 
     token = secrets.token_urlsafe(18)
@@ -162,15 +307,24 @@ def create_or_get_share(path: str) -> dict[str, Any]:
         "path": cleaned,
         "title": title,
         "created_at": time.time(),
+        "user_id": user_id,
     }
     with _lock:
         data = _load()
-        # race: another create may have landed
         for tok, ent in (data.get("shares") or {}).items():
             if isinstance(ent, dict) and ent.get("path") == cleaned:
-                return {"token": tok, **ent}
-        data.setdefault("shares", {})[token] = entry
+                out = {"token": tok, "user_id": user_id, **ent}
+                pull_shares_index()
+                _index_upsert(tok, out)
+                return out
+        data.setdefault("shares", {})[token] = {
+            "path": cleaned,
+            "title": title,
+            "created_at": entry["created_at"],
+        }
         _save(data)
+        pull_shares_index()
+        _index_upsert(token, entry)
     return {"token": token, **entry}
 
 
@@ -189,7 +343,6 @@ def list_shares() -> list[dict[str, Any]]:
             if not path:
                 stale.append(token)
                 continue
-            # Keep share if note exists locally OR on S3 (mount can lag).
             if not vault_object_exists(path):
                 stale.append(token)
                 continue
@@ -208,6 +361,8 @@ def list_shares() -> list[dict[str, Any]]:
             for tok in stale:
                 (data.get("shares") or {}).pop(tok, None)
             _save(data)
+            pull_shares_index()
+            _index_remove(stale)
     items.sort(key=lambda x: x.get("created_at") or 0, reverse=True)
     return items
 
@@ -220,10 +375,14 @@ def delete_share(token: str) -> bool:
         data = _load()
         shares = data.get("shares") or {}
         if token not in shares:
+            pull_shares_index()
+            _index_remove([token])
             return False
         shares.pop(token, None)
         data["shares"] = shares
         _save(data)
+        pull_shares_index()
+        _index_remove([token])
     return True
 
 
@@ -234,8 +393,8 @@ def rewrite_share_paths(from_path: str, to_path: str) -> int:
     if not cleaned_from or cleaned_from == cleaned_to:
         return 0
     updated = 0
+    user_id = vault_backend.current_user_id()
     with _lock:
-        # Align with CloudFront/ECS registry before rewriting.
         pull_shares_registry()
         data = _load()
         shares = data.get("shares") or {}
@@ -253,6 +412,8 @@ def rewrite_share_paths(from_path: str, to_path: str) -> int:
                 updated += 1
         if updated:
             _save(data)
+            pull_shares_index()
+            _index_update_paths(cleaned_from, cleaned_to, user_id)
     return updated
 
 
@@ -263,7 +424,6 @@ def remove_shares_for_path(deleted: str) -> int:
         return 0
     removed = 0
     with _lock:
-        # Pull first so we revoke shares that only exist on the S3 registry.
         pull_shares_registry()
         data = _load()
         shares = data.get("shares") or {}
@@ -285,6 +445,8 @@ def remove_shares_for_path(deleted: str) -> int:
         if removed:
             data["shares"] = shares
             _save(data)
+            pull_shares_index()
+            _index_remove(drop)
     return removed
 
 

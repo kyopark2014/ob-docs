@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 import shutil
 from pathlib import Path
@@ -14,6 +15,8 @@ from pydantic import BaseModel, Field
 
 from application.api.routes_auth import require_user_id
 from application import vault_backend, vault_index, vault_order, vault_share, vault_sync, viewer_html
+
+logger = logging.getLogger("routes_files")
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -149,17 +152,19 @@ def get_tree(request: Request) -> dict:
     require_user_id(request)
     mode = vault_backend.backend_mode()
     if mode == "s3":
-        vault_backend.sync_from_s3()
-        # Build tree from S3 keys (case-sensitive) so agent/ and Agent/ both show
-        # even on case-insensitive local disks (macOS APFS).
-        rels = vault_sync.list_remote_vault_rels()
-        children = vault_sync.build_tree_from_rels(rels)
-        return {
-            "root": ".",
-            "mode": mode,
-            "source": "s3",
-            "children": children,
-        }
+        # Tree from S3 object keys only — never await sync/flush here.
+        # A stuck S3 sync was freezing the UI on "Loading vault…".
+        try:
+            rels = vault_sync.list_remote_vault_rels()
+            children = vault_sync.build_tree_from_rels(rels)
+            return {
+                "root": ".",
+                "mode": mode,
+                "source": "s3",
+                "children": children,
+            }
+        except Exception:
+            logger.exception("S3 tree list failed; falling back to local disk")
     root = vault_backend.vault_root()
     children = []
     for child in root.iterdir():
@@ -170,7 +175,7 @@ def get_tree(request: Request) -> dict:
     return {
         "root": ".",
         "mode": mode,
-        "source": "local",
+        "source": "local" if mode != "s3" else "local-fallback",
         "children": children,
     }
 

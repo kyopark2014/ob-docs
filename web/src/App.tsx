@@ -456,8 +456,12 @@ export default function App() {
       setReady(true);
       return;
     }
-    const t = await api.getTree();
-    setTree(t.children);
+    try {
+      const t = await api.getTree();
+      setTree(t.children);
+    } catch {
+      setTree([]);
+    }
     setReady(true);
   }, []);
 
@@ -465,8 +469,12 @@ export default function App() {
     setUserId(user_id);
     setAuthError(null);
     setLoginError(null);
-    const t = await api.getTree();
-    setTree(t.children);
+    try {
+      const t = await api.getTree();
+      setTree(t.children);
+    } catch {
+      setTree([]);
+    }
     setReady(true);
   }, []);
 

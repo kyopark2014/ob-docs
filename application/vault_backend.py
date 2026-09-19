@@ -2,20 +2,26 @@
 
 ECS mounts vault/ at /mnt/vault (project S3 bucket).
 Locally: data/vault/ is the working copy. Opt-in S3 sync with VAULT_S3_ENABLE=1.
+
+Per-user isolation (agentic-work style):
+  local/mount: {vault_base}/{sanitize(user_id)}/
+  S3:          vault/{sanitize(user_id)}/…
+  public share index: {vault_base}/_public/  and  vault/_public/
 """
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import boto3
-from botocore.exceptions import ClientError
 
 from application import utils
 
@@ -25,14 +31,50 @@ _ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_LOCAL = _ROOT / "data" / "vault"
 _DEFAULT_MOUNT = Path("/mnt/vault")
 S3_PREFIX = "vault/"
+PUBLIC_SEGMENT = "_public"
 
-_sync_lock = threading.Lock()
-_last_sync_at: float = 0.0
+_sync_lock = threading.RLock()
+_last_sync_at: dict[str, float] = {}
 _SYNC_INTERVAL_SECONDS = 60.0
+
+_user_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "ob_docs_vault_user", default=None
+)
 
 
 def _env_flag(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def current_user_id() -> Optional[str]:
+    return _user_id_var.get()
+
+
+def set_current_user_id(user_id: Optional[str]) -> contextvars.Token:
+    return _user_id_var.set(user_id)
+
+
+def reset_current_user_id(token: contextvars.Token) -> None:
+    _user_id_var.reset(token)
+
+
+@contextmanager
+def user_scope(user_id: Optional[str]) -> Iterator[None]:
+    """Bind vault paths to ``user_id`` for the duration of the block."""
+    token = set_current_user_id(user_id)
+    try:
+        yield
+    finally:
+        reset_current_user_id(token)
+
+
+def user_segment(user_id: Optional[str] = None) -> str:
+    """Sanitize email/user id into a single path segment (required)."""
+    uid = user_id if user_id is not None else current_user_id()
+    segment = utils.sanitize_user_path_segment(uid)
+    if not segment:
+        raise RuntimeError("vault user_id is required for per-user storage")
+    return segment
 
 
 def mount_dir() -> Path:
@@ -45,8 +87,19 @@ def mount_dir() -> Path:
 
 
 def local_dir() -> Path:
+    """Base local vault directory (contains per-user subfolders)."""
     raw = (os.environ.get("VAULT_DIR") or "").strip()
     return Path(raw) if raw else _DEFAULT_LOCAL
+
+
+def vault_base() -> Path:
+    """Mount or local root that holds ``{user}/`` and ``_public/``."""
+    if mount_available():
+        root = mount_dir()
+    else:
+        root = local_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
 
 
 def mount_available() -> bool:
@@ -80,10 +133,27 @@ def s3_bucket_and_region() -> tuple[Optional[str], str]:
     return bucket, region
 
 
-def s3_prefix() -> str:
+def s3_prefix_base() -> str:
+    """Configured vault/ prefix (no user segment)."""
     cfg = utils.load_config()
     prefix = (cfg.get("s3_files_vault_prefix") or S3_PREFIX).strip() or S3_PREFIX
     return prefix if prefix.endswith("/") else prefix + "/"
+
+
+def s3_prefix(user_id: Optional[str] = None) -> str:
+    """Per-user S3 prefix: ``vault/{user}/``."""
+    return s3_prefix_base() + user_segment(user_id) + "/"
+
+
+def s3_public_prefix() -> str:
+    """Global (non-user) prefix for public share index: ``vault/_public/``."""
+    return s3_prefix_base() + PUBLIC_SEGMENT + "/"
+
+
+def public_dir() -> Path:
+    path = vault_base() / PUBLIC_SEGMENT
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def s3_available() -> bool:
@@ -105,12 +175,9 @@ def backend_mode() -> str:
     return "local"
 
 
-def vault_root() -> Path:
-    """Active vault root for file I/O."""
-    if mount_available():
-        root = mount_dir()
-    else:
-        root = local_dir()
+def vault_root(user_id: Optional[str] = None) -> Path:
+    """Active per-user vault root for file I/O."""
+    root = vault_base() / user_segment(user_id)
     root.mkdir(parents=True, exist_ok=True)
     settings = root / ".vault"
     settings.mkdir(parents=True, exist_ok=True)
@@ -166,16 +233,33 @@ def cache_dir() -> Path:
 
 
 def _s3_client(region: str):
-    return boto3.client("s3", region_name=region)
+    from botocore.config import Config
+
+    # Keep vault UI responsive when S3/proxy is slow or stuck.
+    return boto3.client(
+        "s3",
+        region_name=region,
+        config=Config(
+            connect_timeout=5,
+            read_timeout=20,
+            retries={"max_attempts": 2, "mode": "standard"},
+        ),
+    )
+
+
+def _sync_key() -> str:
+    try:
+        return user_segment()
+    except RuntimeError:
+        return "_none"
 
 
 def sync_from_s3(*, force: bool = False) -> dict:
-    """Download vault/ objects into local working copy (s3 mode only).
+    """Download vault/{user}/ objects into local working copy (s3 mode only).
 
     Delegates to vault_sync: never pulls while pending local→S3 ops remain.
     Prefer incremental unless ``force=True``.
     """
-    global _last_sync_at
     from application import vault_sync
 
     # Always try to finish outbound ops first so a pull cannot clobber them.
@@ -187,17 +271,39 @@ def sync_from_s3(*, force: bool = False) -> dict:
             "flush": flush,
             "skipped": True,
         }
+    key = _sync_key()
     if not force:
         now = time.time()
         with _sync_lock:
-            if (now - _last_sync_at) < _SYNC_INTERVAL_SECONDS and _last_sync_at > 0:
+            last = _last_sync_at.get(key, 0.0)
+            if (now - last) < _SYNC_INTERVAL_SECONDS and last > 0:
                 return {
                     "ok": True,
                     "skipped": True,
                     "flush": flush,
-                    "last_sync_at": _last_sync_at,
+                    "last_sync_at": last,
                 }
     return vault_sync.sync_from_s3_incremental(force=force)
+
+
+def try_sync_from_s3(*, force: bool = False) -> dict:
+    """Best-effort sync for interactive routes (tree). Never raises."""
+    try:
+        return sync_from_s3(force=force)
+    except Exception as e:
+        logger.exception("try_sync_from_s3 failed")
+        return {"ok": False, "skipped": True, "reason": str(e)}
+
+
+def mark_synced() -> None:
+    """Record successful sync timestamp for the current user."""
+    with _sync_lock:
+        _last_sync_at[_sync_key()] = time.time()
+
+
+def last_sync_at() -> float:
+    with _sync_lock:
+        return _last_sync_at.get(_sync_key(), 0.0)
 
 
 def sync_to_s3(rel_path: Optional[str] = None) -> dict:
@@ -217,23 +323,59 @@ def sync_to_s3(rel_path: Optional[str] = None) -> dict:
     return vault_sync.schedule_flush_pending()
 
 
-def ensure_seed_vault() -> None:
-    """Copy bundled sample vault into empty local vault."""
-    root = vault_root()
-    has_md = any(root.rglob("*.md"))
-    if has_md:
+def ensure_user_vault(user_id: Optional[str] = None) -> Path:
+    """Ensure per-user vault dirs exist (empty until the user adds notes)."""
+    uid = user_id if user_id is not None else current_user_id()
+    with user_scope(uid):
+        segment = user_segment()
+        root = vault_base() / segment
+        # Adopt legacy flat vault before vault_root() creates an empty .vault
+        # that would block moving the old settings directory.
+        if segment == "local-dev":
+            try:
+                _maybe_adopt_legacy_flat_vault(root)
+            except Exception:
+                logger.exception("Legacy vault adopt failed")
+        return vault_root()
+
+
+def _maybe_adopt_legacy_flat_vault(root: Path) -> None:
+    """Move pre-multi-tenant notes from vault_base into local-dev (once)."""
+    base = vault_base()
+    if root.resolve() == base.resolve():
         return
-    seed = _DEFAULT_LOCAL
-    if seed.resolve() == root.resolve():
+    marker = base / ".vault_migrated_to_users"
+    if marker.is_file():
         return
-    if not seed.is_dir():
-        return
-    for src in seed.rglob("*"):
-        if src.is_dir():
+    root.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    for child in list(base.iterdir()):
+        name = child.name
+        if name in {PUBLIC_SEGMENT, ".DS_Store", ".vault_migrated_to_users"}:
             continue
-        rel = src.relative_to(seed)
-        dest = root / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if not dest.exists():
-            shutil.copy2(src, dest)
-    logger.info("Seeded vault at %s from %s", root, seed)
+        if name.startswith("_"):
+            continue
+        if "@" in name:
+            continue
+        if child.resolve() == root.resolve():
+            continue
+        dest = root / name
+        if dest.exists():
+            continue
+        try:
+            shutil.move(str(child), str(dest))
+            moved += 1
+        except OSError:
+            logger.exception("Failed to adopt legacy path %s", child)
+    if moved:
+        try:
+            marker.write_text("ok\n", encoding="utf-8")
+        except OSError:
+            pass
+        logger.info("Adopted %d legacy vault entries into %s", moved, root)
+
+
+def ensure_seed_vault() -> None:
+    """Compatibility: ensure vault base + public dir exist (no global user seed)."""
+    vault_base()
+    public_dir()

@@ -236,99 +236,106 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
         q: queue.Queue[Any] = queue.Queue()
 
         def worker() -> None:
-            tool_events: list[dict[str, Any]] = []
-            try:
-                gen = harness_client.iter_harness_events(
-                    full_prompt,
-                    session_id=session_id,
-                    actor_id=user_id,
-                    model_name=model_name,
-                )
-                final = ""
+            # ContextVar does not propagate to bare threads (same as vault_sync).
+            # Bind the signed-in user so resolve_vault_path / sync_to_s3 work.
+            with vault_backend.user_scope(user_id):
+                tool_events: list[dict[str, Any]] = []
                 try:
-                    while True:
-                        event = next(gen)
-                        etype = event.get("type")
-                        if etype == "token":
-                            text = event.get("text") or ""
-                            final = text
-                            q.put(("token", text))
-                        elif etype == "text":
-                            data = harness_client.strip_write_markers(
-                                event.get("data") or ""
-                            )
-                            if data:
-                                cleaned = {"type": "text", "data": data}
-                                _upsert_tool_event(tool_events, cleaned)
-                                q.put(("text", data))
-                        elif etype in ("tool", "tool_result", "info"):
-                            _upsert_tool_event(tool_events, event)
-                            q.put((etype, event))
-                except StopIteration as stop:
-                    if isinstance(stop.value, str) and stop.value:
-                        final = stop.value
-
-                writes = harness_client.parse_vault_writes(final)
-                updated: list[dict[str, Any]] = []
-                for path, content in writes:
-                    if note_path and path != note_path:
-                        logger.warning(
-                            "Ignoring WRITE to %s (attached note is %s)",
-                            path,
-                            note_path,
-                        )
-                        continue
-                    try:
-                        meta = _apply_vault_write(path, content)
-                        updated.append(meta)
-                        write_event = {
-                            "type": "tool",
-                            "tool": "vault_write",
-                            "toolUseId": f"vault-write:{path}",
-                            "input": {
-                                "path": path,
-                                "bytes": meta.get("bytes"),
-                            },
-                        }
-                        _upsert_tool_event(tool_events, write_event)
-                        q.put(("tool", write_event))
-                        result_event = {
-                            "type": "tool_result",
-                            "tool": "vault_write",
-                            "toolUseId": f"vault-write:{path}",
-                            "data": json.dumps(
-                                {"ok": True, "path": path, "bytes": meta.get("bytes")},
-                                ensure_ascii=False,
-                            ),
-                        }
-                        _upsert_tool_event(tool_events, result_event)
-                        q.put(("tool_result", result_event))
-                        q.put(("note_updated", meta))
-                    except Exception as e:
-                        logger.exception("vault write failed for %s", path)
-                        q.put(("error", f"노트 저장 실패 ({path}): {e}"))
-
-                visible_final = harness_client.strip_write_markers(final).strip()
-                _sanitize_timeline_text(tool_events)
-                # Final assistant reply must come AFTER tool cards (harness-work order).
-                _set_final_text_in_timeline(tool_events, visible_final)
-
-                q.put(
-                    (
-                        "done",
-                        {
-                            "session_id": session_id,
-                            "result": visible_final,
-                            "updated": updated,
-                            "tool_events": tool_events,
-                        },
+                    gen = harness_client.iter_harness_events(
+                        full_prompt,
+                        session_id=session_id,
+                        actor_id=user_id,
+                        model_name=model_name,
                     )
-                )
-            except Exception as e:
-                logger.exception("agent chat failed")
-                q.put(("error", str(e)))
-            finally:
-                q.put(None)
+                    final = ""
+                    try:
+                        while True:
+                            event = next(gen)
+                            etype = event.get("type")
+                            if etype == "token":
+                                text = event.get("text") or ""
+                                final = text
+                                q.put(("token", text))
+                            elif etype == "text":
+                                data = harness_client.strip_write_markers(
+                                    event.get("data") or ""
+                                )
+                                if data:
+                                    cleaned = {"type": "text", "data": data}
+                                    _upsert_tool_event(tool_events, cleaned)
+                                    q.put(("text", data))
+                            elif etype in ("tool", "tool_result", "info"):
+                                _upsert_tool_event(tool_events, event)
+                                q.put((etype, event))
+                    except StopIteration as stop:
+                        if isinstance(stop.value, str) and stop.value:
+                            final = stop.value
+
+                    writes = harness_client.parse_vault_writes(final)
+                    updated: list[dict[str, Any]] = []
+                    for path, content in writes:
+                        if note_path and path != note_path:
+                            logger.warning(
+                                "Ignoring WRITE to %s (attached note is %s)",
+                                path,
+                                note_path,
+                            )
+                            continue
+                        try:
+                            meta = _apply_vault_write(path, content)
+                            updated.append(meta)
+                            write_event = {
+                                "type": "tool",
+                                "tool": "vault_write",
+                                "toolUseId": f"vault-write:{path}",
+                                "input": {
+                                    "path": path,
+                                    "bytes": meta.get("bytes"),
+                                },
+                            }
+                            _upsert_tool_event(tool_events, write_event)
+                            q.put(("tool", write_event))
+                            result_event = {
+                                "type": "tool_result",
+                                "tool": "vault_write",
+                                "toolUseId": f"vault-write:{path}",
+                                "data": json.dumps(
+                                    {
+                                        "ok": True,
+                                        "path": path,
+                                        "bytes": meta.get("bytes"),
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            }
+                            _upsert_tool_event(tool_events, result_event)
+                            q.put(("tool_result", result_event))
+                            q.put(("note_updated", meta))
+                        except Exception as e:
+                            logger.exception("vault write failed for %s", path)
+                            q.put(("error", f"노트 저장 실패 ({path}): {e}"))
+
+                    visible_final = harness_client.strip_write_markers(final).strip()
+                    _sanitize_timeline_text(tool_events)
+                    # Final assistant reply must come AFTER tool cards (harness-work order).
+                    _set_final_text_in_timeline(tool_events, visible_final)
+
+                    q.put(
+                        (
+                            "done",
+                            {
+                                "session_id": session_id,
+                                "result": visible_final,
+                                "updated": updated,
+                                "tool_events": tool_events,
+                            },
+                        )
+                    )
+                except Exception as e:
+                    logger.exception("agent chat failed")
+                    q.put(("error", str(e)))
+                finally:
+                    q.put(None)
 
         threading.Thread(target=worker, daemon=True).start()
         yield _sse({"type": "session", "session_id": session_id})

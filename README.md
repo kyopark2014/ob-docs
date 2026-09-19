@@ -9,9 +9,10 @@ Obsidian형 **Local-first Plain Text** vault 웹 앱입니다.
 |---|---|
 | 접속 경로 | `https://vault.my-agentic-ai.click` |
 | React 앱 | [`web/`](web/) (`base: /`) |
-| Vault mount | S3 `vault/` → `/mnt/vault` |
-| 로컬 working copy | `data/vault/` |
-| 설정 폴더 | `.vault/` (`.obsidian` 대체) |
+| Vault mount | S3 `vault/{userId}/` → `/mnt/vault/{userId}/` |
+| 로컬 working copy | `data/vault/{userId}/` |
+| 설정 폴더 | `{user}/.vault/` (`.obsidian` 대체) |
+| 공개 공유 인덱스 | `vault/_public/shares_index.json` |
 
 ## 아키텍처
 
@@ -19,15 +20,16 @@ Obsidian형 **Local-first Plain Text** vault 웹 앱입니다.
 CloudFront-for-ob-docs
   └─ ALB (alb-for-ob-docs)
        └─ /*       → ECS service-for-ob-docs
-            └─ /mnt/vault ← S3 storage-for-ob-docs-…/vault/
+            └─ /mnt/vault/{userId}/ ← S3 …/vault/{userId}/
 ```
 
-- **mount 모드 (ECS)**: `/mnt/vault`에 직접 읽고 씀 (S3 Files가 비동기 동기화)
-- **local 모드**: `data/vault/`만 사용
-- **s3 모드 (옵션)**: `VAULT_S3_ENABLE=1`일 때 로컬 ↔ `s3://{bucket}/vault/` sync
-  - 저장/삭제 시 pending 큐(`.vault/pending_s3_ops.json`, S3에도 미러)에 쌓은 뒤 flush
-  - Settings **Sync**: pending 업로드를 먼저 끝낸 다음, S3에서 **변경분만** 내려받음
-  - 부팅 시에도 pending flush → incremental pull 순서
+- **계정 분리**: Google `userId`(email)를 path segment로 sanitize해 노트·설정·그래프·sync 큐를 계정별로 격리 (agentic-work와 동일 패턴)
+- **mount 모드 (ECS)**: `/mnt/vault/{userId}/`에 직접 읽고 씀 (S3 Files가 비동기 동기화)
+- **local 모드**: `data/vault/{userId}/`만 사용
+- **s3 모드 (옵션)**: `VAULT_S3_ENABLE=1`일 때 로컬 ↔ `s3://{bucket}/vault/{userId}/` sync
+  - 저장/삭제 시 pending 큐(`{user}/.vault/pending_s3_ops.json`, S3에도 미러)에 쌓은 뒤 flush
+  - Settings **Sync**: pending 업로드를 먼저 끝낸 다음, 해당 계정 S3 prefix에서 **변경분만** 내려받음
+  - 부팅 시에는 전역 pull 없이, 로그인 후 계정별 sync
 
 ## 빠른 시작 (로컬)
 
@@ -57,17 +59,24 @@ cd web && npm install && npm run dev
 ## Vault 구조
 
 ```text
-data/vault/                 # 또는 /mnt/vault
-├── 00-Inbox/
-├── notes/
-├── attachments/
-└── .vault/
-    ├── app.json            # 환경설정
-    ├── workspace.json      # 레이아웃 (gitignore 권장)
-    ├── shares.json         # public 공유 토큰 레지스트리
-    ├── graph.json          # 파생 그래프
-    └── cache/              # 인덱스 (삭제 후 재생성)
+data/vault/                      # 또는 /mnt/vault  (계정별 하위 폴더)
+├── _public/
+│   └── shares_index.json        # token → user_id (공개 /s/{token})
+├── alice@example.com/
+│   ├── 00-Inbox/
+│   ├── notes/
+│   ├── attachments/
+│   └── .vault/
+│       ├── app.json
+│       ├── shares.json          # 이 계정의 공유 목록
+│       ├── graph.json
+│       ├── pending_s3_ops.json
+│       └── cache/
+└── bob@example.com/
+    └── …
 ```
+
+`userId`(email)는 path-safe segment로 sanitize됩니다. `_public` 등은 예약 이름입니다.
 
 위키링크 `[[Note]]`, frontmatter(`aliases`, `tags`)를 파싱해 그래프·검색·백링크를 만듭니다.
 
@@ -230,7 +239,7 @@ SSE 이벤트 예: `session`, `token`, `text`, `tool`, `tool_result`, `note_upda
 
 **노트 삭제·이동**
 
-- 노트(또는 폴더) **삭제** 시 해당 경로의 public share 는 Shared List / `shares.json` 에서 함께 제거되고 S3 레지스트리에 즉시 반영됩니다. 공개 URL은 더 이상 열리지 않습니다.
+- 노트(또는 폴더) **삭제** 시 해당 경로의 public share 는 Shared List / `{user}/.vault/shares.json` 과 `_public/shares_index.json` 에서 함께 제거됩니다. 공개 URL은 더 이상 열리지 않습니다.
 - 노트 **이동·이름 변경** 시 share 경로가 새 위치로 갱신되고, 노트 본문도 S3에 다시 올려 CloudFront에서도 이어집니다.
 
 **URL 형식** (`config.json`의 `sharing_url`)
@@ -243,34 +252,17 @@ https://vault.my-agentic-ai.click/s/{token}
 
 ```text
 POST /api/files/share  { "path": "folder/Note.md" }
-  → .vault/shares.json 에 token 등록 (같은 경로면 기존 token 재사용)
-  → s3 모드면 shares.json 을 S3 vault/ 에도 반영
+  → {user}/.vault/shares.json 에 token 등록
+  → vault/_public/shares_index.json 에 token → user_id 등록
   → { url, url_path, token, title, created_at } 반환
-```
-
-레지스트리 예:
-
-```json
-{
-  "shares": {
-    "gvFUVyCeSgTS9g9n-qHC2nTv": {
-      "path": "agent/A2A on AWS AgentCore.md",
-      "title": "A2A on AWS AgentCore",
-      "created_at": 1789570000.0
-    }
-  }
-}
 ```
 
 **접속 흐름** (인증 불필요)
 
 ```text
-브라우저
-  → CloudFront (sharing_url)
-  → ALB /* → ob-docs ECS
-  → GET /s/{token}
-  → shares.json 에서 token → vault 상대경로 조회
-  → .md 를 HTML markdown viewer 로 반환
+GET /s/{token}
+  → _public/shares_index.json 에서 token → user_id + path
+  → 해당 계정 vault에서 .md 를 HTML viewer 로 반환
 ```
 
 - 본문 상대 이미지(`![](img.png)`)는 `/s/{token}/raw?path=…` 로 다시 쓰여 공개 제공됩니다.
@@ -278,7 +270,7 @@ POST /api/files/share  { "path": "folder/Note.md" }
 
 ## ECS / ALB
 
-1. **S3**: 프로젝트 버킷에 prefix `vault/` — ECS가 동기화/마운트
+1. **S3**: 프로젝트 버킷에 prefix `vault/{userId}/` — ECS가 동기화/마운트
 2. **ECS 서비스**: 이 이미지, 포트 `8502`, health `/api/health`
 3. **ALB listener rule**: path `/*` (+ CloudFront origin header) → ob-docs target group
 4. **CloudFront**: ALB origin (`CloudFront-for-ob-docs`) + alias `vault.my-agentic-ai.click`  
@@ -342,7 +334,7 @@ Google OAuth 콘솔 Authorized JavaScript origin에 `https://vault.my-agentic-ai
 3. ECR `ecr-for-ob-docs` 빌드/푸시
 4. ALB rule `/*` → `TG-for-ob-docs` (CloudFront origin header 조건)
 5. ECS `service-for-ob-docs` on `cluster-for-ob-docs`
-6. 샘플 vault를 `s3://…/vault/`에 seed
+   - 계정 vault는 로그인 시 `vault/{userId}/`에 생성 (installer가 샘플 노트를 seed하지 않음)
 
 ### 제거 (uninstaller)
 

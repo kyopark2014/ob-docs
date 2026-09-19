@@ -8,6 +8,9 @@ description: ob-docs vault의 마크다운 노트를 조회·검색·생성·수
 ob-docs vault의 마크다운 노트 규칙과 저장 형식을 정의합니다.  
 노트는 `.md`가 Source of Truth입니다.
 
+계정(`userId`/email)마다 vault가 분리됩니다 (`vault/{userId}/…`).  
+에이전트 호출 시 인증된 userId의 vault만 보이며, 경로는 항상 **그 계정 vault 기준 상대경로**입니다.
+
 ## When to Use
 
 - vault / 내 노트 / 노트 조회·검색

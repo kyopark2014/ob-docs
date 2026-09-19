@@ -16,6 +16,32 @@ _CONFIG_PATHS = (
 
 _config_cache: dict[str, Any] | None = None
 
+# Reserved top-level vault segments (not usable as user folders).
+RESERVED_VAULT_SEGMENTS = frozenset({"_public", "_legacy"})
+
+
+def sanitize_user_path_segment(user_id: str | None) -> str | None:
+    """Return a safe single path segment for per-user vault folders, or None.
+
+    Mirrors agentic-work: collapse separators so user_id cannot escape the
+    intended prefix (e.g. email ``a@b.com`` → ``a@b.com``).
+    """
+    if not user_id:
+        return None
+    segment = (
+        str(user_id)
+        .strip()
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace("..", "_")
+    )
+    if not segment or segment in {".", ".."}:
+        return None
+    if segment in RESERVED_VAULT_SEGMENTS or segment.startswith("_"):
+        # Leading underscore is reserved for system folders (_public, …).
+        segment = "u_" + segment.lstrip("_")
+    return segment or None
+
 
 def load_config() -> dict[str, Any]:
     global _config_cache

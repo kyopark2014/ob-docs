@@ -8,7 +8,6 @@ Creates (idempotent):
   - ALB target group TG-for-ob-docs (port 8502)
   - Listener rule: path /* (+ CloudFront origin header) → ob-docs TG
   - ECS task definition + Fargate service on cluster-for-ob-docs
-  - Seeds s3://{bucket}/vault/ from data/vault/
 
 ``config.json`` may be missing or partial — installer bootstraps it.
 
@@ -154,25 +153,6 @@ def build_and_push(repo_uri: str, tag: str) -> str:
     subprocess.run(["docker", "buildx", "imagetools", "create", "-t", latest, image], check=False)
     logger.info("Pushed %s", image)
     return image
-
-
-def seed_vault_to_s3(s3, bucket: str) -> int:
-    vault = ROOT / "data" / "vault"
-    uploaded = 0
-    for path in vault.rglob("*"):
-        if not path.is_file():
-            continue
-        if path.name == ".DS_Store":
-            continue
-        # skip regenerable cache
-        if ".vault/cache" in path.as_posix():
-            continue
-        rel = path.relative_to(vault).as_posix()
-        key = f"vault/{rel}"
-        s3.upload_file(str(path), bucket, key)
-        uploaded += 1
-        logger.info("  ↑ s3://%s/%s", bucket, key)
-    return uploaded
 
 
 def ensure_log_group(logs) -> None:
@@ -872,7 +852,7 @@ def main() -> int:
         )
         cfg["accountId"] = str(ident["Account"])
 
-    logger.info("[0/8] Ensure standalone ob-docs infra (S3/ALB/CF/secrets)")
+    logger.info("[0/7] Ensure standalone ob-docs infra (S3/ALB/CF/secrets)")
     cfg, network, origin_header = ensure_infra_stack(
         cfg=cfg,
         s3=c["s3"],
@@ -899,7 +879,7 @@ def main() -> int:
     account = str(cfg["accountId"])
     region = str(cfg["region"])
 
-    logger.info("[1/8] Upload skills (use-vault) → s3://%s/skills/", bucket)
+    logger.info("[1/7] Upload skills (use-vault) → s3://%s/skills/", bucket)
     n_skills = upload_skills_to_s3(
         bucket,
         sharing_url=sharing_url,
@@ -908,7 +888,7 @@ def main() -> int:
     )
     logger.info("Uploaded %d skill files", n_skills)
 
-    logger.info("[2/8] AgentCore Harness (use-vault + websearch + code interpreter)")
+    logger.info("[2/7] AgentCore Harness (use-vault + websearch + code interpreter)")
     exec_role_arn = create_harness_execution_role(
         account,
         region,
@@ -937,19 +917,15 @@ def main() -> int:
     )
     logger.info("Harness ARN: %s", harness_info["harness_arn"])
 
-    logger.info("[3/8] ECR")
+    logger.info("[3/7] ECR")
     repo_uri = ensure_ecr(c["ecr"])
     docker_login(c["ecr"], repo_uri)
 
     tag = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    logger.info("[4/8] Build & push image tag=%s", tag)
+    logger.info("[4/7] Build & push image tag=%s", tag)
     image_uri = build_and_push(repo_uri, tag)
 
-    logger.info("[5/8] Seed vault → s3://%s/vault/", bucket)
-    n = seed_vault_to_s3(c["s3"], bucket)
-    logger.info("Uploaded %d vault files", n)
-
-    logger.info("[6/8] Target group + listener rule")
+    logger.info("[5/7] Target group + listener rule")
     ensure_log_group(c["logs"])
     tg_arn = ensure_target_group(c["elbv2"], network.vpc_id)
     require_header = _uses_cloudfront(sharing_url, network.alb_dns)
@@ -963,7 +939,7 @@ def main() -> int:
     if not require_header:
         logger.info("ALB-only mode: /* listener rule without origin header")
 
-    logger.info("[7/8] Task definition + service")
+    logger.info("[6/7] Task definition + service")
     task_arn = register_task_definition(
         c["ecs"], image_uri, cfg, session_arn, vault_agent_arn
     )
@@ -977,7 +953,7 @@ def main() -> int:
         assign_public_ip=network.assign_public_ip,
     )
 
-    logger.info("[8/8] Wait for ECS PRIMARY deployment")
+    logger.info("[7/7] Wait for ECS PRIMARY deployment")
     wait_service(
         c["ecs"],
         c["elbv2"],

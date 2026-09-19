@@ -201,7 +201,7 @@ def enqueue_delete(rel_path: str, *, mirror: bool = True) -> dict[str, Any]:
 
 def enqueue_put_tree(rel_dir: str = "") -> dict[str, Any]:
     """Enqueue put for every file under rel_dir (or whole vault)."""
-    root = vault_backend.local_dir() if vault_backend.backend_mode() == "s3" else vault_backend.vault_root()
+    root = vault_backend.vault_root()
     base = root / rel_dir if rel_dir else root
     if not base.exists():
         return load_queue()
@@ -220,7 +220,7 @@ def enqueue_put_tree(rel_dir: str = "") -> dict[str, Any]:
 
 
 def enqueue_delete_tree(rel_dir: str) -> dict[str, Any]:
-    root = vault_backend.local_dir() if vault_backend.backend_mode() == "s3" else vault_backend.vault_root()
+    root = vault_backend.vault_root()
     base = root / rel_dir
     if not base.exists():
         return enqueue_delete(rel_dir)
@@ -449,7 +449,7 @@ def flush_pending_to_s3(
         if not bucket:
             return {"ok": False, "reason": "no bucket", "flushed": 0}
         prefix = vault_backend.s3_prefix()
-        root = vault_backend.local_dir()
+        root = vault_backend.vault_root()
         client = vault_backend._s3_client(region)
         casing_map = _s3_top_level_casing_map(client, bucket, prefix)
 
@@ -671,12 +671,19 @@ def sync_from_s3_incremental(
             "message": "Finish local→S3 pending ops before pulling from S3",
         }
 
-    with vault_backend._sync_lock:
+    if not vault_backend._sync_lock.acquire(timeout=3.0):
+        return {
+            "ok": False,
+            "reason": "sync_busy",
+            "skipped": True,
+            "message": "Another vault sync is already running",
+        }
+    try:
         bucket, region = vault_backend.s3_bucket_and_region()
         if not bucket:
             return {"ok": False, "reason": "no bucket"}
         prefix = vault_backend.s3_prefix()
-        root = vault_backend.local_dir()
+        root = vault_backend.vault_root()
         root.mkdir(parents=True, exist_ok=True)
         client = vault_backend._s3_client(region)
 
@@ -761,9 +768,14 @@ def sync_from_s3_incremental(
         # Prune only paths that have no exact S3 key. Keep case variants separate:
         # if S3 has Agent/x.md, do not delete local agent/x.md when that exact key
         # also exists on S3.
-        pruned = _prune_local_not_in_remote(root, set(remote.keys()))
+        # Never wipe a populated local vault when the remote prefix is empty —
+        # that usually means wrong user segment / fresh account, not "delete all".
+        if remote:
+            pruned = _prune_local_not_in_remote(root, set(remote.keys()))
+        else:
+            pruned = 0
 
-        vault_backend._last_sync_at = time.time()
+        vault_backend.mark_synced()
         logger.info(
             "Mirror sync from s3://%s/%s downloaded=%d pruned=%d remote=%d",
             bucket,
@@ -791,9 +803,11 @@ def sync_from_s3_incremental(
             "downloaded": downloaded,
             "pruned": pruned,
             "skipped": 0,
-            "last_sync_at": vault_backend._last_sync_at,
+            "last_sync_at": vault_backend.last_sync_at(),
             "remote_files": len(remote),
         }
+    finally:
+        vault_backend._sync_lock.release()
 
 
 def _prune_local_not_in_remote(root: Path, remote_exact: set[str]) -> int:
@@ -928,8 +942,13 @@ def sync_now(
 
 
 def startup_sync() -> dict[str, Any]:
-    """On boot: resume pending uploads, then incremental pull."""
-    return sync_now(force_download=False)
+    """On boot: no global pull — per-user sync runs on first authenticated request."""
+    return {
+        "ok": True,
+        "skipped": True,
+        "reason": "per_user_sync",
+        "message": "Per-user vault sync runs after sign-in",
+    }
 
 
 def queue_and_flush_put(rel_path: str) -> dict[str, Any]:
@@ -950,8 +969,8 @@ def queue_and_flush_delete(rel_path: str) -> dict[str, Any]:
 
 _flush_bg_lock = threading.Lock()
 _flush_bg_thread: Optional[threading.Thread] = None
-_flush_bg_requested = False
-_flush_bg_reconcile = False
+_flush_bg_requested: set[str] = set()
+_flush_bg_reconcile: set[str] = set()
 
 
 def schedule_flush_pending(*, reconcile_casing: bool = False) -> dict[str, Any]:
@@ -960,15 +979,22 @@ def schedule_flush_pending(*, reconcile_casing: bool = False) -> dict[str, Any]:
     Rapid mkdir/write/rename calls coalesce onto one worker. Local vault +
     pending queue are already durable on disk before this is called; pull from
     S3 stays blocked while pending ops remain.
+
+    Captures the current vault user so the worker thread can restore scope
+    (ContextVar does not propagate to bare threads).
     """
-    global _flush_bg_thread, _flush_bg_requested, _flush_bg_reconcile
+    global _flush_bg_thread
     if vault_backend.backend_mode() != "s3":
         return {"ok": False, "reason": f"backend={vault_backend.backend_mode()}"}
 
+    user_id = vault_backend.current_user_id()
+    if not user_id:
+        return {"ok": False, "reason": "no vault user", "pending": pending_count()}
+
     with _flush_bg_lock:
-        _flush_bg_requested = True
+        _flush_bg_requested.add(user_id)
         if reconcile_casing:
-            _flush_bg_reconcile = True
+            _flush_bg_reconcile.add(user_id)
         if _flush_bg_thread is not None and _flush_bg_thread.is_alive():
             return {
                 "ok": True,
@@ -978,19 +1004,28 @@ def schedule_flush_pending(*, reconcile_casing: bool = False) -> dict[str, Any]:
             }
 
         def worker() -> None:
-            global _flush_bg_thread, _flush_bg_requested, _flush_bg_reconcile
+            global _flush_bg_thread
             try:
                 while True:
                     with _flush_bg_lock:
-                        _flush_bg_requested = False
-                        do_reconcile = _flush_bg_reconcile
-                        _flush_bg_reconcile = False
-                    try:
-                        flush_pending_to_s3()
-                        if do_reconcile:
-                            reconcile_s3_folder_casing()
-                    except Exception:
-                        logger.exception("Background S3 flush failed")
+                        users = sorted(_flush_bg_requested)
+                        _flush_bg_requested.clear()
+                        reconcile_users = set(_flush_bg_reconcile)
+                        _flush_bg_reconcile.clear()
+                    if not users:
+                        with _flush_bg_lock:
+                            _flush_bg_thread = None
+                            return
+                    for uid in users:
+                        try:
+                            with vault_backend.user_scope(uid):
+                                flush_pending_to_s3()
+                                if uid in reconcile_users:
+                                    reconcile_s3_folder_casing()
+                        except Exception:
+                            logger.exception(
+                                "Background S3 flush failed for user=%s", uid
+                            )
                     with _flush_bg_lock:
                         if not _flush_bg_requested:
                             _flush_bg_thread = None
@@ -1056,6 +1091,22 @@ def _set_job(**kwargs: Any) -> None:
 
 def get_sync_status() -> dict[str, Any]:
     with _job_lock:
+        # Recover stale UI if the worker thread died while status was "running"
+        # (e.g. previous deadlock left pct=90 forever).
+        if (
+            _job_state.get("status") in {"queued", "running"}
+            and (_job_thread is None or not _job_thread.is_alive())
+        ):
+            _job_state.update(
+                {
+                    "status": "error",
+                    "message": "동기화가 중단되었습니다. 다시 Sync 해 주세요.",
+                    "error": "sync_worker_dead",
+                    "busy": False,
+                }
+            )
+            _job_state["updated_at"] = time.time()
+            _persist_job_state()
         state = dict(_job_state)
     state["mode"] = vault_backend.backend_mode()
     state["pending"] = pending_count()
@@ -1065,7 +1116,7 @@ def get_sync_status() -> dict[str, Any]:
     return state
 
 
-def _run_sync_job(*, force_download: bool = False) -> None:
+def _run_sync_job(*, force_download: bool = False, user_id: Optional[str] = None) -> None:
     def on_progress(info: dict[str, Any]) -> None:
         progress = {
             "file": info.get("file"),
@@ -1082,41 +1133,42 @@ def _run_sync_job(*, force_download: bool = False) -> None:
         )
 
     try:
-        _set_job(
-            status="running",
-            message="Vault 동기화를 시작합니다…",
-            progress={"pct": 0, "phase": "start"},
-            error=None,
-            result=None,
-        )
-        result = sync_now(force_download=force_download, on_progress=on_progress)
-        if result.get("ok"):
+        with vault_backend.user_scope(user_id):
             _set_job(
-                status="ready",
-                message=result.get("message") or "동기화가 완료되었습니다.",
-                progress={
-                    "pct": 100,
-                    "phase": "done",
-                    "file_i": result.get("pull", {}).get("downloaded"),
-                    "file_n": result.get("pull", {}).get("downloaded"),
-                },
-                result=result,
+                status="running",
+                message="Vault 동기화를 시작합니다…",
+                progress={"pct": 0, "phase": "start"},
                 error=None,
+                result=None,
             )
-            try:
-                from application import vault_index
+            result = sync_now(force_download=force_download, on_progress=on_progress)
+            if result.get("ok"):
+                _set_job(
+                    status="ready",
+                    message=result.get("message") or "동기화가 완료되었습니다.",
+                    progress={
+                        "pct": 100,
+                        "phase": "done",
+                        "file_i": result.get("pull", {}).get("downloaded"),
+                        "file_n": result.get("pull", {}).get("downloaded"),
+                    },
+                    result=result,
+                    error=None,
+                )
+                try:
+                    from application import vault_index
 
-                vault_index.rebuild_index()
-            except Exception:
-                logger.exception("Index rebuild after sync failed")
-        else:
-            _set_job(
-                status="error",
-                message=result.get("message") or "동기화에 실패했습니다.",
-                error=result.get("message") or result.get("reason") or "sync failed",
-                result=result,
-                progress=_job_state.get("progress"),
-            )
+                    vault_index.rebuild_index()
+                except Exception:
+                    logger.exception("Index rebuild after sync failed")
+            else:
+                _set_job(
+                    status="error",
+                    message=result.get("message") or "동기화에 실패했습니다.",
+                    error=result.get("message") or result.get("reason") or "sync failed",
+                    result=result,
+                    progress=_job_state.get("progress"),
+                )
     except Exception as e:
         logger.exception("Vault sync job failed")
         _set_job(
@@ -1141,6 +1193,14 @@ def start_sync_job(*, force_download: bool = False) -> dict[str, Any]:
             "message": "S3 sync requires VAULT_S3_ENABLE=1",
             "mode": vault_backend.backend_mode(),
         }
+    user_id = vault_backend.current_user_id()
+    if not user_id:
+        return {
+            "status": "error",
+            "ok": False,
+            "message": "vault user_id is required",
+            "mode": vault_backend.backend_mode(),
+        }
     with _job_lock:
         if _job_thread is not None and _job_thread.is_alive():
             return {
@@ -1163,7 +1223,7 @@ def start_sync_job(*, force_download: bool = False) -> dict[str, Any]:
         _persist_job_state()
         _job_thread = threading.Thread(
             target=_run_sync_job,
-            kwargs={"force_download": force_download},
+            kwargs={"force_download": force_download, "user_id": user_id},
             name="vault-s3-sync",
             daemon=True,
         )

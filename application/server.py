@@ -8,11 +8,12 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from application.api.routes_auth import router as auth_router
+from application.api.routes_auth import bind_request_vault_user, router as auth_router
 from application.api.routes_agent import router as agent_router
 from application.api.routes_files import router as files_router
 from application.api.routes_graph import router as graph_router
@@ -20,7 +21,7 @@ from application.api.routes_search import router as search_router
 from application.api.routes_share import api_router as share_api_router
 from application.api.routes_share import public_router as share_public_router
 from application.security_headers import SecurityHeadersMiddleware
-from application import vault_backend, vault_index
+from application import vault_backend
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,19 +46,38 @@ _ENABLE_API_DOCS = os.environ.get("ENABLE_API_DOCS", "").strip().lower() in {
 async def lifespan(app: FastAPI):
     vault_backend.ensure_seed_vault()
     mode = vault_backend.backend_mode()
-    logger.info("Vault backend mode: %s root=%s", mode, vault_backend.vault_root())
+    logger.info("Vault backend mode: %s base=%s", mode, vault_backend.vault_base())
     if mode == "s3":
         try:
             from application import vault_sync
 
-            # Resume unfinished local→S3 ops first, then pull changed objects.
             result = vault_sync.startup_sync()
             logger.info("Startup vault sync: %s", result)
         except Exception:
-            logger.exception("Initial vault S3 sync failed")
-    stats = vault_index.rebuild_index()
-    logger.info("Vault index ready: %s", stats)
+            logger.exception("Initial vault S3 sync setup failed")
+    # Index rebuild is per-user on first authenticated access / sync.
     yield
+
+
+class VaultUserMiddleware(BaseHTTPMiddleware):
+    """Bind vault_backend paths to the signed-in user for each request."""
+
+    async def dispatch(self, request: Request, call_next):
+        user_id = None
+        try:
+            user_id = bind_request_vault_user(request)
+        except Exception:
+            logger.debug("Vault user bind skipped", exc_info=True)
+        token = None
+        if user_id:
+            token = vault_backend.set_current_user_id(user_id)
+        try:
+            return await call_next(request)
+        finally:
+            if token is not None:
+                vault_backend.reset_current_user_id(token)
+            else:
+                vault_backend.set_current_user_id(None)
 
 
 app = FastAPI(
@@ -71,6 +91,7 @@ app = FastAPI(
 
 # Must allow same-origin iframe for Notes Graph despite CloudFront XFO DENY.
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(VaultUserMiddleware)
 
 app.include_router(auth_router)
 app.include_router(files_router)

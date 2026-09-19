@@ -107,16 +107,19 @@ def view_share(token: str) -> HTMLResponse:
     entry = vault_share.get_share(token, refresh=True)
     if not entry:
         raise HTTPException(status_code=404, detail="Share not found")
+    owner = entry.get("user_id")
+    if not owner:
+        raise HTTPException(status_code=404, detail="Share not found")
     note_path = entry.get("path") or ""
-    text = vault_share.read_vault_text(note_path)
-    if text is None:
-        # Note deleted/moved away — drop dangling share so Shared List stays clean.
-        try:
-            vault_share.revoke_share_if_missing(token, note_path)
-        except Exception:
-            pass
-        raise HTTPException(status_code=404, detail="Shared note no longer exists")
-    text = vault_share.rewrite_md_assets_for_share(text, token)
+    with vault_backend.user_scope(owner):
+        text = vault_share.read_vault_text(note_path)
+        if text is None:
+            try:
+                vault_share.revoke_share_if_missing(token, note_path)
+            except Exception:
+                pass
+            raise HTTPException(status_code=404, detail="Shared note no longer exists")
+        text = vault_share.rewrite_md_assets_for_share(text, token)
     title = entry.get("title") or Path(note_path).stem
     page = viewer_html.build_markdown_viewer_page(
         title,
@@ -140,26 +143,30 @@ def share_raw_asset(token: str, path: str):
     entry = vault_share.get_share(token, refresh=True)
     if not entry:
         raise HTTPException(status_code=404, detail="Share not found")
+    owner = entry.get("user_id")
+    if not owner:
+        raise HTTPException(status_code=404, detail="Share not found")
     note_path = entry.get("path") or ""
-    rel = _share_asset_rel(note_path, path)
     headers = {
         "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",
     }
-    try:
-        target = vault_backend.resolve_vault_path(rel)
-        if target.is_file():
-            media, _ = mimetypes.guess_type(str(target))
-            return FileResponse(
-                target,
-                media_type=media or "application/octet-stream",
-                headers=headers,
-            )
-    except ValueError:
-        pass
-    data = vault_share.read_vault_bytes(rel)
-    if data is None:
-        raise HTTPException(status_code=404, detail="Asset not found")
+    with vault_backend.user_scope(owner):
+        rel = _share_asset_rel(note_path, path)
+        try:
+            target = vault_backend.resolve_vault_path(rel)
+            if target.is_file():
+                media, _ = mimetypes.guess_type(str(target))
+                return FileResponse(
+                    target,
+                    media_type=media or "application/octet-stream",
+                    headers=headers,
+                )
+        except ValueError:
+            pass
+        data = vault_share.read_vault_bytes(rel)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Asset not found")
     media, _ = mimetypes.guess_type(rel)
     return Response(
         content=data,

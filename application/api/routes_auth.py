@@ -214,18 +214,39 @@ def _resolve_user_id(request: Request) -> str | None:
 
 def require_user_id(request: Request) -> str:
     user_id = _resolve_user_id(request)
+    if not user_id and local_auth_bypass_enabled(request):
+        user_id = "local-dev"
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "unauthorized",
+                "login_url": utils.sharing_url() or "/",
+                "message": "Sign in with Google to continue",
+            },
+        )
+    # Bind per-user vault paths for the remainder of this request.
+    # Middleware also sets scope; this keeps direct/test callers correct.
+    from application import vault_backend
+
+    vault_backend.set_current_user_id(user_id)
+    try:
+        vault_backend.ensure_user_vault(user_id)
+    except Exception:
+        logger.exception("Failed to ensure user vault for %s", user_id)
+    return user_id
+
+
+def bind_request_vault_user(request: Request) -> str | None:
+    """Resolve session user (if any) and bind vault scope. Used by middleware."""
+    user_id = _resolve_user_id(request)
+    if not user_id and local_auth_bypass_enabled(request):
+        user_id = "local-dev"
     if user_id:
-        return user_id
-    if local_auth_bypass_enabled(request):
-        return "local-dev"
-    raise HTTPException(
-        status_code=401,
-        detail={
-            "error": "unauthorized",
-            "login_url": utils.sharing_url() or "/",
-            "message": "Sign in with Google to continue",
-        },
-    )
+        from application import vault_backend
+
+        vault_backend.set_current_user_id(user_id)
+    return user_id
 
 
 @router.get("/config", response_model=PublicConfigResponse)
@@ -284,6 +305,12 @@ def set_session(
 
         user_id = idinfo["email"].strip()
         _set_user_cookie(response, request, user_id)
+        try:
+            from application import vault_backend
+
+            vault_backend.ensure_user_vault(user_id)
+        except Exception:
+            logger.exception("Failed to ensure vault for %s", user_id)
         return SessionResponse(
             user_id=user_id,
             sharing_url=utils.sharing_url(),
@@ -297,6 +324,12 @@ def set_session(
         )
     user_id = local_user_id or "local-dev"
     _set_user_cookie(response, request, user_id)
+    try:
+        from application import vault_backend
+
+        vault_backend.ensure_user_vault(user_id)
+    except Exception:
+        logger.exception("Failed to ensure vault for %s", user_id)
     return SessionResponse(
         user_id=user_id,
         sharing_url=utils.sharing_url(),
