@@ -360,18 +360,34 @@ def delete_note(path: str) -> int:
     rel = _norm_rel(path)
     if not rel:
         return 0
+    note_ids: list[str] = []
+    deleted = 0
     with _lock:
         conn = _connect()
         try:
             _ensure_schema(conn)
+            note_ids = [
+                r["note_id"]
+                for r in conn.execute(
+                    "SELECT note_id FROM notes WHERE path = ? OR path LIKE ?",
+                    (rel, rel + "/%"),
+                ).fetchall()
+            ]
             cur = conn.execute("DELETE FROM notes WHERE path = ?", (rel,))
             deleted = cur.rowcount
             cur = conn.execute("DELETE FROM notes WHERE path LIKE ?", (rel + "/%",))
             deleted += cur.rowcount
             conn.commit()
-            return int(deleted)
         finally:
             conn.close()
+    if note_ids:
+        try:
+            from application import agent_chat_db
+
+            agent_chat_db.delete_messages_for_notes(note_ids)
+        except Exception:
+            logger.exception("agent_chat cleanup after note delete failed")
+    return int(deleted)
 
 
 def sync_from_filesystem() -> dict[str, int]:

@@ -11,6 +11,7 @@ import json
 import logging
 import threading
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -568,6 +569,97 @@ def list_remote_vault_rels(*, include_vault_meta: bool = False) -> list[str]:
                 continue
             rels.append(rel)
     return rels
+
+
+def _path_key_candidates(rel: str) -> list[str]:
+    """Unique path spellings to try against local disk / S3 (NFC + NFD)."""
+    cleaned = (rel or "").replace("\\", "/").lstrip("/")
+    if not cleaned:
+        return []
+    out: list[str] = []
+    for form in (cleaned, unicodedata.normalize("NFC", cleaned), unicodedata.normalize("NFD", cleaned)):
+        if form and form not in out:
+            out.append(form)
+    return out
+
+
+def ensure_local_file(rel: str) -> Optional[Path]:
+    """Return an on-disk file for ``rel``, downloading from S3 when needed.
+
+    In S3 mode the file tree is built from remote keys, so a note can appear in
+    the sidebar before the working copy has been mirrored. Call this before
+    read/view so the UI does not 404 on a file that only exists remotely yet.
+    """
+    candidates = _path_key_candidates(rel)
+    if not candidates:
+        return None
+
+    for cand in candidates:
+        found = vault_backend.find_vault_file(cand)
+        if found is not None and found.is_file():
+            return found
+
+    if vault_backend.backend_mode() != "s3":
+        return None
+
+    bucket, region = vault_backend.s3_bucket_and_region()
+    if not bucket:
+        return None
+    prefix = vault_backend.s3_prefix()
+    client = vault_backend._s3_client(region)
+
+    from botocore.exceptions import ClientError
+
+    for cand in candidates:
+        key = prefix + cand
+        try:
+            target = vault_backend.resolve_vault_path(cand)
+        except ValueError:
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            client.download_file(bucket, key, str(target))
+        except ClientError as exc:
+            code = str((exc.response or {}).get("Error", {}).get("Code") or "")
+            if code in {"404", "NoSuchKey", "NotFound"}:
+                continue
+            logger.warning("ensure_local_file download failed for %s: %s", cand, exc)
+            continue
+        except Exception as exc:
+            logger.warning("ensure_local_file download failed for %s: %s", cand, exc)
+            continue
+        if target.is_file():
+            logger.info("On-demand S3→local download: %s", cand)
+            return target
+
+    return None
+
+
+def remote_file_exists(rel: str) -> bool:
+    """True if any NFC/NFD spelling of ``rel`` exists as an S3 object."""
+    if vault_backend.backend_mode() != "s3":
+        return False
+    bucket, region = vault_backend.s3_bucket_and_region()
+    if not bucket:
+        return False
+    prefix = vault_backend.s3_prefix()
+    client = vault_backend._s3_client(region)
+    from botocore.exceptions import ClientError
+
+    for cand in _path_key_candidates(rel):
+        try:
+            client.head_object(Bucket=bucket, Key=prefix + cand)
+            return True
+        except ClientError as exc:
+            code = str((exc.response or {}).get("Error", {}).get("Code") or "")
+            if code in {"404", "NoSuchKey", "NotFound", "403", "AccessDenied"}:
+                continue
+            logger.debug("remote_file_exists head failed for %s: %s", cand, exc)
+            continue
+        except Exception as exc:
+            logger.debug("remote_file_exists head failed for %s: %s", cand, exc)
+            continue
+    return False
 
 
 def build_tree_from_rels(rels: list[str]) -> list[dict[str, Any]]:

@@ -14,7 +14,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from application.api.routes_auth import require_user_id
-from application import harness_client, models as model_catalog, notes_db, vault_backend, vault_index
+from application import (
+    agent_chat_db,
+    harness_client,
+    models as model_catalog,
+    notes_db,
+    vault_backend,
+    vault_index,
+)
 
 logger = logging.getLogger("routes_agent")
 
@@ -41,11 +48,10 @@ def _sse_keepalive() -> str:
 
 
 def _read_note(path: str) -> tuple[str, int]:
-    try:
-        target = vault_backend.resolve_vault_path(path)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    if not target.is_file():
+    from application import vault_sync
+
+    target = vault_sync.ensure_local_file(path)
+    if target is None or not target.is_file():
         raise HTTPException(status_code=404, detail=f"Note not found: {path}")
     content = target.read_text(encoding="utf-8", errors="replace")
     size = target.stat().st_size
@@ -176,6 +182,44 @@ def note_meta(request: Request, path: str) -> dict:
     }
 
 
+@router.get("/messages")
+def get_agent_messages(
+    request: Request,
+    note_id: Optional[str] = None,
+    note_path: Optional[str] = None,
+) -> dict:
+    """Load Open Agent transcript for a note (conversation room)."""
+    require_user_id(request)
+    nid = (note_id or "").strip()
+    path = (note_path or "").strip()
+    if not nid and path:
+        row = notes_db.ensure_note_for_path(path)
+        nid = (row or {}).get("note_id") or ""
+    if not nid:
+        raise HTTPException(status_code=400, detail="note_id or note_path required")
+    messages = agent_chat_db.list_messages(nid)
+    return {"note_id": nid, "count": len(messages), "messages": messages}
+
+
+@router.delete("/messages")
+def clear_agent_messages(
+    request: Request,
+    note_id: Optional[str] = None,
+    note_path: Optional[str] = None,
+) -> dict:
+    """Clear Open Agent transcript for a note."""
+    require_user_id(request)
+    nid = (note_id or "").strip()
+    path = (note_path or "").strip()
+    if not nid and path:
+        row = notes_db.get_by_path(path)
+        nid = (row or {}).get("note_id") or ""
+    if not nid:
+        raise HTTPException(status_code=400, detail="note_id or note_path required")
+    removed = agent_chat_db.clear_messages(nid)
+    return {"ok": True, "note_id": nid, "removed": removed}
+
+
 @router.post("/chat")
 def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
     user_id = require_user_id(request)
@@ -220,13 +264,44 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
     if note_path:
         note_content = None
 
-    # Prefer durable note_id as harness session_id when the client did not send one.
+    # Conversation room id = durable note_id. Always bind harness session to the open note.
     session_raw = (body.session_id or "").strip() or None
-    if not session_raw and note_path and note_path.lower().endswith(".md"):
+    note_id: Optional[str] = None
+    if note_path and note_path.lower().endswith((".md", ".markdown")):
         row = notes_db.ensure_note_for_path(note_path)
-        if row and row.get("note_id"):
-            session_raw = row["note_id"]
+        note_id = (row or {}).get("note_id") if row else None
+        if note_id:
+            if session_raw and session_raw != note_id:
+                logger.info(
+                    "agent chat override session_id %s -> note_id %s for note_path=%r",
+                    session_raw,
+                    note_id,
+                    note_path,
+                )
+            session_raw = note_id
     session_id = harness_client.normalize_session_id(session_raw)
+
+    # Attachments stored with the user turn (agentic-work style transcript).
+    attach_paths: list[str] = []
+    seen_attach: set[str] = set()
+    for p in [note_path, *image_paths, *file_paths]:
+        if not p or p in seen_attach:
+            continue
+        seen_attach.add(p)
+        attach_paths.append(p)
+
+    user_content = prompt
+    if not user_content:
+        if image_paths and not file_paths:
+            user_content = f"이미지 {len(image_paths)}개"
+        elif file_paths and not image_paths:
+            user_content = f"파일 {len(file_paths)}개"
+        elif image_paths or file_paths:
+            user_content = "첨부"
+        elif note_path:
+            user_content = Path(note_path).name
+        else:
+            user_content = "(빈 메시지)"
     model_name = model_catalog.normalize_model_name(body.model_name)
     logger.info(
         "agent chat note_path=%r model=%s images=%d files=%d prompt_chars=%d session=%s",
@@ -259,6 +334,18 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
             # Bind the signed-in user so resolve_vault_path / sync_to_s3 work.
             with vault_backend.user_scope(user_id):
                 tool_events: list[dict[str, Any]] = []
+                if note_id:
+                    try:
+                        agent_chat_db.add_message(
+                            note_id,
+                            "user",
+                            user_content,
+                            attachments=attach_paths,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "failed to persist user agent message note_id=%s", note_id
+                        )
                 try:
                     gen = harness_client.iter_harness_events(
                         full_prompt,
@@ -338,6 +425,22 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
                     _sanitize_timeline_text(tool_events)
                     # Final assistant reply must come AFTER tool cards (harness-work order).
                     _set_final_text_in_timeline(tool_events, visible_final)
+
+                    if note_id:
+                        try:
+                            # Persist full timeline (including final text event) so reload
+                            # matches the live transcript order.
+                            agent_chat_db.add_message(
+                                note_id,
+                                "assistant",
+                                visible_final or "(응답 없음)",
+                                tool_events=tool_events,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "failed to persist assistant agent message note_id=%s",
+                                note_id,
+                            )
 
                     q.put(
                         (

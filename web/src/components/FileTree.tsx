@@ -78,7 +78,7 @@ function serializeDrag(payload: DragPayload): string {
   return `${DND_PREFIX}${payload.kind}|${payload.path}`;
 }
 
-function parseDrag(e: DragEvent): DragPayload | null {
+export function parseVaultDrag(e: DragEvent): DragPayload | null {
   try {
     const raw = e.dataTransfer.getData(DND_TYPE) || e.dataTransfer.getData("text/plain");
     if (!raw) return null;
@@ -97,6 +97,10 @@ function parseDrag(e: DragEvent): DragPayload | null {
   } catch {
     return null;
   }
+}
+
+function parseDrag(e: DragEvent): DragPayload | null {
+  return parseVaultDrag(e);
 }
 
 function hasExternalFiles(e: DragEvent): boolean {
@@ -565,7 +569,8 @@ function TreeRow({
               const serialized = serializeDrag(payload);
               e.dataTransfer.setData(DND_TYPE, serialized);
               e.dataTransfer.setData("text/plain", serialized);
-              e.dataTransfer.effectAllowed = "move";
+              // copyMove: tree move + Agent chat attach (copy)
+              e.dataTransfer.effectAllowed = "copyMove";
               setDragging(payload);
               setHighlight(null);
             }}
@@ -702,7 +707,8 @@ function TreeRow({
         const serialized = serializeDrag(payload);
         e.dataTransfer.setData(DND_TYPE, serialized);
         e.dataTransfer.setData("text/plain", serialized);
-        e.dataTransfer.effectAllowed = "move";
+        // copyMove: tree move + Agent chat attach (copy)
+        e.dataTransfer.effectAllowed = "copyMove";
         setDragging(payload);
         setHighlight(null);
       }}

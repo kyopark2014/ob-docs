@@ -1438,31 +1438,69 @@ html[data-theme="light"] .tree-item.selected {
   margin: 0 0 12px;
 }
 
-@media (max-width: 800px) {
-  .app {
+/* Narrow / mobile: Files · Search · Meeting fill from rail to the right edge.
+   .is-narrow comes from JS matchMedia(NARROW_LAYOUT_MQ); media query is fallback. */
+.app.is-narrow,
+.app.is-narrow.agent-open,
+.app.is-narrow.sidebar-collapsed.agent-open {
+  grid-template-columns: var(--rail-w) 1fr !important;
+}
+
+.app.is-narrow.panel-open .sidebar {
+  position: fixed !important;
+  inset: 0 0 0 var(--rail-w);
+  width: auto !important;
+  max-width: none !important;
+  min-width: 0;
+  z-index: 30;
+  box-shadow: none;
+}
+
+.app.is-narrow .sidebar.collapsed {
+  display: none;
+}
+
+.app.is-narrow .sidebar-resizer {
+  display: none;
+}
+
+.app.is-narrow .main {
+  grid-column: 2;
+  min-width: 0;
+}
+
+@media (max-width: 1024px) {
+  /*
+    Grid items with position:absolute/fixed inside a grid track still size to
+    that track (--sidebar-w). Override so the panel spans rail → viewport edge.
+  */
+  .app:not(.sidebar-collapsed),
+  .app.agent-open:not(.sidebar-collapsed),
+  .app.sidebar-collapsed.agent-open {
     grid-template-columns: var(--rail-w) 1fr;
   }
-  .sidebar {
-    position: absolute;
-    left: var(--rail-w);
-    top: 0;
-    bottom: 0;
-    width: min(80vw, 300px);
-    z-index: 20;
-    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
-  }
-  /* Meeting log: fill from rail to the right edge on narrow screens. */
-  .app.meeting-open .sidebar {
-    right: 0;
-    width: auto;
-    max-width: none;
+
+  .app:not(.sidebar-collapsed) .sidebar {
+    position: fixed;
+    inset: 0 0 0 var(--rail-w);
+    width: auto !important;
+    max-width: none !important;
+    min-width: 0;
+    z-index: 30;
     box-shadow: none;
   }
+
   .sidebar.collapsed {
     display: none;
   }
+
   .sidebar-resizer {
     display: none;
+  }
+
+  .main {
+    grid-column: 2;
+    min-width: 0;
   }
 }
 
@@ -2695,10 +2733,16 @@ a.agent-message-loaded-file-link:focus-visible {
   border: 1px solid var(--border);
   border-radius: 16px;
   background: var(--bg-elevated);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 
 .agent-chat-input-wrap:focus-within {
   border-color: var(--text-muted);
+}
+
+.agent-chat-input-wrap.is-dragover {
+  border-color: var(--accent, #6b9fff);
+  background: color-mix(in srgb, var(--accent, #6b9fff) 10%, var(--bg-elevated));
 }
 
 .agent-loaded-files {
@@ -3070,8 +3114,9 @@ html[data-theme="light"] .agent-loaded-file-remove:hover:not(:disabled) {
 }
 
 @media (max-width: 900px) {
+  /* Keep agent as an overlay; do not shrink the file panel back to --sidebar-w. */
   .app.agent-open {
-    grid-template-columns: var(--rail-w) var(--sidebar-w) 1fr;
+    grid-template-columns: var(--rail-w) 1fr;
   }
 
   .app.sidebar-collapsed.agent-open {

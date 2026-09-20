@@ -198,6 +198,8 @@ function uniqueNotePath(parent: string, tree: TreeNode[]): string {
 }
 
 const LAST_NOTE_KEY = "ob-docs:last-note-path";
+/** Match CSS mobile overlay layout (Files/Search/Meeting full-bleed). */
+const NARROW_LAYOUT_MQ = "(max-width: 1024px)";
 
 function flattenMarkdownPaths(nodes: TreeNode[]): string[] {
   const out: string[] = [];
@@ -220,6 +222,16 @@ function writeLastNotePath(path: string): void {
   try {
     localStorage.setItem(LAST_NOTE_KEY, path);
     ensureAncestorsOpen(path);
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearLastNotePath(path?: string): void {
+  try {
+    if (!path || localStorage.getItem(LAST_NOTE_KEY) === path) {
+      localStorage.removeItem(LAST_NOTE_KEY);
+    }
   } catch {
     /* ignore */
   }
@@ -289,6 +301,9 @@ export default function App() {
   } | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [panel, setPanel] = useState<PanelMode>("files");
+  const [isNarrow, setIsNarrow] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia(NARROW_LAYOUT_MQ).matches : false,
+  );
   const meeting = useMeetingLog(userId);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [tabs, setTabs] = useState<OpenTab[]>([]);
@@ -347,6 +362,22 @@ export default function App() {
   const [agentResizing, setAgentResizing] = useState(false);
   const agentWidthRef = useRef(agentWidth);
   agentWidthRef.current = agentWidth;
+
+  // While Open Agent is open, follow the selected note and load its chat history.
+  useEffect(() => {
+    if (!agentOpen) return;
+    if (activePath && /\.md$/i.test(activePath)) {
+      setAgentNotePath(activePath);
+    }
+  }, [agentOpen, activePath]);
+
+  useEffect(() => {
+    const mq = window.matchMedia(NARROW_LAYOUT_MQ);
+    const sync = () => setIsNarrow(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
   const [pinnedPaths, setPinnedPathsState] = useState<string[]>(() => getPinnedPaths());
   const [settingsFlyoutPos, setSettingsFlyoutPos] = useState<{ left: number; bottom: number } | null>(
     null,
@@ -774,20 +805,74 @@ export default function App() {
           return;
         }
       }
-      const payload = await api.readFile(path);
+      let payload;
+      try {
+        payload = await api.readFile(path);
+      } catch (err) {
+        const status = (err as { status?: number; detail?: unknown } | null)?.status;
+        if (status === 404) {
+          const body = (err as { detail?: unknown }).detail;
+          const inner =
+            body && typeof body === "object" && "detail" in (body as object)
+              ? (body as { detail: unknown }).detail
+              : body;
+          const purged =
+            Boolean(
+              inner &&
+                typeof inner === "object" &&
+                (inner as { purged?: unknown }).purged,
+            );
+          await refreshTree();
+          // Only drop tabs/pins when backend confirmed the note is gone (not a
+          // transient S3 download miss while the object still exists remotely).
+          if (purged) {
+            clearLastNotePath(path);
+            setTabs((prev) => prev.filter((t) => t.path !== path));
+            updatePinnedPaths(removePinnedPaths(pinnedPaths, path));
+            if (activePathRef.current === path) {
+              setActivePath(null);
+              setFile(null);
+              setDraft("");
+              setDirty(false);
+            }
+          } else {
+            void showAlert(
+              "노트를 아직 로컬에 받지 못했습니다. Sync 후 다시 열어보세요.",
+              "Open failed",
+            );
+          }
+          return;
+        }
+        void showAlert(err instanceof Error ? err.message : String(err), "Open failed");
+        return;
+      }
+      const resolvedPath = payload.path || path;
       setFile(payload);
       setDraft(payload.content);
       setDirty(false);
-      setActivePath(path);
-      writeLastNotePath(path);
+      setActivePath(resolvedPath);
+      writeLastNotePath(resolvedPath);
       setTabs((prev) => {
-        if (prev.some((t) => t.path === path)) return prev;
-        return [...prev, { path, title: payload.title || path.split("/").pop() || path }];
+        const withoutStale =
+          resolvedPath === path ? prev : prev.filter((t) => t.path !== path);
+        if (withoutStale.some((t) => t.path === resolvedPath)) return withoutStale;
+        return [
+          ...withoutStale,
+          {
+            path: resolvedPath,
+            title: payload.title || resolvedPath.split("/").pop() || resolvedPath,
+          },
+        ];
       });
-      setPanel("files");
+      // Narrow / mobile: dismiss overlay panel so the note view fills the screen.
+      if (window.matchMedia(NARROW_LAYOUT_MQ).matches) {
+        setPanel("hidden");
+      } else {
+        setPanel("files");
+      }
       setViewMode("preview");
     },
-    [dirty, file?.content, persistNote, showAlert],
+    [dirty, file?.content, persistNote, pinnedPaths, refreshTree, showAlert, updatePinnedPaths],
   );
 
   // On refresh: restore last note, else open first markdown file
@@ -1770,7 +1855,7 @@ export default function App() {
 
   return (
     <div
-      className={`app${panel === "hidden" ? " sidebar-collapsed" : ""}${panel === "meeting" ? " meeting-open" : ""}${agentOpen ? " agent-open" : ""}${sidebarResizing || agentResizing ? " is-resizing" : ""}`}
+      className={`app${panel === "hidden" ? " sidebar-collapsed" : " panel-open"}${isNarrow ? " is-narrow" : ""}${agentOpen ? " agent-open" : ""}${sidebarResizing || agentResizing ? " is-resizing" : ""}`}
       style={{
         ["--sidebar-w" as string]: `${sidebarWidth}px`,
         ["--agent-w" as string]: `${agentWidth}px`,
@@ -1819,16 +1904,6 @@ export default function App() {
           <SearchIcon />
         </button>
         <button
-          type="button"
-          className={`rail-btn${panel === "meeting" ? " active" : ""}`}
-          data-tooltip="Meeting Log"
-          aria-label="Meeting Log"
-          aria-pressed={panel === "meeting"}
-          onClick={() => setPanel((p) => (p === "meeting" ? "hidden" : "meeting"))}
-        >
-          <MicIcon />
-        </button>
-        <button
           ref={graphBtnRef}
           type="button"
           className={`rail-btn${graphMenuOpen || notesSyncBusy || notesGraphOpen ? " active" : ""}`}
@@ -1845,6 +1920,16 @@ export default function App() {
           }}
         >
           <GraphIcon />
+        </button>
+        <button
+          type="button"
+          className={`rail-btn${panel === "meeting" ? " active" : ""}`}
+          data-tooltip="Meeting Log"
+          aria-label="Meeting Log"
+          aria-pressed={panel === "meeting"}
+          onClick={() => setPanel((p) => (p === "meeting" ? "hidden" : "meeting"))}
+        >
+          <MicIcon />
         </button>
         <div className="rail-spacer" />
         <button

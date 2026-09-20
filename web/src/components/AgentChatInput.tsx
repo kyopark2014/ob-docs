@@ -1,5 +1,6 @@
 import {
   ClipboardEvent,
+  DragEvent,
   FormEvent,
   KeyboardEvent,
   CompositionEvent,
@@ -10,6 +11,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api";
+import { isVaultMoveDrag, parseVaultDrag } from "./FileTree";
 
 export type AgentNoteChip = {
   path: string;
@@ -152,8 +154,11 @@ export function AgentChatInput({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<AgentAttachedImage[]>([]);
   const [loadedFiles, setLoadedFiles] = useState<AgentLoadedFile[]>([]);
+  const [dragOver, setDragOver] = useState(false);
   const attachmentsRef = useRef<AgentAttachedImage[]>([]);
   const uploadingRef = useRef(false);
+  const dragDepthRef = useRef(0);
+  const loadedFilesRef = useRef<AgentLoadedFile[]>([]);
 
   const addWrapRef = useRef<HTMLDivElement>(null);
   const menuPortalRef = useRef<HTMLDivElement>(null);
@@ -166,6 +171,7 @@ export function AgentChatInput({
 
   attachmentsRef.current = attachments;
   uploadingRef.current = uploading;
+  loadedFilesRef.current = loadedFiles;
 
   useEffect(() => {
     return () => {
@@ -302,6 +308,114 @@ export function AgentChatInput({
       );
     } finally {
       setUploading(false);
+    }
+  }
+
+  function isAlreadyAttached(path: string): boolean {
+    if (note?.path === path) return true;
+    if (extraNotes.some((n) => n.path === path)) return true;
+    if (loadedFilesRef.current.some((f) => f.path === path)) return true;
+    if (attachmentsRef.current.some((a) => a.path === path)) return true;
+    return false;
+  }
+
+  /** Attach an existing vault note/file (no re-upload) — same chip as Load files. */
+  async function loadVaultPaths(paths: string[]) {
+    const unique = [...new Set(paths.map((p) => p.trim()).filter(Boolean))];
+    if (!unique.length || disabled || uploadingRef.current) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      for (const path of unique) {
+        if (isAlreadyAttached(path)) continue;
+        try {
+          const meta = await api.agentNoteMeta(path);
+          const chip = {
+            path: meta.path || path,
+            name: meta.name || path.split("/").pop() || path,
+            size: meta.size ?? 0,
+          };
+          if (/\.(png|jpe?g|gif|webp)$/i.test(chip.name)) {
+            setAttachments((prev) => {
+              if (prev.some((a) => a.path === chip.path)) return prev;
+              return [
+                ...prev,
+                {
+                  path: chip.path,
+                  name: chip.name,
+                  previewUrl: api.rawUrl(chip.path),
+                },
+              ];
+            });
+          } else {
+            setLoadedFiles((prev) => {
+              const next = prev.filter((item) => item.path !== chip.path);
+              return [...next, chip];
+            });
+          }
+        } catch (err) {
+          console.error("Vault path load failed", err);
+          const name = path.split("/").pop() || path;
+          setLoadedFiles((prev) => {
+            if (prev.some((item) => item.path === path)) return prev;
+            return [...prev, { path, name, size: 0 }];
+          });
+        }
+      }
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function canAcceptAgentDrop(e: DragEvent): boolean {
+    if (disabled || uploadingRef.current) return false;
+    if (isVaultMoveDrag(e)) return true;
+    return Array.from(e.dataTransfer.types || []).includes("Files");
+  }
+
+  function onDragEnter(e: DragEvent) {
+    if (!canAcceptAgentDrop(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepthRef.current += 1;
+    setDragOver(true);
+  }
+
+  function onDragOver(e: DragEvent) {
+    if (!canAcceptAgentDrop(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "copy";
+  }
+
+  function onDragLeave(e: DragEvent) {
+    if (!dragOver && dragDepthRef.current === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDragOver(false);
+  }
+
+  async function onDrop(e: DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepthRef.current = 0;
+    setDragOver(false);
+    if (disabled || uploadingRef.current) return;
+
+    const vault = parseVaultDrag(e);
+    if (vault) {
+      if (vault.kind === "folder") {
+        setUploadError("폴더는 첨부할 수 없습니다. 노트를 선택해 주세요.");
+        return;
+      }
+      await loadVaultPaths([vault.path]);
+      return;
+    }
+
+    const files = Array.from(e.dataTransfer.files ?? []);
+    if (files.length) {
+      await loadWorkspaceFiles(files);
     }
   }
 
@@ -497,8 +611,12 @@ export function AgentChatInput({
       )}
       <form
         ref={inputWrapRef}
-        className="agent-chat-input-wrap"
+        className={`agent-chat-input-wrap${dragOver ? " is-dragover" : ""}`}
         onSubmit={onSubmit}
+        onDragEnter={onDragEnter}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={(e) => void onDrop(e)}
       >
         {(note || extraNotes.length > 0) && (
           <div className="agent-loaded-files" aria-label="선택된 노트">
@@ -691,7 +809,7 @@ export function AgentChatInput({
           ref={textareaRef}
           className="agent-chat-input"
           rows={1}
-          placeholder="메시지를 입력하거나 이미지를 붙여넣으세요..."
+          placeholder="메시지를 입력하거나 노트·파일을 끌어다 놓으세요..."
           value={value}
           disabled={inputDisabled}
           onChange={(e) => setValue(e.target.value)}

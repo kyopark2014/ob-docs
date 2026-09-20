@@ -298,6 +298,33 @@ export const api = {
         updated_at: string;
       }[];
     }>("/files/notes"),
+  agentMessages: (opts: { noteId?: string | null; notePath?: string | null }) => {
+    const q = new URLSearchParams();
+    if (opts.noteId) q.set("note_id", opts.noteId);
+    if (opts.notePath) q.set("note_path", opts.notePath);
+    return request<{
+      note_id: string;
+      count: number;
+      messages: Array<{
+        id: string;
+        note_id: string;
+        role: "user" | "assistant";
+        content: string;
+        attachments: string[];
+        tool_events: AgentToolEvent[];
+        created_at: string;
+      }>;
+    }>(`/agent/messages?${q.toString()}`);
+  },
+  clearAgentMessages: (opts: { noteId?: string | null; notePath?: string | null }) => {
+    const q = new URLSearchParams();
+    if (opts.noteId) q.set("note_id", opts.noteId);
+    if (opts.notePath) q.set("note_path", opts.notePath);
+    return request<{ ok: boolean; note_id: string; removed: number }>(
+      `/agent/messages?${q.toString()}`,
+      { method: "DELETE" },
+    );
+  },
   agentModels: () =>
     request<{ models: string[]; default_model: string }>("/agent/models"),
   agentChat: (

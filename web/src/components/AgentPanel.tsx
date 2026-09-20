@@ -191,11 +191,12 @@ function MessageTimeline({
       event.type === "text" &&
       normalizeText(event.data ?? "") === normalizedContent,
   );
+  // Show content even when earlier status text exists in the timeline
+  // (e.g. "읽어오겠습니다" then tools then final summary in `content`).
   const showTrailingContent =
     !liveText &&
     normalizedContent.length > 0 &&
-    !contentCoveredByTimeline &&
-    !hasTextEvent;
+    !contentCoveredByTimeline;
   const showThinking =
     !!streaming && !liveText?.trim() && !showTrailingContent && !hasToolCards;
 
@@ -272,7 +273,9 @@ export function AgentPanel({
   const abortRef = useRef<AbortController | null>(null);
   const streamTextRef = useRef("");
   const noteRef = useRef<AgentNoteChip | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
   noteRef.current = note;
+  sessionIdRef.current = sessionId;
 
   const flushLiveTextIntoEvents = useCallback(() => {
     const cleaned = stripVaultWriteMarkers(streamTextRef.current);
@@ -284,10 +287,13 @@ export function AgentPanel({
     );
   }, []);
 
+  // Bind Open Agent session to the open note's durable note_id (conversation room).
   useEffect(() => {
     let cancelled = false;
     const path = (notePath || "").trim();
     if (!path) {
+      setSessionId(null);
+      setMessages([]);
       return;
     }
     void (async () => {
@@ -303,19 +309,42 @@ export function AgentPanel({
         const name = path.split("/").pop() || path;
         chip = { path, name, size: 0 };
       }
-      if (noteId) {
-        setSessionId(noteId);
-      }
+      setSessionId(noteId);
+      setStreamText("");
+      setStreamEvents([]);
+      setError(null);
       const primary = noteRef.current;
-      if (!primary) {
+      if (!primary || primary.path !== chip.path) {
         setNote(chip);
-        return;
+        setExtraNotes((prev) => prev.filter((n) => n.path !== chip.path));
       }
-      if (primary.path === chip.path) return;
-      setExtraNotes((prev) => {
-        if (prev.some((n) => n.path === chip.path)) return prev;
-        return [...prev, chip];
-      });
+
+      // Restore transcript from SQLite (agentic-work style).
+      if (noteId) {
+        try {
+          const hist = await api.agentMessages({ noteId });
+          if (cancelled) return;
+          setMessages(
+            (hist.messages || []).map((m) => ({
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              attachments:
+                m.attachments && m.attachments.length > 0
+                  ? m.attachments
+                  : undefined,
+              toolEvents:
+                m.tool_events && m.tool_events.length > 0
+                  ? m.tool_events
+                  : undefined,
+            })),
+          );
+        } catch {
+          if (!cancelled) setMessages([]);
+        }
+      } else if (!cancelled) {
+        setMessages([]);
+      }
     })();
     return () => {
       cancelled = true;
@@ -340,10 +369,24 @@ export function AgentPanel({
         ...extraNotes.map((n) => n.path),
         ...(payload.filePaths || []),
       ];
+      const roomPath = (notePath || note?.path || "").trim() || null;
+
+      // Ensure session_id = note_id for this conversation room before invoke.
+      let roomSessionId = sessionIdRef.current;
+      if (roomPath && /\.md$/i.test(roomPath) && !roomSessionId) {
+        try {
+          const meta = await api.agentNoteMeta(roomPath);
+          roomSessionId = meta.note_id || null;
+          if (roomSessionId) setSessionId(roomSessionId);
+        } catch {
+          /* server will still bind note_id from note_path */
+        }
+      }
+
       // Selected note chip (Open agent) + extras + Load-files / images.
       const attachments: string[] = [];
       const seen = new Set<string>();
-      for (const path of [note?.path, ...imagePaths, ...filePaths]) {
+      for (const path of [roomPath, ...imagePaths, ...filePaths]) {
         const p = (path || "").trim();
         if (!p || seen.has(p)) continue;
         seen.add(p);
@@ -440,8 +483,8 @@ export function AgentPanel({
         await api.agentChat(
           {
             prompt: text,
-            note_path: note?.path ?? null,
-            session_id: sessionId,
+            note_path: roomPath,
+            session_id: roomSessionId,
             model_name: modelName || null,
             image_paths: imagePaths,
             file_paths: filePaths,
@@ -464,12 +507,12 @@ export function AgentPanel({
       }
     },
     [
+      notePath,
       note?.path,
       note?.name,
       extraNotes,
       modelName,
       onNoteUpdated,
-      sessionId,
       flushLiveTextIntoEvents,
     ],
   );

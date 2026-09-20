@@ -275,31 +275,74 @@ def list_files(
     return {"prefix": cleaned, "ext": ext, "count": len(files), "files": files}
 
 
+def _forget_missing_note(path: str) -> None:
+    """Drop registry / index entries when a note is gone locally and on S3."""
+    cleaned = (path or "").replace("\\", "/").lstrip("/")
+    if not cleaned:
+        return
+    try:
+        notes_db.on_note_deleted(cleaned)
+    except Exception:
+        logger.exception("notes_db cleanup failed for missing %s", cleaned)
+    try:
+        vault_index.remove_note(cleaned)
+    except Exception:
+        logger.exception("vault_index cleanup failed for missing %s", cleaned)
+    try:
+        vault_order.notify_deleted(cleaned)
+    except Exception:
+        logger.debug("vault_order cleanup skipped for %s", cleaned, exc_info=True)
+
+
+def _require_local_file(path: str) -> Path:
+    """Resolve ``path`` to an on-disk file, pulling from S3 on demand.
+
+    If the file is missing both locally and remotely, purge stale note metadata
+    and raise 404 so the UI can drop tabs/pins for ghost entries.
+    """
+    target = vault_sync.ensure_local_file(path)
+    if target is not None and target.is_file():
+        return target
+    purged = False
+    if notes_db.is_markdown_path(path) and not vault_sync.remote_file_exists(path):
+        _forget_missing_note(path)
+        purged = True
+    raise HTTPException(
+        status_code=404,
+        detail={"error": "file_not_found", "path": path, "purged": purged},
+    )
+
+
 @router.get("/read")
 def read_file(request: Request, path: str) -> dict:
     require_user_id(request)
     try:
-        target = vault_backend.resolve_vault_path(path)
+        target = _require_local_file(path)
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
     if target.suffix.lower() not in {".md", ".txt", ".json", ".csv", ".yaml", ".yml"}:
         raise HTTPException(status_code=400, detail="Use /raw for binary files")
     content = target.read_text(encoding="utf-8", errors="replace")
-    meta = vault_index.get_meta(path) if target.suffix.lower() == ".md" else None
-    backlinks = vault_index.backlinks(path) if meta else []
+    # Prefer the on-disk relative path (handles NFC/NFD spelling differences).
+    try:
+        rel = target.resolve().relative_to(vault_backend.vault_root().resolve()).as_posix()
+    except Exception:
+        rel = path
+    meta = vault_index.get_meta(rel) if target.suffix.lower() == ".md" else None
+    backlinks = vault_index.backlinks(rel) if meta else []
     note_row = (
-        notes_db.ensure_note_for_path(path) if target.suffix.lower() == ".md" else None
+        notes_db.ensure_note_for_path(rel) if target.suffix.lower() == ".md" else None
     )
     return {
-        "path": path,
+        "path": rel,
         "content": content,
         "word_count": meta.word_count if meta else len(content.split()),
         "char_count": meta.char_count if meta else len(content),
         "backlinks": backlinks,
         "title": (note_row or {}).get("title")
-        or (meta.title if meta else Path(path).stem),
+        or (meta.title if meta else Path(rel).stem),
         "tags": meta.tags if meta else [],
         "note_id": (note_row or {}).get("note_id"),
         "size_bytes": (note_row or {}).get("size_bytes", target.stat().st_size),
@@ -311,9 +354,7 @@ def read_file(request: Request, path: str) -> dict:
 @router.get("/raw")
 def raw_file(request: Request, path: str) -> Response:
     require_user_id(request)
-    target = vault_backend.find_vault_file(path)
-    if target is None or not target.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
+    target = _require_local_file(path)
     media, _ = mimetypes.guess_type(str(target))
     return FileResponse(target, media_type=media or "application/octet-stream")
 
@@ -330,11 +371,11 @@ def view_vault_file(
     """
     require_user_id(request)
     try:
-        target = vault_backend.resolve_vault_path(path)
+        target = _require_local_file(path)
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
 
     name = target.name
     ext = target.suffix.lower()
