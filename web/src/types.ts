@@ -4,6 +4,11 @@ export type TreeNode = {
   type: "file" | "folder";
   ext?: string;
   children?: TreeNode[];
+  note_id?: string;
+  title?: string;
+  size_bytes?: number;
+  created_at?: string;
+  updated_at?: string;
 };
 
 export type FilePayload = {
@@ -14,6 +19,10 @@ export type FilePayload = {
   backlinks: { path: string; title: string }[];
   title: string;
   tags: string[];
+  note_id?: string | null;
+  size_bytes?: number;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 export type SearchHit = {

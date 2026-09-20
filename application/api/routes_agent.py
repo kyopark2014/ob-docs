@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from application.api.routes_auth import require_user_id
-from application import harness_client, models as model_catalog, vault_backend, vault_index
+from application import harness_client, models as model_catalog, notes_db, vault_backend, vault_index
 
 logger = logging.getLogger("routes_agent")
 
@@ -61,12 +61,19 @@ def _apply_vault_write(path: str, content: str) -> dict[str, Any]:
         raise ValueError(f"Only markdown/text notes can be written: {path}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
+    note_row = None
     if target.suffix.lower() in {".md", ".markdown"}:
+        note_row = notes_db.on_note_written(path, content=content)
         vault_index.update_note(path)
         vault_index.rebuild_index()
     if vault_backend.backend_mode() == "s3":
         vault_backend.sync_to_s3(path)
-    return {"path": path, "bytes": len(content.encode("utf-8"))}
+    return {
+        "path": path,
+        "bytes": len(content.encode("utf-8")),
+        "note_id": (note_row or {}).get("note_id"),
+        "created": (note_row or {}).get("created"),
+    }
 
 
 def _upsert_tool_event(timeline: list[dict[str, Any]], event: dict[str, Any]) -> None:
@@ -151,15 +158,21 @@ def agent_models(request: Request) -> dict:
 
 @router.get("/note-meta")
 def note_meta(request: Request, path: str) -> dict:
-    """Filename + size for the agent input chip."""
+    """Filename + size for the agent input chip (includes durable note_id)."""
     require_user_id(request)
     content, size = _read_note(path)
     name = Path(path).name
+    row = notes_db.ensure_note_for_path(path) if path.lower().endswith(".md") else None
     return {
         "path": path,
         "name": name,
         "size": size,
         "char_count": len(content),
+        "note_id": (row or {}).get("note_id"),
+        "title": (row or {}).get("title"),
+        "size_bytes": (row or {}).get("size_bytes", size),
+        "created_at": (row or {}).get("created_at"),
+        "updated_at": (row or {}).get("updated_at"),
     }
 
 
@@ -207,7 +220,13 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
     if note_path:
         note_content = None
 
-    session_id = harness_client.normalize_session_id(body.session_id)
+    # Prefer durable note_id as harness session_id when the client did not send one.
+    session_raw = (body.session_id or "").strip() or None
+    if not session_raw and note_path and note_path.lower().endswith(".md"):
+        row = notes_db.ensure_note_for_path(note_path)
+        if row and row.get("note_id"):
+            session_raw = row["note_id"]
+    session_id = harness_client.normalize_session_id(session_raw)
     model_name = model_catalog.normalize_model_name(body.model_name)
     logger.info(
         "agent chat note_path=%r model=%s images=%d files=%d prompt_chars=%d session=%s",

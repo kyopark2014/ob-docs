@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from application.api.routes_auth import require_user_id
-from application import vault_backend, vault_index, vault_order, vault_share, vault_sync, viewer_html
+from application import notes_db, vault_backend, vault_index, vault_order, vault_share, vault_sync, viewer_html
 
 logger = logging.getLogger("routes_files")
 
@@ -139,17 +139,27 @@ def _tree_node(path: Path, root: Path) -> dict[str, Any]:
             children.append(_tree_node(child, root))
         children = vault_order.apply_order(rel, children)
         return {"name": path.name, "path": rel, "type": "folder", "children": children}
-    return {
+    node: dict[str, Any] = {
         "name": path.name,
         "path": rel,
         "type": "file",
         "ext": path.suffix.lower().lstrip("."),
     }
+    if path.suffix.lower() == ".md":
+        row = notes_db.get_by_path(rel)
+        if row:
+            node["note_id"] = row["note_id"]
+            node["title"] = row["title"]
+            node["size_bytes"] = row["size_bytes"]
+            node["created_at"] = row["created_at"]
+            node["updated_at"] = row["updated_at"]
+    return node
 
 
 @router.get("/tree")
 def get_tree(request: Request) -> dict:
     require_user_id(request)
+    notes_db.ensure_db()
     mode = vault_backend.backend_mode()
     if mode == "s3":
         # Tree from S3 object keys only — never await sync/flush here.
@@ -165,6 +175,13 @@ def get_tree(request: Request) -> dict:
             }
         except Exception:
             logger.exception("S3 tree list failed; falling back to local disk")
+    # Keep SQLite registry aligned before serving the local tree.
+    try:
+        notes_db.ensure_db()
+        if notes_db.is_empty():
+            notes_db.sync_from_filesystem()
+    except Exception:
+        logger.exception("notes_db sync before tree failed")
     root = vault_backend.vault_root()
     children = []
     for child in root.iterdir():
@@ -178,6 +195,18 @@ def get_tree(request: Request) -> dict:
         "source": "local" if mode != "s3" else "local-fallback",
         "children": children,
     }
+
+
+@router.get("/notes")
+def list_notes_registry(request: Request) -> dict:
+    """List all markdown notes tracked in the per-user SQLite registry."""
+    require_user_id(request)
+    try:
+        notes_db.sync_from_filesystem()
+    except Exception:
+        logger.exception("notes_db sync before list failed")
+    notes = notes_db.list_notes(order="updated_at")
+    return {"count": len(notes), "notes": notes}
 
 
 @router.get("/list")
@@ -228,14 +257,21 @@ def list_files(
             continue
         rel = path.relative_to(root).as_posix()
         st = path.stat()
-        files.append(
-            {
-                "path": rel,
-                "name": path.name,
-                "size": st.st_size,
-                "mtime": st.st_mtime,
-            }
-        )
+        item: dict[str, Any] = {
+            "path": rel,
+            "name": path.name,
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+        }
+        if path.suffix.lower() == ".md":
+            row = notes_db.get_by_path(rel) or notes_db.ensure_note_for_path(rel)
+            if row:
+                item["note_id"] = row["note_id"]
+                item["title"] = row["title"]
+                item["size_bytes"] = row["size_bytes"]
+                item["created_at"] = row["created_at"]
+                item["updated_at"] = row["updated_at"]
+        files.append(item)
     return {"prefix": cleaned, "ext": ext, "count": len(files), "files": files}
 
 
@@ -253,14 +289,22 @@ def read_file(request: Request, path: str) -> dict:
     content = target.read_text(encoding="utf-8", errors="replace")
     meta = vault_index.get_meta(path) if target.suffix.lower() == ".md" else None
     backlinks = vault_index.backlinks(path) if meta else []
+    note_row = (
+        notes_db.ensure_note_for_path(path) if target.suffix.lower() == ".md" else None
+    )
     return {
         "path": path,
         "content": content,
         "word_count": meta.word_count if meta else len(content.split()),
         "char_count": meta.char_count if meta else len(content),
         "backlinks": backlinks,
-        "title": meta.title if meta else Path(path).stem,
+        "title": (note_row or {}).get("title")
+        or (meta.title if meta else Path(path).stem),
         "tags": meta.tags if meta else [],
+        "note_id": (note_row or {}).get("note_id"),
+        "size_bytes": (note_row or {}).get("size_bytes", target.stat().st_size),
+        "created_at": (note_row or {}).get("created_at"),
+        "updated_at": (note_row or {}).get("updated_at"),
     }
 
 
@@ -364,6 +408,15 @@ async def upload_file(
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
+    note_row = None
+    if notes_db.is_markdown_path(path):
+        try:
+            text = data.decode("utf-8", errors="replace")
+            note_row = notes_db.on_note_written(path, content=text)
+            vault_index.update_note(path)
+            vault_index.rebuild_index()
+        except Exception:
+            logger.exception("notes_db upsert after upload failed for %s", path)
     if vault_backend.backend_mode() == "s3":
         vault_backend.sync_to_s3(path)
     return {
@@ -371,6 +424,8 @@ async def upload_file(
         "path": path,
         "size": len(data),
         "content_type": content_type or mimetypes.guess_type(str(target))[0],
+        "note_id": (note_row or {}).get("note_id"),
+        "created": (note_row or {}).get("created"),
     }
 
 
@@ -386,7 +441,9 @@ def write_file(request: Request, body: WriteBody) -> dict:
         pass
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(body.content, encoding="utf-8")
-    if target.suffix.lower() == ".md":
+    note_row = None
+    if notes_db.is_markdown_path(body.path):
+        note_row = notes_db.on_note_written(body.path, content=body.content)
         vault_index.update_note(body.path)
         vault_index.rebuild_index()
     if vault_backend.backend_mode() == "s3":
@@ -397,6 +454,12 @@ def write_file(request: Request, body: WriteBody) -> dict:
         "path": body.path,
         "word_count": meta.word_count if meta else None,
         "char_count": meta.char_count if meta else None,
+        "note_id": (note_row or {}).get("note_id"),
+        "title": (note_row or {}).get("title"),
+        "size_bytes": (note_row or {}).get("size_bytes"),
+        "created_at": (note_row or {}).get("created_at"),
+        "updated_at": (note_row or {}).get("updated_at"),
+        "created": (note_row or {}).get("created"),
     }
 
 
@@ -426,7 +489,9 @@ def append_file(request: Request, body: AppendBody) -> dict:
     else:
         content = existing + chunk
     target.write_text(content, encoding="utf-8")
-    if target.suffix.lower() == ".md":
+    note_row = None
+    if notes_db.is_markdown_path(body.path):
+        note_row = notes_db.on_note_written(body.path, content=content)
         vault_index.update_note(body.path)
         vault_index.rebuild_index()
     if vault_backend.backend_mode() == "s3":
@@ -438,6 +503,12 @@ def append_file(request: Request, body: AppendBody) -> dict:
         "appended": len(chunk),
         "word_count": meta.word_count if meta else None,
         "char_count": meta.char_count if meta else None,
+        "note_id": (note_row or {}).get("note_id"),
+        "title": (note_row or {}).get("title"),
+        "size_bytes": (note_row or {}).get("size_bytes"),
+        "created_at": (note_row or {}).get("created_at"),
+        "updated_at": (note_row or {}).get("updated_at"),
+        "created": (note_row or {}).get("created"),
     }
 
 
@@ -486,9 +557,11 @@ def rename(request: Request, body: RenameBody) -> dict:
         tmp.rename(src.parent / to_name)
     else:
         shutil.move(str(src), str(dst))
-    if body.from_path.endswith(".md"):
+    notes_db.on_note_renamed(body.from_path, body.to_path)
+    if notes_db.is_markdown_path(body.from_path):
         vault_index.remove_note(body.from_path)
-    if body.to_path.endswith(".md"):
+    if notes_db.is_markdown_path(body.to_path):
+        # Index only — DB path already updated by on_note_renamed (preserves note_id).
         vault_index.update_note(body.to_path)
     vault_index.rebuild_index()
     # Keep public shares pointing at the new path and republish content to S3.
@@ -539,10 +612,12 @@ def delete_path(request: Request, body: DeleteBody) -> dict:
             pass
     if target.is_dir():
         shutil.rmtree(target)
+        notes_db.on_note_deleted(body.path)
     else:
         target.unlink()
-        if body.path.endswith(".md"):
+        if notes_db.is_markdown_path(body.path):
             vault_index.remove_note(body.path)
+            notes_db.on_note_deleted(body.path)
     vault_index.rebuild_index()
     vault_order.notify_deleted(body.path)
     if vault_backend.backend_mode() == "s3":
@@ -602,6 +677,11 @@ def duplicate_path(request: Request, body: DuplicateBody) -> dict:
         shutil.copy2(src, dst)
     vault_index.rebuild_index()
     rel = dst.relative_to(root).as_posix()
+    if notes_db.is_markdown_path(rel):
+        # Duplicate gets a fresh note_id (new registration).
+        notes_db.on_note_written(rel)
+    elif dst.is_dir():
+        notes_db.sync_from_filesystem()
     if vault_backend.backend_mode() == "s3":
         vault_sync.enqueue_put_tree(rel)
         vault_sync.schedule_flush_pending()

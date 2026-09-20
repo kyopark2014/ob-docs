@@ -207,6 +207,12 @@ def rebuild_index() -> dict[str, Any]:
         )
         settings = vault_backend.settings_dir() / "graph.json"
         settings.write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            from application import notes_db
+
+            notes_db.sync_from_filesystem()
+        except Exception:
+            logger.exception("notes_db sync after index rebuild failed")
         return {"notes": len(_index), "links": len(graph.get("edges", []))}
 
 
@@ -226,16 +232,25 @@ def update_note(rel: str) -> None:
         to_del = [k for k, v in _name_map.items() if v == rel]
         for k in to_del:
             del _name_map[k]
-        if path.is_file() and path.suffix.lower() == ".md":
+        if path.is_file() and path.suffix.lower() in {".md", ".markdown"}:
             meta = _parse_note(rel, path)
             _index[rel] = meta
             _register_names(meta)
         else:
             _index.pop(rel, None)
         _built = True
+    # Keep SQLite registry in sync on create/save (outside index lock).
+    if path.is_file() and path.suffix.lower() in {".md", ".markdown"}:
+        try:
+            from application import notes_db
+
+            notes_db.on_note_written(rel)
+        except Exception:
+            logger.exception("notes_db update after index update_note failed for %s", rel)
 
 
 def remove_note(rel: str) -> None:
+    """Drop in-memory index entries only. Call notes_db.on_note_deleted for file deletes."""
     with _lock:
         _index.pop(rel, None)
         to_del = [k for k, v in _name_map.items() if v == rel]

@@ -33,4 +33,15 @@ if [[ -z "${VAULT_S3_DISABLE:-}" ]]; then
   export VAULT_S3_ENABLE="${VAULT_S3_ENABLE:-1}"
 fi
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
-exec uvicorn application.server:app --host 0.0.0.0 --port "${PORT}" --no-server-header
+
+# Prefer python3.13: PATH uvicorn may resolve to Homebrew Python 3.14,
+# while project deps (pip3) are typically installed for 3.13.
+if command -v python3.13 >/dev/null 2>&1; then
+  PYTHON=(python3.13)
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON=(python3)
+else
+  PYTHON=(python)
+fi
+echo "    Using: ${PYTHON[*]} ($(${PYTHON[*]} -c 'import sys; print(sys.version.split()[0])'))"
+exec "${PYTHON[@]}" -m uvicorn application.server:app --host 0.0.0.0 --port "${PORT}" --no-server-header

@@ -275,9 +275,29 @@ export const api = {
       harnessArn?: string | null;
     }>("/agent/health"),
   agentNoteMeta: (path: string) =>
-    request<{ path: string; name: string; size: number; char_count: number }>(
-      `/agent/note-meta?path=${encodeURIComponent(path)}`,
-    ),
+    request<{
+      path: string;
+      name: string;
+      size: number;
+      char_count: number;
+      note_id?: string | null;
+      title?: string | null;
+      size_bytes?: number;
+      created_at?: string | null;
+      updated_at?: string | null;
+    }>(`/agent/note-meta?path=${encodeURIComponent(path)}`),
+  listNotes: () =>
+    request<{
+      count: number;
+      notes: {
+        note_id: string;
+        title: string;
+        path: string;
+        size_bytes: number;
+        created_at: string;
+        updated_at: string;
+      }[];
+    }>("/files/notes"),
   agentModels: () =>
     request<{ models: string[]; default_model: string }>("/agent/models"),
   agentChat: (

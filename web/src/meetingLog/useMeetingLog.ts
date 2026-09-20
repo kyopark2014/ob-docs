@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { encodeWav, floatTo16BitPcm, recordedSeconds } from "./audio";
 import {
-  BATCH_STORAGE_KEY,
+  BATCH_STORAGE_KEY_LEGACY,
   DEFAULT_MEETING_TITLE,
   MEETING_LOG_CONFIG,
   SPEAKERS,
-  STORAGE_KEY,
+  STORAGE_KEY_LEGACY,
+  meetingBatchStorageKey,
+  meetingEntriesStorageKey,
   type SpeakerId,
 } from "./config";
 import { decodeEventStream, encodeAudioEvent } from "./eventstream";
@@ -35,13 +37,9 @@ function joinTokens(tokens: Array<{ type?: string; content?: string }>): string 
   return text.replace(/\s+/g, " ").trim();
 }
 
-export function useMeetingLog() {
-  const [entries, setEntries] = useState<MeetingEntry[]>(() =>
-    loadJson<MeetingEntry[]>(STORAGE_KEY, []),
-  );
-  const [batchEntries, setBatchEntries] = useState<BatchEntry[]>(() =>
-    loadJson<BatchEntry[]>(BATCH_STORAGE_KEY, []),
-  );
+export function useMeetingLog(userId: string | null) {
+  const [entries, setEntries] = useState<MeetingEntry[]>([]);
+  const [batchEntries, setBatchEntries] = useState<BatchEntry[]>([]);
   const [view, setView] = useState<MeetingView>("live");
   const [status, setStatus] = useState("마이크를 눌러 기록을 시작하세요.");
   const [listening, setListening] = useState(false);
@@ -54,6 +52,8 @@ export function useMeetingLog() {
   const [savingVault, setSavingVault] = useState(false);
   const [recordedAt, setRecordedAt] = useState<Date>(() => new Date());
   const [title, setTitle] = useState(DEFAULT_MEETING_TITLE);
+  /** Only persist after this user's storage has been loaded (avoids cross-user overwrite). */
+  const [hydratedUserId, setHydratedUserId] = useState<string | null>(null);
 
   const wantListenRef = useRef(false);
   const listeningRef = useRef(false);
@@ -85,13 +85,109 @@ export function useMeetingLog() {
   listeningRef.current = listening;
   batchBusyRef.current = batchBusy;
 
+  // Load / clear meeting state when the signed-in user changes.
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
-  }, [entries]);
+    // Drop pre-scoping global keys so a shared browser profile cannot resurface another user's log.
+    try {
+      localStorage.removeItem(STORAGE_KEY_LEGACY);
+      localStorage.removeItem(BATCH_STORAGE_KEY_LEGACY);
+    } catch {
+      /* ignore */
+    }
+
+    wantListenRef.current = false;
+    setListening(false);
+    setInterim(null);
+    // Tear down any in-flight capture without auto-batch for the previous user.
+    try {
+      wakeLockRef.current?.release();
+    } catch {
+      /* ignore */
+    }
+    wakeLockRef.current = null;
+    try {
+      processorRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    processorRef.current = null;
+    try {
+      mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+    } catch {
+      /* ignore */
+    }
+    mediaStreamRef.current = null;
+    try {
+      void audioCtxRef.current?.close();
+    } catch {
+      /* ignore */
+    }
+    audioCtxRef.current = null;
+    try {
+      socketRef.current?.close();
+    } catch {
+      /* ignore */
+    }
+    socketRef.current = null;
+
+    if (!userId) {
+      setEntries([]);
+      setBatchEntries([]);
+      setView("live");
+      setStatus("마이크를 눌러 기록을 시작하세요.");
+      setBatchBusy(false);
+      setHasRecordedAudio(false);
+      setAutoSpeaker(true);
+      setPinnedSpeaker("A");
+      setCanSaveVault(false);
+      setSavingVault(false);
+      const now = new Date();
+      setRecordedAt(now);
+      recordedAtRef.current = now;
+      setTitle(DEFAULT_MEETING_TITLE);
+      seenFinalIdsRef.current.clear();
+      pcmChunksRef.current = [];
+      sessionOffsetRef.current = 0;
+      pendingBatchOffsetRef.current = 0;
+      setHydratedUserId(null);
+      return;
+    }
+
+    const nextEntries = loadJson<MeetingEntry[]>(meetingEntriesStorageKey(userId), []);
+    const nextBatch = loadJson<BatchEntry[]>(meetingBatchStorageKey(userId), []);
+    setEntries(Array.isArray(nextEntries) ? nextEntries : []);
+    setBatchEntries(Array.isArray(nextBatch) ? nextBatch : []);
+    setView("live");
+    setStatus("마이크를 눌러 기록을 시작하세요.");
+    setBatchBusy(false);
+    setHasRecordedAudio(false);
+    setAutoSpeaker(true);
+    setPinnedSpeaker("A");
+    setCanSaveVault(
+      (Array.isArray(nextBatch) && nextBatch.length > 0) ||
+        (Array.isArray(nextEntries) && nextEntries.length > 0),
+    );
+    setSavingVault(false);
+    const now = new Date();
+    setRecordedAt(now);
+    recordedAtRef.current = now;
+    setTitle(DEFAULT_MEETING_TITLE);
+    seenFinalIdsRef.current.clear();
+    pcmChunksRef.current = [];
+    sessionOffsetRef.current = 0;
+    pendingBatchOffsetRef.current = 0;
+    setHydratedUserId(userId);
+  }, [userId]);
 
   useEffect(() => {
-    localStorage.setItem(BATCH_STORAGE_KEY, JSON.stringify(batchEntries));
-  }, [batchEntries]);
+    if (!userId || hydratedUserId !== userId) return;
+    localStorage.setItem(meetingEntriesStorageKey(userId), JSON.stringify(entries));
+  }, [entries, userId, hydratedUserId]);
+
+  useEffect(() => {
+    if (!userId || hydratedUserId !== userId) return;
+    localStorage.setItem(meetingBatchStorageKey(userId), JSON.stringify(batchEntries));
+  }, [batchEntries, userId, hydratedUserId]);
 
   const mapSpeakerLabel = useCallback((raw: unknown): string => {
     if (!autoSpeakerRef.current) return pinnedSpeakerRef.current;

@@ -162,6 +162,7 @@ button {
 }
 
 .rail-btn {
+  position: relative;
   width: 36px;
   height: 36px;
   border-radius: 6px;
@@ -178,6 +179,59 @@ button {
 .rail-btn.active {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+/* Obsidian-style hover label to the right of the rail icon */
+.rail-btn[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: #1a1a1a;
+  color: #f5f5f5;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  padding: 6px 10px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  z-index: 80;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+
+.rail-btn[data-tooltip]::before {
+  content: "";
+  position: absolute;
+  left: calc(100% + 2px);
+  top: 50%;
+  transform: translateY(-50%);
+  border: 5px solid transparent;
+  border-right-color: #1a1a1a;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 80;
+}
+
+.rail-btn[data-tooltip]:hover::after,
+.rail-btn[data-tooltip]:hover::before,
+.rail-btn[data-tooltip]:focus-visible::after,
+.rail-btn[data-tooltip]:focus-visible::before {
+  opacity: 1;
+  visibility: visible;
+}
+
+html[data-theme="light"] .rail-btn[data-tooltip]::after {
+  background: #2a2a2e;
+  color: #fafafa;
+}
+
+html[data-theme="light"] .rail-btn[data-tooltip]::before {
+  border-right-color: #2a2a2e;
 }
 
 .rail-spacer {
@@ -1397,6 +1451,13 @@ html[data-theme="light"] .tree-item.selected {
     z-index: 20;
     box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
   }
+  /* Meeting log: fill from rail to the right edge on narrow screens. */
+  .app.meeting-open .sidebar {
+    right: 0;
+    width: auto;
+    max-width: none;
+    box-shadow: none;
+  }
   .sidebar.collapsed {
     display: none;
   }
@@ -1866,8 +1927,15 @@ html[data-theme="light"] .tree-item.selected {
 .meeting-sidebar-body {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 12px 14px 18px;
+  overflow: hidden;
+  padding: 12px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.meeting-sidebar-controls {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -2145,40 +2213,16 @@ html[data-theme="light"] .tree-item.selected {
   cursor: not-allowed;
 }
 
-.meeting-main {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  background: var(--bg);
-}
-
-.meeting-main-toolbar {
-  display: flex;
-  align-items: center;
-  height: var(--tab-h);
-  padding: 0 16px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.meeting-feed {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px 18px 18px;
-}
-
 .meeting-log {
   flex: 1;
-  min-height: 0;
+  min-height: 120px;
   overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 2px 0 8px;
+  gap: 8px;
+  padding: 8px 0 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
 }
 
 .meeting-empty {
@@ -2190,13 +2234,20 @@ html[data-theme="light"] .tree-item.selected {
 
 .meeting-log-item {
   display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 10px;
+  grid-template-columns: auto 1fr;
+  gap: 8px 10px;
   align-items: start;
-  padding: 12px;
+  padding: 10px;
   border-radius: 10px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
+}
+
+.meeting-log-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .meeting-log-item.interim {
@@ -2260,21 +2311,10 @@ html[data-theme="light"] .tree-item.selected {
 }
 
 .meeting-log-time {
-  margin: 2px 0 0;
+  margin: 0;
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
-}
-
-@media (max-width: 720px) {
-  .meeting-log-item {
-    grid-template-columns: auto 1fr;
-  }
-
-  .meeting-log-time {
-    grid-column: 2;
-    margin: 0;
-  }
 }
 
 /* ---- Open Agent panel (agentic-work chat tone) ---- */

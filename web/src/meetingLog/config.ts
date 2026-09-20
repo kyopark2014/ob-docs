@@ -27,5 +27,15 @@ export type SpeakerId = (typeof SPEAKERS)[number];
 
 export const DEFAULT_MEETING_TITLE = "제목없음";
 export const MEETING_FOLDER = "Meeting";
-export const STORAGE_KEY = "ob-docs:meeting-log-entries-v1";
-export const BATCH_STORAGE_KEY = "ob-docs:meeting-log-batch-v1";
+
+/** Legacy global keys (pre user-scoping). Cleared on load so they cannot leak across users. */
+export const STORAGE_KEY_LEGACY = "ob-docs:meeting-log-entries-v1";
+export const BATCH_STORAGE_KEY_LEGACY = "ob-docs:meeting-log-batch-v1";
+
+export function meetingEntriesStorageKey(userId: string): string {
+  return `ob-docs:meeting-log-entries-v1:${userId}`;
+}
+
+export function meetingBatchStorageKey(userId: string): string {
+  return `ob-docs:meeting-log-batch-v1:${userId}`;
+}

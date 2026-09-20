@@ -292,14 +292,19 @@ export function AgentPanel({
     }
     void (async () => {
       let chip: AgentNoteChip;
+      let noteId: string | null = null;
       try {
         const meta = await api.agentNoteMeta(path);
         if (cancelled) return;
         chip = { path: meta.path, name: meta.name, size: meta.size };
+        noteId = meta.note_id || null;
       } catch {
         if (cancelled) return;
         const name = path.split("/").pop() || path;
         chip = { path, name, size: 0 };
+      }
+      if (noteId) {
+        setSessionId(noteId);
       }
       const primary = noteRef.current;
       if (!primary) {

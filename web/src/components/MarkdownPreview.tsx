@@ -1,4 +1,10 @@
-import { Children, isValidElement, type ReactElement, type ReactNode } from "react";
+import {
+  Children,
+  isValidElement,
+  useRef,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -21,6 +27,49 @@ function expandWikiLinks(text: string): string {
     const dest = `${WIKI_HASH_PREFIX}${encodeURIComponent(target.trim())}`;
     return `[${label}](<${dest}>)`;
   });
+}
+
+/** GitHub / Obsidian-style heading slug for in-doc TOC anchors. */
+export function slugifyHeading(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\p{L}\p{N}\p{M}-]/gu, "");
+}
+
+function nodeText(node: ReactNode): string {
+  return Children.toArray(node)
+    .map((child) => {
+      if (typeof child === "string" || typeof child === "number") return String(child);
+      if (isValidElement(child)) {
+        return nodeText((child.props as { children?: ReactNode }).children);
+      }
+      return "";
+    })
+    .join("");
+}
+
+function decodeHashTarget(href: string): string | null {
+  if (!href.startsWith("#") || href.startsWith(WIKI_HASH_PREFIX)) return null;
+  // Same-document hash only (not "#__wiki__/...")
+  if (href.length <= 1) return null;
+  const raw = href.slice(1);
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function makeUniqueSlugger() {
+  const counts = new Map<string, number>();
+  return (text: string): string => {
+    const base = slugifyHeading(text) || "section";
+    const n = counts.get(base) ?? 0;
+    counts.set(base, n + 1);
+    return n === 0 ? base : `${base}-${n}`;
+  };
 }
 
 /** Resolve a markdown image/link path relative to the note file. */
@@ -114,8 +163,35 @@ type Props = {
 
 export function MarkdownPreview({ content, notePath, onWikiClick }: Props) {
   const expanded = normalizeMdMediaDestinations(expandWikiLinks(content));
+  const paneRef = useRef<HTMLDivElement>(null);
+  const uniqueSlug = makeUniqueSlugger();
+
+  const scrollToHeading = (id: string) => {
+    const root = paneRef.current;
+    if (!root) return;
+    const el =
+      root.querySelector<HTMLElement>(`#${CSS.escape(id)}`) ||
+      // Fallback: match slugified heading text if TOC used a slightly different form
+      Array.from(root.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6")).find(
+        (h) => h.id === id || slugifyHeading(h.textContent || "") === id,
+      );
+    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const heading =
+    (Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6"): NonNullable<Components["h1"]> =>
+    ({ children }) => {
+      const id = uniqueSlug(nodeText(children));
+      return <Tag id={id}>{children}</Tag>;
+    };
 
   const components: Components = {
+    h1: heading("h1"),
+    h2: heading("h2"),
+    h3: heading("h3"),
+    h4: heading("h4"),
+    h5: heading("h5"),
+    h6: heading("h6"),
     a({ href, children }) {
       const wikiTarget = parseWikiHref(href);
       if (wikiTarget !== null) {
@@ -138,6 +214,22 @@ export function MarkdownPreview({ content, notePath, onWikiClick }: Props) {
           >
             {children}
           </span>
+        );
+      }
+      const hashId = href ? decodeHashTarget(href) : null;
+      if (hashId !== null) {
+        return (
+          <a
+            href={`#${hashId}`}
+            className="toc-link"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              scrollToHeading(hashId);
+            }}
+          >
+            {children}
+          </a>
         );
       }
       return (
@@ -169,7 +261,7 @@ export function MarkdownPreview({ content, notePath, onWikiClick }: Props) {
   };
 
   return (
-    <div className="preview-pane">
+    <div className="preview-pane" ref={paneRef}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         urlTransform={(url) => {

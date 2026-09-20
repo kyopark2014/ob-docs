@@ -40,7 +40,6 @@ import {
   ViewIcon,
 } from "./components/Icons";
 import { MeetingLogSidebar } from "./components/MeetingLogSidebar";
-import { MeetingLogView } from "./components/MeetingLogView";
 import { AgentPanel } from "./components/AgentPanel";
 import {
   DEFAULT_AGENT_MODEL,
@@ -290,7 +289,7 @@ export default function App() {
   } | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [panel, setPanel] = useState<PanelMode>("files");
-  const meeting = useMeetingLog();
+  const meeting = useMeetingLog(userId);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -1771,7 +1770,7 @@ export default function App() {
 
   return (
     <div
-      className={`app${panel === "hidden" ? " sidebar-collapsed" : ""}${agentOpen ? " agent-open" : ""}${sidebarResizing || agentResizing ? " is-resizing" : ""}`}
+      className={`app${panel === "hidden" ? " sidebar-collapsed" : ""}${panel === "meeting" ? " meeting-open" : ""}${agentOpen ? " agent-open" : ""}${sidebarResizing || agentResizing ? " is-resizing" : ""}`}
       style={{
         ["--sidebar-w" as string]: `${sidebarWidth}px`,
         ["--agent-w" as string]: `${agentWidth}px`,
@@ -1802,7 +1801,8 @@ export default function App() {
         <button
           type="button"
           className={`rail-btn${panel === "files" ? " active" : ""}`}
-          title="Files"
+          data-tooltip="Files"
+          aria-label="Files"
           aria-pressed={panel === "files"}
           onClick={() => setPanel((p) => (p === "files" ? "hidden" : "files"))}
         >
@@ -1811,7 +1811,8 @@ export default function App() {
         <button
           type="button"
           className={`rail-btn${panel === "search" ? " active" : ""}`}
-          title="Search"
+          data-tooltip="Search"
+          aria-label="Search"
           aria-pressed={panel === "search"}
           onClick={() => setPanel((p) => (p === "search" ? "hidden" : "search"))}
         >
@@ -1820,7 +1821,8 @@ export default function App() {
         <button
           type="button"
           className={`rail-btn${panel === "meeting" ? " active" : ""}`}
-          title="Meeting Log"
+          data-tooltip="Meeting Log"
+          aria-label="Meeting Log"
           aria-pressed={panel === "meeting"}
           onClick={() => setPanel((p) => (p === "meeting" ? "hidden" : "meeting"))}
         >
@@ -1830,7 +1832,7 @@ export default function App() {
           ref={graphBtnRef}
           type="button"
           className={`rail-btn${graphMenuOpen || notesSyncBusy || notesGraphOpen ? " active" : ""}`}
-          title={notesSyncMsg ?? "Graph"}
+          data-tooltip={notesSyncMsg ?? "Graph"}
           aria-label="Graph"
           aria-expanded={graphMenuOpen}
           aria-haspopup="dialog"
@@ -1849,7 +1851,7 @@ export default function App() {
           ref={modelBtnRef}
           type="button"
           className={`rail-btn${modelMenuOpen ? " active" : ""}`}
-          title={agentModel || "Model"}
+          data-tooltip={agentModel || "Model"}
           aria-label="Model"
           aria-expanded={modelMenuOpen}
           aria-haspopup="dialog"
@@ -1867,7 +1869,7 @@ export default function App() {
           ref={settingsBtnRef}
           type="button"
           className={`rail-btn${settingsOpen ? " active" : ""}`}
-          title="Settings"
+          data-tooltip="Settings"
           aria-label="Settings"
           aria-expanded={settingsOpen}
           onClick={() => {
@@ -2217,10 +2219,6 @@ export default function App() {
       </aside>
 
       <main className="main">
-            {panel === "meeting" ? (
-              <MeetingLogView meeting={meeting} />
-            ) : (
-              <>
             <div className="tabs">
               {tabs.map((t) => (
                 <div
@@ -2357,8 +2355,6 @@ export default function App() {
                 <br />
                 <span style={{ fontSize: 12 }}>Local-first · .md SoT · .vault settings</span>
               </div>
-            )}
-              </>
             )}
       </main>
 
