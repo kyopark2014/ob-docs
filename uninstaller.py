@@ -43,6 +43,8 @@ from shared_infra import (
     default_bucket_name,
     load_json_if_exists,
 )
+from s3_files_app_data import delete_app_data_storage
+
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
@@ -500,6 +502,9 @@ def clean_local_config(cfg: dict[str, Any]) -> None:
         "harnessName",
         "sharedProjectName",
         "agentic_work_url",
+        "s3_files_app_data_file_system_id",
+        "s3_files_app_data_access_point_arn",
+        "s3_files_app_data_mount_path",
     }
     changed = False
     for k in drop:
@@ -574,6 +579,13 @@ def main() -> int:
         delete_ecr_and_logs(c["ecr"], c["logs"])
         delete_secrets(c["sm"])
         delete_cloudfront(c["cloudfront"])
+        logger.info("Deleting S3 Files app-data storage")
+        delete_app_data_storage(
+            region=region,
+            account_id=account,
+            project_name=PROJECT,
+            cfg=cfg,
+        )
         delete_stack(
             ecs=c["ecs"],
             elbv2=c["elbv2"],

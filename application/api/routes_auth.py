@@ -212,6 +212,17 @@ def _resolve_user_id(request: Request) -> str | None:
     )
 
 
+def _ensure_user_on_login(user_id: str) -> None:
+    """Login path: pull notes.db from S3 Files into the working copy (toons-viewer)."""
+    from application import vault_backend, vault_db_persistence
+
+    vault_backend.set_current_user_id(user_id)
+    try:
+        vault_db_persistence.ensure_user_notes_db(user_id, load_from_durable=True)
+    except Exception:
+        logger.exception("Failed to load notes.db from S3 Files for %s", user_id)
+
+
 def require_user_id(request: Request) -> str:
     user_id = _resolve_user_id(request)
     if not user_id and local_auth_bypass_enabled(request):
@@ -232,6 +243,10 @@ def require_user_id(request: Request) -> str:
     vault_backend.set_current_user_id(user_id)
     try:
         vault_backend.ensure_user_vault(user_id)
+        from application import vault_db_persistence
+
+        # Authenticated API: idempotent restore only (login already forced a pull).
+        vault_db_persistence.ensure_restored(user_id)
     except Exception:
         logger.exception("Failed to ensure user vault for %s", user_id)
     return user_id
@@ -305,12 +320,7 @@ def set_session(
 
         user_id = idinfo["email"].strip()
         _set_user_cookie(response, request, user_id)
-        try:
-            from application import vault_backend
-
-            vault_backend.ensure_user_vault(user_id)
-        except Exception:
-            logger.exception("Failed to ensure vault for %s", user_id)
+        _ensure_user_on_login(user_id)
         return SessionResponse(
             user_id=user_id,
             sharing_url=utils.sharing_url(),
@@ -324,12 +334,7 @@ def set_session(
         )
     user_id = local_user_id or "local-dev"
     _set_user_cookie(response, request, user_id)
-    try:
-        from application import vault_backend
-
-        vault_backend.ensure_user_vault(user_id)
-    except Exception:
-        logger.exception("Failed to ensure vault for %s", user_id)
+    _ensure_user_on_login(user_id)
     return SessionResponse(
         user_id=user_id,
         sharing_url=utils.sharing_url(),

@@ -47,6 +47,17 @@ async def lifespan(app: FastAPI):
     vault_backend.ensure_seed_vault()
     mode = vault_backend.backend_mode()
     logger.info("Vault backend mode: %s base=%s", mode, vault_backend.vault_base())
+    try:
+        from application import app_data_backend, vault_db_persistence
+
+        logger.info(
+            "App-data persistence: mode=%s mount=%s enabled=%s",
+            app_data_backend.backend_mode(),
+            app_data_backend.mount_dir(),
+            vault_db_persistence.persistence_enabled(),
+        )
+    except Exception:
+        logger.debug("App-data backend probe failed", exc_info=True)
     if mode == "s3":
         try:
             from application import vault_sync
@@ -56,8 +67,16 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Initial vault S3 sync setup failed")
     # Index rebuild is per-user on first authenticated access / sync.
-    yield
+    try:
+        yield
+    finally:
+        try:
+            from application import vault_db_persistence
 
+            vault_db_persistence.flush_persist()
+            logger.info("notes.db shutdown persist complete")
+        except Exception:
+            logger.exception("notes.db shutdown persist failed")
 
 class VaultUserMiddleware(BaseHTTPMiddleware):
     """Bind vault_backend paths to the signed-in user for each request."""
@@ -104,10 +123,13 @@ app.include_router(graph_router)
 
 @app.get("/api/health")
 def health() -> dict:
+    from application import app_data_backend
+
     return {
         "status": "ok",
         "service": "ob-docs",
         "backend": vault_backend.backend_mode(),
+        "app_data": app_data_backend.backend_mode(),
     }
 
 

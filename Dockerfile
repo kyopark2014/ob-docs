@@ -22,8 +22,8 @@ COPY --from=frontend /web/dist /app/web/dist
 
 RUN chmod +x /app/docker-entrypoint.sh \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser \
-    && mkdir -p /mnt/vault \
-    && chown -R appuser:appuser /app /mnt/vault
+    && mkdir -p /mnt/vault /mnt/app-data \
+    && chown -R appuser:appuser /app /mnt/vault /mnt/app-data
 
 USER appuser
 

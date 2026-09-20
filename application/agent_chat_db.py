@@ -152,9 +152,19 @@ def add_message(
                 len(content or ""),
                 len(tool_events or []),
             )
+            _schedule_persist()
             return out
         finally:
             conn.close()
+
+
+def _schedule_persist() -> None:
+    try:
+        from application import vault_db_persistence
+
+        vault_db_persistence.schedule_persist()
+    except Exception:
+        logger.debug("notes.db persist schedule skipped", exc_info=True)
 
 
 def delete_messages_for_note(note_id: str) -> int:
@@ -167,7 +177,10 @@ def delete_messages_for_note(note_id: str) -> int:
             _ensure_schema(conn)
             cur = conn.execute("DELETE FROM agent_messages WHERE note_id = ?", (nid,))
             conn.commit()
-            return int(cur.rowcount)
+            n = int(cur.rowcount)
+            if n:
+                _schedule_persist()
+            return n
         finally:
             conn.close()
 
@@ -187,6 +200,8 @@ def delete_messages_for_notes(note_ids: list[str]) -> int:
                 )
                 deleted += int(cur.rowcount)
             conn.commit()
+            if deleted:
+                _schedule_persist()
             return deleted
         finally:
             conn.close()

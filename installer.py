@@ -36,6 +36,11 @@ from harness_provision import (
     ensure_ecs_invoke_harness,
     upload_skills_to_s3,
 )
+from s3_files_app_data import (
+    APP_DATA_MOUNT_PATH,
+    S3FilesAppDataProvisioner,
+    apply_app_data_config,
+)
 from shared_infra import (
     CLUSTER,
     ORIGIN_HEADER_SECRET,
@@ -481,6 +486,7 @@ def register_task_definition(
     cfg: dict[str, Any],
     session_secret_arn: str,
     vault_agent_secret_arn: str,
+    s3_files_app_data_info: Optional[dict[str, Any]] = None,
 ) -> str:
     account = str(cfg["accountId"])
     region = str(cfg["region"])
@@ -499,17 +505,29 @@ def register_task_definition(
         "HARNESS_ARN": cfg.get("HARNESS_ARN") or "",
         "harnessName": cfg.get("harnessName") or "",
     }
-    container = {
+    if s3_files_app_data_info:
+        apply_app_data_config(app_config, s3_files_app_data_info)
+    elif cfg.get("s3_files_app_data_access_point_arn"):
+        for key in (
+            "s3_files_app_data_file_system_id",
+            "s3_files_app_data_access_point_arn",
+            "s3_files_app_data_mount_path",
+        ):
+            if cfg.get(key):
+                app_config[key] = cfg[key]
+
+    environment = [
+        {"name": "APP_CONFIG_JSON", "value": json.dumps(app_config)},
+        {"name": "VAULT_S3_ENABLE", "value": "1"},
+        {"name": "VAULT_DIR", "value": "/app/data/vault"},
+        {"name": "PROJECT_NAME", "value": PROJECT},
+    ]
+    container: dict[str, Any] = {
         "name": "app",
         "image": image_uri,
         "essential": True,
         "portMappings": [{"containerPort": CONTAINER_PORT, "protocol": "tcp"}],
-        "environment": [
-            {"name": "APP_CONFIG_JSON", "value": json.dumps(app_config)},
-            {"name": "VAULT_S3_ENABLE", "value": "1"},
-            {"name": "VAULT_DIR", "value": "/app/data/vault"},
-            {"name": "PROJECT_NAME", "value": PROJECT},
-        ],
+        "environment": environment,
         "secrets": [
             {"name": "SESSION_SIGNING_KEY", "valueFrom": session_secret_arn},
             {"name": "VAULT_AGENT_TOKEN", "valueFrom": vault_agent_secret_arn},
@@ -533,18 +551,70 @@ def register_task_definition(
             "startPeriod": 60,
         },
     }
-    resp = ecs.register_task_definition(
-        family=TASK_FAMILY,
-        networkMode="awsvpc",
-        requiresCompatibilities=["FARGATE"],
-        cpu="512",
-        memory="1024",
-        executionRoleArn=f"arn:aws:iam::{account}:role/{exec_role}",
-        taskRoleArn=f"arn:aws:iam::{account}:role/{task_role}",
-        containerDefinitions=[container],
-        runtimePlatform={"cpuArchitecture": "ARM64", "operatingSystemFamily": "LINUX"},
-        tags=[{"key": "Name", "value": TASK_FAMILY}],
+
+    volumes: list[dict[str, Any]] = []
+    info = s3_files_app_data_info or {}
+    file_system_id = info.get("file_system_id") or cfg.get(
+        "s3_files_app_data_file_system_id"
     )
+    access_point_arn = info.get("access_point_arn") or cfg.get(
+        "s3_files_app_data_access_point_arn"
+    )
+    if file_system_id and access_point_arn:
+        file_system_arn = (
+            info.get("file_system_arn")
+            or f"arn:aws:s3files:{region}:{account}:file-system/{file_system_id}"
+        )
+        app_data_mount = str(
+            info.get("mount_path")
+            or cfg.get("s3_files_app_data_mount_path")
+            or APP_DATA_MOUNT_PATH
+        )
+        volumes.append(
+            {
+                "name": "app-data",
+                "s3filesVolumeConfiguration": {
+                    "fileSystemArn": file_system_arn,
+                    "rootDirectory": "/",
+                    "accessPointArn": access_point_arn,
+                },
+            }
+        )
+        container["mountPoints"] = [
+            {
+                "sourceVolume": "app-data",
+                "containerPath": app_data_mount,
+                "readOnly": False,
+            }
+        ]
+        environment.extend(
+            [
+                {"name": "APP_DATA_MOUNT", "value": app_data_mount},
+                {"name": "TASK_DB_MOUNT", "value": app_data_mount},
+                {"name": "TASK_DB_PROJECT", "value": PROJECT},
+            ]
+        )
+        logger.info(
+            "  ECS will mount app-data S3 Files at %s (prefix=app-data/)",
+            app_data_mount,
+        )
+
+    task_kwargs: dict[str, Any] = {
+        "family": TASK_FAMILY,
+        "networkMode": "awsvpc",
+        "requiresCompatibilities": ["FARGATE"],
+        "cpu": "512",
+        "memory": "1024",
+        "executionRoleArn": f"arn:aws:iam::{account}:role/{exec_role}",
+        "taskRoleArn": f"arn:aws:iam::{account}:role/{task_role}",
+        "containerDefinitions": [container],
+        "runtimePlatform": {"cpuArchitecture": "ARM64", "operatingSystemFamily": "LINUX"},
+        "tags": [{"key": "Name", "value": TASK_FAMILY}],
+    }
+    if volumes:
+        task_kwargs["volumes"] = volumes
+
+    resp = ecs.register_task_definition(**task_kwargs)
     arn = resp["taskDefinition"]["taskDefinitionArn"]
     logger.info("Registered task definition %s", arn)
     return arn
@@ -873,6 +943,26 @@ def main() -> int:
 
     ensure_sg_ingress(c["ec2"], network.security_groups[0], network.alb_sg)
 
+    logger.info("[0.5/7] S3 Files app-data storage (ECS /mnt/app-data)")
+    ecs_task_role = f"role-ecs-task-for-{PROJECT}-{region}"
+    provisioner = S3FilesAppDataProvisioner(
+        region=region,
+        account_id=str(cfg["accountId"]),
+        project_name=PROJECT,
+        ec2_client=c["ec2"],
+        s3_client=c["s3"],
+        iam_client=c["iam"],
+    )
+    s3_files_app_data_info = provisioner.create_app_data_storage(
+        vpc_id=network.vpc_id,
+        subnet_ids=list(network.subnets),
+        s3_bucket_name=str(bucket),
+        ecs_sg_id=network.security_groups[0] if network.security_groups else "",
+        ecs_task_role_name=ecs_task_role,
+    )
+    apply_app_data_config(cfg, s3_files_app_data_info)
+    save_config(cfg)
+
     session_arn = get_secret_arn(c["sm"], SESSION_SECRET)
     vault_agent_arn = ensure_vault_agent_token(c["sm"])
 
@@ -941,7 +1031,12 @@ def main() -> int:
 
     logger.info("[6/7] Task definition + service")
     task_arn = register_task_definition(
-        c["ecs"], image_uri, cfg, session_arn, vault_agent_arn
+        c["ecs"],
+        image_uri,
+        cfg,
+        session_arn,
+        vault_agent_arn,
+        s3_files_app_data_info=s3_files_app_data_info,
     )
     ensure_service(
         c["ecs"],
@@ -971,6 +1066,13 @@ def main() -> int:
 
     url = (cfg.get("sharing_url") or "").rstrip("/") or "http://localhost:8502"
     logger.info("Deployed: %s", url)
+    if s3_files_app_data_info:
+        logger.info(
+            "S3 Files app-data: fs=%s ap=%s mount=%s",
+            s3_files_app_data_info.get("file_system_id"),
+            s3_files_app_data_info.get("access_point_arn"),
+            s3_files_app_data_info.get("mount_path"),
+        )
     if not cfg.get("google_client_id"):
         logger.warning(
             "google_client_id is empty — set it in config.json for Google sign-in"

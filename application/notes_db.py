@@ -265,9 +265,19 @@ def upsert_note(
             out = _row_to_dict(row)
             assert out is not None
             out["created"] = created
+            _schedule_persist()
             return out
         finally:
             conn.close()
+
+
+def _schedule_persist() -> None:
+    try:
+        from application import vault_db_persistence
+
+        vault_db_persistence.schedule_persist()
+    except Exception:
+        logger.debug("notes.db persist schedule skipped", exc_info=True)
 
 
 def on_note_written(path: str, content: Optional[str] = None) -> Optional[dict[str, Any]]:
@@ -330,11 +340,13 @@ def rename_note(from_path: str, to_path: str) -> Optional[dict[str, Any]]:
                     (dst, title, now, row["note_id"]),
                 )
                 conn.commit()
-                return _row_to_dict(
+                out = _row_to_dict(
                     conn.execute(
                         "SELECT * FROM notes WHERE note_id = ?", (row["note_id"],)
                     ).fetchone()
                 )
+                _schedule_persist()
+                return out
 
             # Folder rename: remap descendants.
             prefix = src + "/"
@@ -350,6 +362,8 @@ def rename_note(from_path: str, to_path: str) -> Optional[dict[str, Any]]:
                     (new_path, now, r["note_id"]),
                 )
             conn.commit()
+            if rows:
+                _schedule_persist()
             return None
         finally:
             conn.close()
@@ -387,6 +401,8 @@ def delete_note(path: str) -> int:
             agent_chat_db.delete_messages_for_notes(note_ids)
         except Exception:
             logger.exception("agent_chat cleanup after note delete failed")
+    if deleted:
+        _schedule_persist()
     return int(deleted)
 
 
@@ -456,6 +472,9 @@ def sync_from_filesystem() -> dict[str, int]:
             conn.commit()
         finally:
             conn.close()
+
+    if added or updated or removed:
+        _schedule_persist()
 
     logger.info(
         "notes_db sync: added=%d updated=%d removed=%d total=%d",

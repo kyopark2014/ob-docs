@@ -9,7 +9,8 @@ Obsidian형 **Local-first Plain Text** vault 웹 앱입니다.
 |---|---|
 | 접속 경로 | `https://vault.my-agentic-ai.click` |
 | React 앱 | [`web/`](web/) (`base: /`) |
-| Vault mount | S3 `vault/{userId}/` → `/mnt/vault/{userId}/` |
+| Vault (markdown) | S3 API `vault/{userId}/` ↔ working `data/vault/{userId}/` |
+| App-data (DB) | S3 Files `app-data/` → ECS `/mnt/app-data` |
 | 로컬 working copy | `data/vault/{userId}/` |
 | 설정 폴더 | `{user}/.vault/` (`.obsidian` 대체) |
 | 공개 공유 인덱스 | `vault/_public/shares_index.json` |
@@ -20,16 +21,23 @@ Obsidian형 **Local-first Plain Text** vault 웹 앱입니다.
 CloudFront-for-ob-docs
   └─ ALB (alb-for-ob-docs)
        └─ /*       → ECS service-for-ob-docs
-            └─ /mnt/vault/{userId}/ ← S3 …/vault/{userId}/
+            ├─ working: /app/data/vault/{userId}/  ← S3 API sync vault/
+            └─ /mnt/app-data/{userId}/notes.db     ← S3 Files app-data/ (ECS only)
 ```
 
 - **계정 분리**: Google `userId`(email)를 path segment로 sanitize해 노트·설정·그래프·sync 큐를 계정별로 격리 (agentic-work와 동일 패턴)
-- **mount 모드 (ECS)**: `/mnt/vault/{userId}/`에 직접 읽고 씀 (S3 Files가 비동기 동기화)
-- **local 모드**: `data/vault/{userId}/`만 사용
-- **s3 모드 (옵션)**: `VAULT_S3_ENABLE=1`일 때 로컬 ↔ `s3://{bucket}/vault/{userId}/` sync
+- **Vault s3 모드 (ECS 기본)**: `VAULT_S3_ENABLE=1` — 로컬 working ↔ `s3://{bucket}/vault/{userId}/` sync
   - 저장/삭제 시 pending 큐(`{user}/.vault/pending_s3_ops.json`, S3에도 미러)에 쌓은 뒤 flush
   - Settings **Sync**: pending 업로드를 먼저 끝낸 다음, 해당 계정 S3 prefix에서 **변경분만** 내려받음
   - 부팅 시에는 전역 pull 없이, 로그인 후 계정별 sync
+- **App-data (ECS only)**: agentic-work와 같이 S3 Files를 `/mnt/app-data`에 마운트
+  - `notes.db`(노트 레지스트리 + agent chat)는 NFS 위에서 직접 열지 않고 **working → persist** 복사
+  - working: `data/vault/{user}/.vault/notes.db`
+  - durable: `/mnt/app-data/{user}/notes.db` → `s3://{bucket}/app-data/{user}/notes.db`
+  - 로그인 시 S3 Files에서 notes.db를 **강제 복원** (toons-viewer `load_user_db_from_s3_files`와 동일)
+  - durable 없으면 working을 mount에 즉시 seed
+  - 이후 API는 idempotent restore만 수행; 변경 후 20초 debounce persist, shutdown flush
+- **local 모드**: `data/vault/{userId}/`만 사용 (app-data mount 없음)
 
 ## 빠른 시작 (로컬)
 
@@ -59,7 +67,8 @@ cd web && npm install && npm run dev
 ## Vault 구조
 
 ```text
-data/vault/                      # 또는 /mnt/vault  (계정별 하위 폴더)
+data/vault/                      # working copy (계정별 하위 폴더)
+# ECS: notes.db durable → /mnt/app-data/{user}/notes.db
 ├── _public/
 │   └── shares_index.json        # token → user_id (공개 /s/{token})
 ├── alice@example.com/
@@ -270,10 +279,11 @@ GET /s/{token}
 
 ## ECS / ALB
 
-1. **S3**: 프로젝트 버킷에 prefix `vault/{userId}/` — ECS가 동기화/마운트
-2. **ECS 서비스**: 이 이미지, 포트 `8502`, health `/api/health`
-3. **ALB listener rule**: path `/*` (+ CloudFront origin header) → ob-docs target group
-4. **CloudFront**: ALB origin (`CloudFront-for-ob-docs`) + alias `vault.my-agentic-ai.click`  
+1. **S3**: 프로젝트 버킷 — `vault/{userId}/` (markdown API sync) + `app-data/` (S3 Files)
+2. **S3 Files (ECS only)**: `app-data/` → 컨테이너 `/mnt/app-data` (notes.db persist)
+3. **ECS 서비스**: 이 이미지, 포트 `8502`, health `/api/health`
+4. **ALB listener rule**: path `/*` (+ CloudFront origin header) → ob-docs target group
+5. **CloudFront**: ALB origin (`CloudFront-for-ob-docs`) + alias `vault.my-agentic-ai.click`  
    (`config.json`의 `custom_domain` / `sharing_url`)
 
 환경변수 예:
@@ -281,7 +291,10 @@ GET /s/{token}
 ```bash
 APP_CONFIG_JSON='{...config.json...}'
 SESSION_SIGNING_KEY=...
-VAULT_MOUNT=/mnt/vault
+VAULT_S3_ENABLE=1
+VAULT_DIR=/app/data/vault
+APP_DATA_MOUNT=/mnt/app-data
+TASK_DB_MOUNT=/mnt/app-data
 ```
 
 ## Docker
