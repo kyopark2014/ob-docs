@@ -237,6 +237,76 @@ UI (Agent 패널)
 
 SSE 이벤트 예: `session`, `token`, `text`, `tool`, `tool_result`, `note_updated`, `done`, `error`.
 
+### Vault MCP
+
+Open Agent의 **use-vault skill**과 별도로, 같은 vault API를 **AgentCore Runtime MCP**(Streamable HTTP)로 배포해 다른 앱에서도 쓸 수 있습니다.  
+harness-work의 KB MCP는 **Gateway + Runtime**이지만, ob-docs는 **Runtime MCP만** 제공합니다 (Gateway 없음).
+
+#### 구성 코드
+
+| 경로 | 역할 |
+|------|------|
+| [`MCP/use-vault/`](MCP/use-vault/) | Streamable HTTP MCP 서버 (`mcp_server_use_vault.py` + `vault_client.py`) |
+| [`create_mcp.py`](create_mcp.py) | Docker → ECR → AgentCore Runtime(MCP) 배포, `config.json`에 URL/ARN 기록 |
+
+MCP 서버는 vault 저장소를 직접 열지 않고 `OB_DOCS_URL`의 HTTP API를 호출합니다.  
+도구마다 **`actor_id`**(계정 email/login id)가 필수이며, Runtime은 `VAULT_AGENT_TOKEN`(Secrets Manager `ob-docs/vault-agent-token`)으로 `Authorization: VaultAgent …`를 서명합니다.
+
+```text
+Other app (SigV4)
+  → AgentCore Runtime MCP  URL  (use_vault_mcp_url)
+       → MCP tools (vault_read / vault_write / … + actor_id)
+            → https://vault…/api/files|search|graph  (VaultAgent HMAC)
+                 → vault/{actor_id}/…
+```
+
+#### 배포
+
+```bash
+cd ob-docs
+python create_mcp.py
+```
+
+수행 내용:
+
+1. `ob-docs/vault-agent-token` secret ensure  
+2. IAM role `role-use-vault-mcp-for-ob-docs-{region}` (ECR pull, Secrets, logs)  
+3. `MCP/use-vault` 이미지 빌드 → ECR `use_vault_of_ob_docs`  
+4. AgentCore Runtime 생성/갱신 (`serverProtocol=MCP`, `networkMode=PUBLIC`)  
+5. 계정 root에 `InvokeAgentRuntime` resource policy (Gateway 없이 동일 계정 호출 허용)  
+6. `config.json`에 `use_vault_mcp_runtime_arn` / `use_vault_mcp_url` 등 저장  
+
+Runtime 엔드포인트는 **IAM SigV4**입니다. `remote_mcp`처럼 서명 없는 HTTP 클라이언트는 **403**이 납니다.
+
+#### 다른 앱 설정 (`mcp.json`)
+
+배포 후 `config.json`의 `use_vault_mcp_url`을 씁니다. 클라이언트는 `auth_type: aws_sigv4` + 서비스 `bedrock-agentcore`로 요청을 서명해야 합니다 (agentic-work websearch Gateway와 동일한 형식).
+
+```json
+{
+  "mcpServers": {
+    "use-vault": {
+      "type": "streamable_http",
+      "url": "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aus-west-2%3AACCOUNT%3Aruntime%2Fuse_vault_of_ob_docs-XXXX/invocations?qualifier=DEFAULT",
+      "auth_type": "aws_sigv4",
+      "auth_region": "us-west-2",
+      "auth_service": "bedrock-agentcore"
+    }
+  }
+}
+```
+
+| 필드 | 값 |
+|------|-----|
+| `type` | `streamable_http` |
+| `url` | `config.json` → `use_vault_mcp_url` |
+| `auth_type` | `aws_sigv4` |
+| `auth_region` | Runtime 리전 (기본 `us-west-2`) |
+| `auth_service` | `bedrock-agentcore` |
+
+호출 principal에는 `bedrock-agentcore:InvokeAgentRuntime` (해당 Runtime ARN)이 필요합니다.  
+도구 호출 시 **`actor_id`에 vault 소유자 email**을 넘기세요. 로컬 개발만 할 때는 Gateway 없이 `python -m mcp_server_use_vault` → `http://localhost:8000/mcp`도 가능합니다 ([`MCP/use-vault/README.md`](MCP/use-vault/README.md)).
+
 ## 노트의 public 공유
 
 로그인된 사용자가 markdown 노트를 **쿠키 없이** 볼 수 있는 CloudFront URL로 공유합니다. 서버가 HTML markdown viewer를 렌더합니다.
