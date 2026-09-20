@@ -1,4 +1,4 @@
-# ob-docs
+# OB Note
 
 Obsidian형 **Local-first Plain Text** vault 웹 앱입니다.  
 노트는 `.md`가 Source of Truth이고, 설정은 `.vault/`에 격리되며, 그래프·검색·백링크는 파생 캐시입니다.
@@ -18,9 +18,9 @@ Obsidian형 **Local-first Plain Text** vault 웹 앱입니다.
 ## 아키텍처
 
 ```text
-CloudFront-for-ob-docs
-  └─ ALB (alb-for-ob-docs)
-       └─ /*       → ECS service-for-ob-docs
+CloudFront-for-ob-note
+  └─ ALB (alb-for-ob-note)
+       └─ /*       → ECS service-for-ob-note
             ├─ working: /app/data/vault/{userId}/  ← S3 API sync vault/
             └─ /mnt/app-data/{userId}/notes.db     ← S3 Files app-data/ (ECS only)
 ```
@@ -42,7 +42,7 @@ CloudFront-for-ob-docs
 ## 빠른 시작 (로컬)
 
 ```bash
-cd ob-docs
+cd ob-note
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 chmod +x run_local.sh
@@ -133,10 +133,10 @@ data/vault/                      # working copy (계정별 하위 폴더)
 | GET | `/api/agent/note-meta?path=` | 에이전트 칩용 노트 메타 |
 | POST | `/api/agent/chat` | Open Agent SSE (`token` / `tool` / `note_updated` / `done`) |
 
-인증: `agent_user_id` 쿠키, `Authorization: Bearer <session>`, 또는 AgentCore용 `Authorization: VaultAgent v1.<payload>.<sig>` (`ob-docs/vault-agent-token`).
+인증: `agent_user_id` 쿠키, `Authorization: Bearer <session>`, 또는 AgentCore용 `Authorization: VaultAgent v1.<payload>.<sig>` (`ob-note/vault-agent-token`).
 
-- Secrets Manager 키: `ob-docs/session-signing-key` (웹 세션)
-- Secrets Manager 키: `ob-docs/vault-agent-token` (use-vault skill / AgentCore)
+- Secrets Manager 키: `ob-note/session-signing-key` (웹 세션)
+- Secrets Manager 키: `ob-note/vault-agent-token` (use-vault skill / AgentCore)
 - 또는 환경변수 `SESSION_SIGNING_KEY` / `VAULT_AGENT_TOKEN`
 - 미인증 시 같은 앱의 Google 로그인 UI 표시
 - `/s/*` 공개 viewer만 세션 없이 접근 가능
@@ -189,7 +189,7 @@ UI (Agent 패널)
 
 ### 노트 저장 (`VAULT_WRITE`)
 
-응답에 아래 마커를 넣으면 **ob-docs 서버**가 선택 노트 경로만 덮어씁니다.  
+응답에 아래 마커를 넣으면 **ob-note 서버**가 선택 노트 경로만 덮어씁니다.  
 (CI 샌드박스에는 harness skill 마운트가 없을 수 있어, Open Agent는 스크립트 절대 경로 실행 대신 이 마커를 씁니다.)
 
 ```text
@@ -240,7 +240,7 @@ SSE 이벤트 예: `session`, `token`, `text`, `tool`, `tool_result`, `note_upda
 ### Vault MCP
 
 Open Agent의 **use-vault skill**과 별도로, 같은 vault API를 **AgentCore Runtime MCP**(Streamable HTTP)로 배포해 다른 앱에서도 쓸 수 있습니다.  
-harness-work의 KB MCP는 **Gateway + Runtime**이지만, ob-docs는 **Runtime MCP만** 제공합니다 (Gateway 없음).
+harness-work의 KB MCP는 **Gateway + Runtime**이지만, ob-note는 **Runtime MCP만** 제공합니다 (Gateway 없음).
 
 #### 구성 코드
 
@@ -250,7 +250,7 @@ harness-work의 KB MCP는 **Gateway + Runtime**이지만, ob-docs는 **Runtime M
 | [`create_mcp.py`](create_mcp.py) | Docker → ECR → AgentCore Runtime(MCP) 배포, `config.json`에 URL/ARN 기록 |
 
 MCP 서버는 vault 저장소를 직접 열지 않고 `OB_DOCS_URL`의 HTTP API를 호출합니다.  
-도구마다 **`actor_id`**(계정 email/login id)가 필수이며, Runtime은 `VAULT_AGENT_TOKEN`(Secrets Manager `ob-docs/vault-agent-token`)으로 `Authorization: VaultAgent …`를 서명합니다.
+도구마다 **`actor_id`**(계정 email/login id)가 필수이며, Runtime은 `VAULT_AGENT_TOKEN`(Secrets Manager `ob-note/vault-agent-token`)으로 `Authorization: VaultAgent …`를 서명합니다.
 
 ```text
 Other app (SigV4)
@@ -263,14 +263,14 @@ Other app (SigV4)
 #### 배포
 
 ```bash
-cd ob-docs
+cd ob-note
 python create_mcp.py
 ```
 
 수행 내용:
 
-1. `ob-docs/vault-agent-token` secret ensure  
-2. IAM role `role-use-vault-mcp-for-ob-docs-{region}` (ECR pull, Secrets, logs)  
+1. `ob-note/vault-agent-token` secret ensure  
+2. IAM role `role-use-vault-mcp-for-ob-note-{region}` (ECR pull, Secrets, logs)  
 3. `MCP/use-vault` 이미지 빌드 → ECR `use_vault_of_ob_docs`  
 4. AgentCore Runtime 생성/갱신 (`serverProtocol=MCP`, `networkMode=PUBLIC`)  
 5. 계정 root에 `InvokeAgentRuntime` resource policy (Gateway 없이 동일 계정 호출 허용)  
@@ -352,8 +352,8 @@ GET /s/{token}
 1. **S3**: 프로젝트 버킷 — `vault/{userId}/` (markdown API sync) + `app-data/` (S3 Files)
 2. **S3 Files (ECS only)**: `app-data/` → 컨테이너 `/mnt/app-data` (notes.db persist)
 3. **ECS 서비스**: 이 이미지, 포트 `8502`, health `/api/health`
-4. **ALB listener rule**: path `/*` (+ CloudFront origin header) → ob-docs target group
-5. **CloudFront**: ALB origin (`CloudFront-for-ob-docs`) + alias `vault.my-agentic-ai.click`  
+4. **ALB listener rule**: path `/*` (+ CloudFront origin header) → ob-note target group
+5. **CloudFront**: ALB origin (`CloudFront-for-ob-note`) + alias `vault.my-agentic-ai.click`  
    (`config.json`의 `custom_domain` / `sharing_url`)
 
 환경변수 예:
@@ -370,11 +370,11 @@ TASK_DB_MOUNT=/mnt/app-data
 ## Docker
 
 ```bash
-docker build -t ob-docs .
+docker build -t ob-note .
 docker run --rm -p 8502:8502 \
   -e ALLOW_LOCAL_AUTH_BYPASS=1 \
   -v "$PWD/data/vault:/app/data/vault" \
-  ob-docs
+  ob-note
 ```
 
 ## 배포 (installer)
@@ -399,24 +399,24 @@ Google OAuth 콘솔 Authorized JavaScript origin에 `https://vault.my-agentic-ai
 ### config.json
 
 - 없으면 생성합니다. `accountId` / `region` / `s3_bucket` 등은 STS·기본값으로 채웁니다.
-- 버킷 기본값: `storage-for-ob-docs-{account}-{region}`
+- 버킷 기본값: `storage-for-ob-note-{account}-{region}`
 - `custom_domain` 기본값: `vault.my-agentic-ai.click` → `sharing_url`
 - Google 로그인에는 `google_client_id`가 필요합니다 (비어 있으면 배포는 되지만 로그인 불가).
 
 ### installer가 수행하는 일
 
 0. **인프라 ensure** (`shared_infra.py`)
-   - S3 `storage-for-ob-docs-{account}-{region}`
-   - Secrets: `ob-docs/cloudfront-alb-origin-header`, `ob-docs/session-signing-key`
-   - IAM: `role-ecs-{task,execution}-for-ob-docs-{region}`
-   - ECS cluster `cluster-for-ob-docs`
-   - VPC + `alb-for-ob-docs` (없으면 생성)
-   - ACM + CloudFront `CloudFront-for-ob-docs` (alias → `custom_domain`) → `sharing_url`
+   - S3 `storage-for-ob-note-{account}-{region}`
+   - Secrets: `ob-note/cloudfront-alb-origin-header`, `ob-note/session-signing-key`
+   - IAM: `role-ecs-{task,execution}-for-ob-note-{region}`
+   - ECS cluster `cluster-for-ob-note`
+   - VPC + `alb-for-ob-note` (없으면 생성)
+   - ACM + CloudFront `CloudFront-for-ob-note` (alias → `custom_domain`) → `sharing_url`
 1. **skills 업로드** (`use-vault` → `s3://…/skills/`)
 2. **AgentCore Harness** (`ob_docs`, skill=`use-vault`, tools=`exa` + `code`) → `HARNESS_ARN`
-3. ECR `ecr-for-ob-docs` 빌드/푸시
-4. ALB rule `/*` → `TG-for-ob-docs` (CloudFront origin header 조건)
-5. ECS `service-for-ob-docs` on `cluster-for-ob-docs`
+3. ECR `ecr-for-ob-note` 빌드/푸시
+4. ALB rule `/*` → `TG-for-ob-note` (CloudFront origin header 조건)
+5. ECS `service-for-ob-note` on `cluster-for-ob-note`
    - 계정 vault는 로그인 시 `vault/{userId}/`에 생성 (installer가 샘플 노트를 seed하지 않음)
 
 ### 제거 (uninstaller)
