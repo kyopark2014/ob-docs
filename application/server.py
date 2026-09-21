@@ -1,4 +1,4 @@
-"""ob-docs FastAPI server — Obsidian-like vault at site root."""
+"""ob-note FastAPI server — Obsidian-like vault at site root."""
 
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ class VaultUserMiddleware(BaseHTTPMiddleware):
 
 
 app = FastAPI(
-    title="ob-docs",
+    title="ob-note",
     version="0.1.0",
     lifespan=lifespan,
     docs_url="/api/docs" if _ENABLE_API_DOCS else None,
@@ -127,7 +127,7 @@ def health() -> dict:
 
     return {
         "status": "ok",
-        "service": "ob-docs",
+        "service": "ob-note",
         "backend": vault_backend.backend_mode(),
         "app_data": app_data_backend.backend_mode(),
     }
@@ -171,7 +171,7 @@ if _WEB_DIST.is_dir():
         index = _WEB_DIST / "index.html"
         if index.is_file():
             return FileResponse(index)
-        return HTMLResponse("<h1>ob-docs</h1><p>Build web/ first.</p>", status_code=503)
+        return HTMLResponse("<h1>ob-note</h1><p>Build web/ first.</p>", status_code=503)
 
     @app.get("/{full_path:path}")
     def spa_fallback(full_path: str):
@@ -190,6 +190,6 @@ else:
     @app.get("/")
     def spa_missing():
         return HTMLResponse(
-            "<h1>ob-docs</h1><p>Frontend not built. Run <code>cd web && npm run build</code>.</p>",
+            "<h1>ob-note</h1><p>Frontend not built. Run <code>cd web && npm run build</code>.</p>",
             status_code=503,
         )

@@ -66,7 +66,7 @@ def project_name() -> str:
     name = cfg.get("projectName")
     if isinstance(name, str) and name.strip():
         return name.strip()
-    return "ob-docs"
+    return "ob-note"
 
 
 def backend_mode() -> str:

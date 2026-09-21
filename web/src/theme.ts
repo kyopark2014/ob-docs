@@ -1,6 +1,6 @@
 export type Theme = "light" | "dark";
 
-export const THEME_STORAGE_KEY = "ob-docs-theme";
+export const THEME_STORAGE_KEY = "ob-note-theme";
 
 export function getStoredTheme(): Theme {
   try {

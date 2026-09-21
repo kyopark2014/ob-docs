@@ -162,7 +162,7 @@ Open Agent 사용법·동작은 [Agent로 Note 수정하기](#agent로-note-수�
 
 | 항목 | 내용 |
 |---|---|
-| Runtime | AgentCore **InvokeHarness** (`HARNESS_ARN`, installer가 `ob_docs` harness 생성) |
+| Runtime | AgentCore **InvokeHarness** (`HARNESS_ARN`, installer가 `ob_note` harness 생성) |
 | Skill | **use-vault** — vault 경로·본문 규칙·`VAULT_WRITE` 형식 (S3 `skills/use-vault/`) |
 | MCP / tools | **websearch** (Exa `remote_mcp`) + **code interpreter** (일반 계산; skill 스크립트 경로 실행은 비권장) |
 | 모델 | 좌측 rail 하단 **Model** 아이콘(Settings 바로 위)에서 선택 (기본 `Claude 4.6 Sonnet`, localStorage 저장) |
@@ -271,7 +271,7 @@ python create_mcp.py
 
 1. `ob-note/vault-agent-token` secret ensure  
 2. IAM role `role-use-vault-mcp-for-ob-note-{region}` (ECR pull, Secrets, logs)  
-3. `MCP/use-vault` 이미지 빌드 → ECR `use_vault_of_ob_docs`  
+3. `MCP/use-vault` 이미지 빌드 → ECR `use_vault_of_ob_note`  
 4. AgentCore Runtime 생성/갱신 (`serverProtocol=MCP`, `networkMode=PUBLIC`)  
 5. 계정 root에 `InvokeAgentRuntime` resource policy (Gateway 없이 동일 계정 호출 허용)  
 6. `config.json`에 `use_vault_mcp_runtime_arn` / `use_vault_mcp_url` 등 저장  
@@ -287,7 +287,7 @@ Runtime 엔드포인트는 **IAM SigV4**입니다. `remote_mcp`처럼 서명 없
   "mcpServers": {
     "use-vault": {
       "type": "streamable_http",
-      "url": "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aus-west-2%3AACCOUNT%3Aruntime%2Fuse_vault_of_ob_docs-XXXX/invocations?qualifier=DEFAULT",
+      "url": "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aus-west-2%3AACCOUNT%3Aruntime%2Fuse_vault_of_ob_note-XXXX/invocations?qualifier=DEFAULT",
       "auth_type": "aws_sigv4",
       "auth_region": "us-west-2",
       "auth_service": "bedrock-agentcore"
@@ -413,7 +413,7 @@ Google OAuth 콘솔 Authorized JavaScript origin에 `https://vault.my-agentic-ai
    - VPC + `alb-for-ob-note` (없으면 생성)
    - ACM + CloudFront `CloudFront-for-ob-note` (alias → `custom_domain`) → `sharing_url`
 1. **skills 업로드** (`use-vault` → `s3://…/skills/`)
-2. **AgentCore Harness** (`ob_docs`, skill=`use-vault`, tools=`exa` + `code`) → `HARNESS_ARN`
+2. **AgentCore Harness** (`ob_note`, skill=`use-vault`, tools=`exa` + `code`) → `HARNESS_ARN`
 3. ECR `ecr-for-ob-note` 빌드/푸시
 4. ALB rule `/*` → `TG-for-ob-note` (CloudFront origin header 조건)
 5. ECS `service-for-ob-note` on `cluster-for-ob-note`

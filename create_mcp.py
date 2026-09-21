@@ -31,13 +31,13 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("ob-docs-create-mcp")
+logger = logging.getLogger("ob-note-create-mcp")
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 MCP_DIR = ROOT / "MCP" / "use-vault"
 MCP_CONFIG_PATH = MCP_DIR / "config.json"
-VAULT_AGENT_SECRET = "ob-docs/vault-agent-token"
+VAULT_AGENT_SECRET = "ob-note/vault-agent-token"
 
 
 def load_config() -> dict[str, Any]:
@@ -57,7 +57,7 @@ def save_config(cfg: dict[str, Any]) -> None:
 
 
 def _project_name(cfg: dict[str, Any]) -> str:
-    return (cfg.get("projectName") or "ob-docs").strip() or "ob-docs"
+    return (cfg.get("projectName") or "ob-note").strip() or "ob-note"
 
 
 def _region(cfg: dict[str, Any]) -> str:
@@ -104,7 +104,7 @@ def ensure_vault_agent_token(sm, project: str) -> str:
     resp = sm.create_secret(
         Name=secret_id,
         SecretString=value,
-        Description="HMAC token for use-vault MCP → ob-docs vault API auth",
+        Description="HMAC token for use-vault MCP → ob-note vault API auth",
         Tags=[
             {"Key": "Name", "Value": secret_id},
             {"Key": "Project", "Value": project},
@@ -372,7 +372,7 @@ def create_or_update_use_vault_mcp_runtime(
         logger.info("Updating existing runtime: %s (%s)", name, runtime_id)
         response = control.update_agent_runtime(
             agentRuntimeId=runtime_id,
-            description="ob-docs use-vault Streamable HTTP MCP",
+            description="ob-note use-vault Streamable HTTP MCP",
             agentRuntimeArtifact={
                 "containerConfiguration": {"containerUri": container_uri}
             },
@@ -386,7 +386,7 @@ def create_or_update_use_vault_mcp_runtime(
         logger.info("Creating runtime: %s", name)
         response = control.create_agent_runtime(
             agentRuntimeName=name,
-            description="ob-docs use-vault Streamable HTTP MCP",
+            description="ob-note use-vault Streamable HTTP MCP",
             agentRuntimeArtifact={
                 "containerConfiguration": {"containerUri": container_uri}
             },

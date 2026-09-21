@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""HTTP client helpers for ob-docs vault API.
+"""HTTP client helpers for ob-note vault API.
 
 Auth order (production AgentCore cannot read session-signing-key):
   1. VAULT_AGENT_TOKEN / Secrets Manager ``{project}/vault-agent-token``
      → ``Authorization: VaultAgent v1.<payload>.<sig>``
   2. SESSION_SIGNING_KEY (local / app ECS) → Bearer session cookie token
-  3. Loopback + no key → unauthenticated (ob-docs ALLOW_LOCAL_AUTH_BYPASS)
+  3. Loopback + no key → unauthenticated (ob-note ALLOW_LOCAL_AUTH_BYPASS)
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def load_app_config() -> dict[str, Any]:
             "s3_bucket": skill_cfg.get("s3_bucket"),
             "sharing_url": skill_cfg.get("sharing_url") or skill_cfg.get("ob_docs_url"),
             "region": skill_cfg.get("region"),
-            "projectName": skill_cfg.get("project_name") or "ob-docs",
+            "projectName": skill_cfg.get("project_name") or "ob-note",
         }
 
     candidates: list[Path] = []
@@ -78,10 +78,10 @@ def load_app_config() -> dict[str, Any]:
             candidates.append(Path(raw) / "application" / "config.json")
 
     here = Path(__file__).resolve()
-    # skills/use-vault/scripts → ob-docs root is parents[3]
+    # skills/use-vault/scripts → ob-note root is parents[3]
     try:
-        ob_docs_root = here.parents[3]
-        candidates.append(ob_docs_root / "config.json")
+        ob_note_root = here.parents[3]
+        candidates.append(ob_note_root / "config.json")
     except IndexError:
         pass
     candidates.extend(
@@ -106,10 +106,10 @@ def _project_name(cfg: Optional[dict[str, Any]] = None) -> str:
             or os.environ.get("SHARED_PROJECT_NAME")
             or skill.get("project_name")
             or cfg.get("projectName")
-            or "ob-docs"
+            or "ob-note"
         )
         .strip()
-        or "ob-docs"
+        or "ob-note"
     )
 
 
@@ -328,7 +328,7 @@ def api_request(
             parsed = detail
         raise RuntimeError(f"HTTP {exc.code} {method.upper()} {path}: {parsed}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"Failed to reach ob-docs at {base}: {exc}") from exc
+        raise RuntimeError(f"Failed to reach ob-note at {base}: {exc}") from exc
 
 
 def print_json(payload: Any) -> None:

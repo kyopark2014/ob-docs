@@ -255,7 +255,7 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
             status_code=503,
             detail=(
                 "HARNESS_ARN이 설정되지 않았습니다. "
-                "`python installer.py`로 ob-docs harness를 프로비저닝하세요."
+                "`python installer.py`로 ob-note harness를 프로비저닝하세요."
             ),
         )
 

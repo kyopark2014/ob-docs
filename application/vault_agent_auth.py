@@ -1,4 +1,4 @@
-"""Vault agent-token auth (AgentCore → ob-docs).
+"""Vault agent-token auth (AgentCore → ob-note).
 
 AgentCore runtime is denied access to session-signing-key by design.
 Instead it reads ``{project}/vault-agent-token`` and sends:
@@ -50,8 +50,8 @@ def _project_name() -> str:
         return (
             os.environ.get("PROJECT_NAME")
             or os.environ.get("SHARED_PROJECT_NAME")
-            or "ob-docs"
-        ).strip() or "ob-docs"
+            or "ob-note"
+        ).strip() or "ob-note"
 
 
 def _secret_name() -> str:

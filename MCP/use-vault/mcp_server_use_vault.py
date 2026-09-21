@@ -1,4 +1,4 @@
-"""Streamable-HTTP MCP server for ob-docs vault (use-vault).
+"""Streamable-HTTP MCP server for ob-note vault (use-vault).
 
 Exposes the same read/write surface as skills/use-vault via vault HTTP API.
 Always pass actor_id (account login id / email) so requests are scoped to
@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger("use-vault-mcp")
 
 INSTRUCTIONS = """\
-You manage markdown notes in an ob-docs vault (Obsidian-like).
+You manage markdown notes in an ob-note vault (Obsidian-like).
 .md files are the source of truth. Each account has an isolated vault;
 always pass actor_id from the system prompt (account login id / email) —
 never a nickname or display name.
@@ -65,7 +65,7 @@ def _err(exc: Exception) -> str:
 @mcp.tool()
 def vault_health(actor_id: str = "") -> str:
     """
-    Check ob-docs vault API health (GET /api/health).
+    Check ob-note vault API health (GET /api/health).
 
     actor_id: optional for health; pass account login id when available.
     return: JSON health payload

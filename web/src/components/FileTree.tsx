@@ -12,8 +12,8 @@ import type { TreeNode } from "../types";
 import { isFolderOpen, setFolderOpen } from "../treeSettings";
 import { ChevronIcon, PinIcon } from "./Icons";
 
-const DND_TYPE = "application/x-ob-docs-path";
-const DND_PREFIX = "ob-docs-move|";
+const DND_TYPE = "application/x-ob-note-path";
+const DND_PREFIX = "ob-note-move|";
 /** Long-press duration for mobile context menu (ms). */
 const LONG_PRESS_MS = 480;
 const LONG_PRESS_MOVE_PX = 12;

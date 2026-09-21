@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone infrastructure helpers for ob-docs.
+"""Standalone infrastructure helpers for ob-note.
 
 Creates (idempotent) project-scoped ALB / ECS cluster / S3 / Secrets / CloudFront.
 Does not share or merge config with agentic-work.
@@ -18,11 +18,11 @@ from typing import Any, Optional
 import boto3
 from botocore.exceptions import ClientError
 
-logger = logging.getLogger("ob-docs-infra")
+logger = logging.getLogger("ob-note-infra")
 
 ROOT = Path(__file__).resolve().parent
 
-PROJECT = "ob-docs"
+PROJECT = "ob-note"
 DEFAULT_REGION = "us-west-2"
 DEFAULT_CUSTOM_DOMAIN = "vault.my-agentic-ai.click"
 
@@ -74,7 +74,7 @@ def load_json_if_exists(path: Path) -> dict[str, Any]:
 
 
 def bootstrap_config(config_path: Path) -> dict[str, Any]:
-    """Load or create config.json with ob-docs defaults (no external merge)."""
+    """Load or create config.json with ob-note defaults (no external merge)."""
     cfg = load_json_if_exists(config_path)
 
     region = str(cfg.get("region") or DEFAULT_REGION).strip() or DEFAULT_REGION
@@ -217,7 +217,7 @@ def ensure_origin_header_secret(sm) -> str:
 
 
 def ensure_session_signing_key(sm) -> str:
-    """HMAC session cookie key for ob-docs."""
+    """HMAC session cookie key for ob-note."""
     try:
         current = (
             sm.get_secret_value(SecretId=SESSION_SECRET).get("SecretString") or ""
@@ -554,7 +554,7 @@ def _create_minimal_network(ec2, elbv2, region: str) -> NetworkInfo:
 
 
 def discover_or_create_network(ecs, elbv2, ec2, region: str) -> NetworkInfo:
-    """Reuse existing ob-docs ALB/ECS network, or create a minimal stack."""
+    """Reuse existing ob-note ALB/ECS network, or create a minimal stack."""
     try:
         services = ecs.describe_services(
             cluster=CLUSTER, services=[f"service-for-{PROJECT}"]

@@ -1,4 +1,4 @@
-"""Provision AgentCore Harness for ob-docs Open Agent.
+"""Provision AgentCore Harness for ob-note Open Agent.
 
 Default tools: websearch (Exa) + code interpreter (harness-work style).
 Default skill: ``use-vault`` (S3). Scripts run via code interpreter; VAULT_WRITE
@@ -20,7 +20,7 @@ from typing import Any, Optional
 import boto3
 from botocore.exceptions import ClientError
 
-logger = logging.getLogger("ob-docs-harness")
+logger = logging.getLogger("ob-note-harness")
 
 ROOT = Path(__file__).resolve().parent
 SKILLS_DIR = ROOT / "skills"
@@ -51,7 +51,7 @@ DEFAULT_HARNESS_TOOLS: list[dict[str, Any]] = [
     CODE_INTERPRETER_TOOL,
 ]
 
-_SYSTEM_PROMPT_TEMPLATE = """당신은 ob-docs vault의 마크다운 노트를 도와주는 에디터 에이전트입니다.
+_SYSTEM_PROMPT_TEMPLATE = """당신은 ob-note vault의 마크다운 노트를 도와주는 에디터 에이전트입니다.
 한국어로 답변하세요. 모르는 내용은 추측하지 마세요.
 
 ## 역할
@@ -96,7 +96,7 @@ def write_use_vault_skill_config(
     s3_bucket: str,
     sharing_url: str = "",
     region: str = "us-west-2",
-    project: str = "ob-docs",
+    project: str = "ob-note",
 ) -> Path:
     """Write skills/use-vault/config.json (optional sidecar for local/scripts)."""
     skill_dir = SKILLS_DIR / USE_VAULT_SKILL
@@ -107,7 +107,7 @@ def write_use_vault_skill_config(
         "sharing_url": url,
         "ob_docs_url": url,
         "region": (region or "us-west-2").strip() or "us-west-2",
-        "project_name": (project or "ob-docs").strip() or "ob-docs",
+        "project_name": (project or "ob-note").strip() or "ob-note",
     }
     path = skill_dir / "config.json"
     path.write_text(
@@ -138,9 +138,9 @@ def upload_skills_to_s3(
     *,
     sharing_url: str = "",
     region: str = "us-west-2",
-    project: str = "ob-docs",
+    project: str = "ob-note",
 ) -> int:
-    """Upload ob-docs/skills/ to s3://{bucket}/skills/."""
+    """Upload ob-note/skills/ to s3://{bucket}/skills/."""
     bucket = (s3_bucket or "").strip()
     if not bucket:
         raise ValueError("s3_bucket is required to upload skills")
@@ -188,7 +188,7 @@ def upload_skills_to_s3(
 
 
 def harness_name_for_api(project_name: str) -> str:
-    normalized = (project_name or "ob_docs").replace("-", "_")
+    normalized = (project_name or "ob_note").replace("-", "_")
     if not _HARNESS_NAME_API_RE.match(normalized):
         raise ValueError(
             "CreateHarness harnessName must match [a-zA-Z][a-zA-Z0-9_]{0,39} "
@@ -228,7 +228,7 @@ def _harness_env_vars(
     env = {
         "LOG_LEVEL": "info",
         "BEDROCK_REGION": region,
-        "PROJECT_NAME": project_secret_prefix or "ob-docs",
+        "PROJECT_NAME": project_secret_prefix or "ob-note",
     }
     if s3_bucket:
         env["S3_BUCKET"] = s3_bucket
@@ -245,7 +245,7 @@ def create_harness_execution_role(
     project: str,
     *,
     s3_bucket: str = "",
-    project_secret_prefix: str = "ob-docs",
+    project_secret_prefix: str = "ob-note",
 ) -> str:
     """IAM role assumed by AgentCore for the harness (PUBLIC)."""
     role_name = f"role-harness-for-{project}-{region}"
@@ -284,7 +284,7 @@ def create_harness_execution_role(
         )["Role"]["Arn"]
         logger.info("Created harness execution role %s", role_name)
 
-    secret_prefix = (project_secret_prefix or project or "ob-docs").strip() or "ob-docs"
+    secret_prefix = (project_secret_prefix or project or "ob-note").strip() or "ob-note"
     statements: list[dict[str, Any]] = [
         {
             "Sid": "BedrockModelInvocation",
@@ -600,7 +600,7 @@ def create_or_get_harness(
     execution_role_arn: str,
     s3_bucket: str = "",
     sharing_url: str = "",
-    project_secret_prefix: str = "ob-docs",
+    project_secret_prefix: str = "ob-note",
 ) -> dict[str, str]:
     """Create PUBLIC harness with websearch + code interpreter + use-vault."""
     control = _control_client(region)

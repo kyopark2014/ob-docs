@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Deploy standalone ob-docs (own CloudFront / ALB / ECS / S3).
+"""Deploy standalone ob-note (own CloudFront / ALB / ECS / S3).
 
 Creates (idempotent):
   - Infra if missing (S3, secrets, IAM roles, ECS cluster, VPC/ALB, CloudFront)
-    via ``shared_infra.py`` (``ob-docs`` resource naming)
+    via ``shared_infra.py`` (``ob-note`` resource naming)
   - ECR repository
-  - ALB target group TG-for-ob-docs (port 8502)
-  - Listener rule: path /* (+ CloudFront origin header) → ob-docs TG
-  - ECS task definition + Fargate service on cluster-for-ob-docs
+  - ALB target group TG-for-ob-note (port 8502)
+  - Listener rule: path /* (+ CloudFront origin header) → ob-note TG
+  - ECS task definition + Fargate service on cluster-for-ob-note
 
 ``config.json`` may be missing or partial — installer bootstraps it.
 
@@ -55,7 +55,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("ob-docs-installer")
+logger = logging.getLogger("ob-note-installer")
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
@@ -187,7 +187,7 @@ def ensure_vault_agent_token(sm) -> str:
     resp = sm.create_secret(
         Name=VAULT_AGENT_SECRET,
         SecretString=value,
-        Description="HMAC token for AgentCore use-vault → ob-docs auth",
+        Description="HMAC token for AgentCore use-vault → ob-note auth",
         Tags=[
             {"Key": "Name", "Value": VAULT_AGENT_SECRET},
             {"Key": "Project", "Value": PROJECT},
@@ -198,7 +198,7 @@ def ensure_vault_agent_token(sm) -> str:
 
 
 def ensure_target_group(elbv2, vpc_id: str) -> str:
-    """Create or reuse TG-for-ob-docs in ``vpc_id`` (recreate if VPC mismatch)."""
+    """Create or reuse TG-for-ob-note in ``vpc_id`` (recreate if VPC mismatch)."""
 
     def _create() -> str:
         resp = elbv2.create_target_group(
@@ -383,7 +383,7 @@ def ensure_listener_rule(
     *,
     require_origin_header: bool = True,
 ) -> str:
-    """Path /* (+ optional origin header) → ob-docs TG.
+    """Path /* (+ optional origin header) → ob-note TG.
 
     When ``require_origin_header`` is False (ALB-only / no CloudFront), the rule
     matches path only so browsers can hit the ALB DNS directly.
@@ -864,7 +864,7 @@ def wait_service(
 
 
 def ensure_sg_ingress(ec2, ecs_sg: str, alb_sg: str) -> None:
-    """Allow ALB → ob-docs container port."""
+    """Allow ALB → ob-note container port."""
     if not ecs_sg or not alb_sg:
         logger.warning("Skipping SG ingress (ecs_sg=%s alb_sg=%s)", ecs_sg, alb_sg)
         return
@@ -879,7 +879,7 @@ def ensure_sg_ingress(ec2, ecs_sg: str, alb_sg: str) -> None:
                     "UserIdGroupPairs": [
                         {
                             "GroupId": alb_sg,
-                            "Description": "ALB to ob-docs",
+                            "Description": "ALB to ob-note",
                         }
                     ],
                 }
@@ -922,7 +922,7 @@ def main() -> int:
         )
         cfg["accountId"] = str(ident["Account"])
 
-    logger.info("[0/7] Ensure standalone ob-docs infra (S3/ALB/CF/secrets)")
+    logger.info("[0/7] Ensure standalone ob-note infra (S3/ALB/CF/secrets)")
     cfg, network, origin_header = ensure_infra_stack(
         cfg=cfg,
         s3=c["s3"],

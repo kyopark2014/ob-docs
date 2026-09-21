@@ -119,7 +119,7 @@ function filterTreeForView(nodes: TreeNode[], showImages: boolean): TreeNode[] {
     });
 }
 
-const SKIP_CONFIRM_PREFIX = "ob-docs:skip-confirm:";
+const SKIP_CONFIRM_PREFIX = "ob-note:skip-confirm:";
 
 function shouldSkipConfirm(key: string): boolean {
   try {
@@ -197,7 +197,7 @@ function uniqueNotePath(parent: string, tree: TreeNode[]): string {
   return uniqueNamedPath(parent, "Untitled", tree);
 }
 
-const LAST_NOTE_KEY = "ob-docs:last-note-path";
+const LAST_NOTE_KEY = "ob-note:last-note-path";
 /** Match CSS mobile overlay layout (Files/Search/Meeting full-bleed). */
 const NARROW_LAYOUT_MQ = "(max-width: 1024px)";
 
@@ -1841,7 +1841,7 @@ export default function App() {
       <GoogleLoginModal
         clientId={publicConfig?.google_client_id || ""}
         localAuthBypass={Boolean(publicConfig?.local_auth_bypass)}
-        projectName={publicConfig?.project_name || "ob-docs"}
+        projectName={publicConfig?.project_name || "ob-note"}
         error={loginError || (authBusy ? "로그인 중…" : null)}
         onAccessToken={(token) => void handleGoogleAccessToken(token)}
         onLocalUserId={

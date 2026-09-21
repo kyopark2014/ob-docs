@@ -1,4 +1,4 @@
-const AGENT_W_KEY = "ob-docs:agent-w";
+const AGENT_W_KEY = "ob-note:agent-w";
 
 export const AGENT_W_DEFAULT = 360;
 export const AGENT_W_MIN = 280;

@@ -1,4 +1,4 @@
-const OPEN_FOLDERS_KEY = "ob-docs:open-folders";
+const OPEN_FOLDERS_KEY = "ob-note:open-folders";
 
 export function getOpenFolders(): Set<string> {
   try {

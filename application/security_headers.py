@@ -1,4 +1,4 @@
-"""HTTP security response headers for ob-docs.
+"""HTTP security response headers for ob-note.
 
 Pure ASGI middleware (not BaseHTTPMiddleware): Starlette's BaseHTTPMiddleware
 buffers/re-streams bodies and breaks FileResponse with

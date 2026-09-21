@@ -1,4 +1,4 @@
-const SHOW_IMAGES_KEY = "ob-docs:view-show-images";
+const SHOW_IMAGES_KEY = "ob-note:view-show-images";
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|ico|bmp|heic|avif)$/i;
 

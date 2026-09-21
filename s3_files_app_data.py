@@ -20,7 +20,7 @@ from botocore.exceptions import ClientError
 APP_DATA_MOUNT_PATH = "/mnt/app-data"
 S3_FILES_APP_DATA_PREFIX = "app-data/"
 
-logger = logging.getLogger("ob-docs-s3files")
+logger = logging.getLogger("ob-note-s3files")
 
 
 class S3FilesAppDataProvisioner:

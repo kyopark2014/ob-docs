@@ -38,7 +38,7 @@ _last_sync_at: dict[str, float] = {}
 _SYNC_INTERVAL_SECONDS = 60.0
 
 _user_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "ob_docs_vault_user", default=None
+    "ob_note_vault_user", default=None
 )
 
 

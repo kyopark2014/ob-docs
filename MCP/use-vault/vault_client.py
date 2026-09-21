@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""HTTP client helpers for ob-docs vault API (MCP package).
+"""HTTP client helpers for ob-note vault API (MCP package).
 
 Auth order:
   1. VAULT_AGENT_TOKEN / Secrets Manager ``{project}/vault-agent-token``
      → ``Authorization: VaultAgent v1.<payload>.<sig>``
   2. SESSION_SIGNING_KEY (local / app ECS) → Bearer session cookie token
-  3. Loopback + no key → unauthenticated (ob-docs ALLOW_LOCAL_AUTH_BYPASS)
+  3. Loopback + no key → unauthenticated (ob-note ALLOW_LOCAL_AUTH_BYPASS)
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def load_app_config() -> dict[str, Any]:
             "s3_bucket": pkg.get("s3_bucket"),
             "sharing_url": pkg.get("sharing_url") or pkg.get("ob_docs_url"),
             "region": pkg.get("region"),
-            "projectName": pkg.get("project_name") or "ob-docs",
+            "projectName": pkg.get("project_name") or "ob-note",
         }
 
     candidates: list[Path] = []
@@ -78,10 +78,10 @@ def load_app_config() -> dict[str, Any]:
             candidates.append(Path(raw) / "application" / "config.json")
 
     here = Path(__file__).resolve()
-    # MCP/use-vault → ob-docs root is parents[2]
+    # MCP/use-vault → ob-note root is parents[2]
     try:
-        ob_docs_root = here.parents[2]
-        candidates.append(ob_docs_root / "config.json")
+        ob_note_root = here.parents[2]
+        candidates.append(ob_note_root / "config.json")
     except IndexError:
         pass
     candidates.extend(
@@ -105,10 +105,10 @@ def _project_name(cfg: Optional[dict[str, Any]] = None) -> str:
             or os.environ.get("SHARED_PROJECT_NAME")
             or pkg.get("project_name")
             or cfg.get("projectName")
-            or "ob-docs"
+            or "ob-note"
         )
         .strip()
-        or "ob-docs"
+        or "ob-note"
     )
 
 
@@ -342,7 +342,7 @@ def api_request(
             parsed = detail
         raise RuntimeError(f"HTTP {exc.code} {method.upper()} {path}: {parsed}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"Failed to reach ob-docs at {base}: {exc}") from exc
+        raise RuntimeError(f"Failed to reach ob-note at {base}: {exc}") from exc
 
 
 def to_json(payload: Any) -> str:

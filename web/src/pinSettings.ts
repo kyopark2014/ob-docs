@@ -1,4 +1,4 @@
-const PINNED_KEY = "ob-docs:pinned-paths";
+const PINNED_KEY = "ob-note:pinned-paths";
 
 export function getPinnedPaths(): string[] {
   try {

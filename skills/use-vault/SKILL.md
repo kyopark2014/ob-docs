@@ -1,11 +1,11 @@
 ---
 name: use-vault
-description: ob-docs vault의 마크다운 노트를 조회·검색·생성·수정합니다. vault, 노트, 위키링크, 백링크, 메모 저장 요청 시 사용합니다.
+description: ob-note vault의 마크다운 노트를 조회·검색·생성·수정합니다. vault, 노트, 위키링크, 백링크, 메모 저장 요청 시 사용합니다.
 ---
 
-# use-vault (ob-docs)
+# use-vault (ob-note)
 
-ob-docs vault의 마크다운 노트 규칙과 저장 형식을 정의합니다.  
+ob-note vault의 마크다운 노트 규칙과 저장 형식을 정의합니다.  
 노트는 `.md`가 Source of Truth입니다.
 
 계정(`userId`/email)마다 vault가 분리됩니다 (`vault/{userId}/…`).  
@@ -57,4 +57,4 @@ Open Agent에서는 위 `VAULT_WRITE` 경로를 사용하세요.
 | 키 / 변수 | 설명 |
 | --- | --- |
 | `OB_DOCS_URL` / `SHARING_URL` | vault API base |
-| `VAULT_AGENT_TOKEN` | 스크립트 인증 (Secrets Manager `ob-docs/vault-agent-token`) |
+| `VAULT_AGENT_TOKEN` | 스크립트 인증 (Secrets Manager `ob-note/vault-agent-token`) |

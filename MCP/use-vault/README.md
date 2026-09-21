@@ -1,6 +1,6 @@
 # use-vault MCP (Streamable HTTP)
 
-ob-docs vault의 마크다운 노트를 조회·검색·생성·수정하는 MCP 서버입니다.  
+ob-note vault의 마크다운 노트를 조회·검색·생성·수정하는 MCP 서버입니다.  
 `skills/use-vault`와 동일한 vault HTTP API를 `VaultAgent` 인증으로 호출합니다.
 
 ## Tools
@@ -31,8 +31,8 @@ ob-docs vault의 마크다운 노트를 조회·검색·생성·수정하는 MCP
 |------|------|
 | `OB_DOCS_URL` | vault API base (예: `https://vault.my-agentic-ai.click`) |
 | `SHARING_URL` | `OB_DOCS_URL` 미설정 시 fallback |
-| `VAULT_AGENT_TOKEN` | Agent HMAC (`Secrets Manager` `ob-docs/vault-agent-token`) |
-| `PROJECT_NAME` | 기본 `ob-docs` |
+| `VAULT_AGENT_TOKEN` | Agent HMAC (`Secrets Manager` `ob-note/vault-agent-token`) |
+| `PROJECT_NAME` | 기본 `ob-note` |
 | `AWS_REGION` | Secrets Manager 조회용 (기본 `us-west-2`) |
 
 로컬 개발에서는 `SESSION_SIGNING_KEY` 또는 loopback(`http://127.0.0.1:8502`)도 가능합니다.  
@@ -77,7 +77,7 @@ Cursor 등 MCP 클라이언트에서는 Streamable HTTP URL로 `http://localhost
 
 ## AgentCore Runtime 배포
 
-ob-docs 루트에서:
+ob-note 루트에서:
 
 ```bash
 python create_mcp.py

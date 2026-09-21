@@ -53,7 +53,7 @@ class PublicConfigResponse(BaseModel):
     google_client_id: str
     local_auth_bypass: bool
     sharing_url: str
-    project_name: str = "ob-docs"
+    project_name: str = "ob-note"
 
 
 def _google_client_id() -> str:
@@ -271,7 +271,7 @@ def get_public_config(request: Request) -> PublicConfigResponse:
         google_client_id=(cfg.get("google_client_id") or "").strip(),
         local_auth_bypass=local_auth_bypass_enabled(request),
         sharing_url=utils.sharing_url(),
-        project_name=(cfg.get("projectName") or "ob-docs").strip() or "ob-docs",
+        project_name=(cfg.get("projectName") or "ob-note").strip() or "ob-note",
     )
 
 

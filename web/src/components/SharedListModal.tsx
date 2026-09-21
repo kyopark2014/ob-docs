@@ -11,7 +11,7 @@ type Props = {
   onClose: () => void;
 };
 
-const SKIP_CONFIRM_PREFIX = "ob-docs:skip-confirm:";
+const SKIP_CONFIRM_PREFIX = "ob-note:skip-confirm:";
 
 function shouldSkipConfirm(key: string): boolean {
   try {

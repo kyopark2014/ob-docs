@@ -109,7 +109,7 @@ export function GoogleLoginModal({
   error,
   projectName,
 }: Props) {
-  const title = (projectName || "ob-docs").trim() || "ob-docs";
+  const title = (projectName || "ob-note").trim() || "ob-note";
   const tokenClientRef = useRef<TokenClient | null>(null);
   const [scriptError, setScriptError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

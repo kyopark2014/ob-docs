@@ -1,4 +1,4 @@
-const SIDEBAR_W_KEY = "ob-docs:sidebar-w";
+const SIDEBAR_W_KEY = "ob-note:sidebar-w";
 
 export const SIDEBAR_W_DEFAULT = 280;
 export const SIDEBAR_W_MIN = 180;

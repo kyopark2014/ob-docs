@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Remove infrastructure created by ob-docs/installer.py.
+"""Remove infrastructure created by ob-note/installer.py.
 
 Deletes the full standalone stack:
-  - ECS service ``service-for-ob-docs``
-  - Task definitions ``task-for-ob-docs``
-  - Target group ``TG-for-ob-docs``
+  - ECS service ``service-for-ob-note``
+  - Task definitions ``task-for-ob-note``
+  - Target group ``TG-for-ob-note``
   - ALB listener rules for ``/vault*``
-  - ECR ``ecr-for-ob-docs``
-  - Log group ``/ecs/app-for-ob-docs``
-  - Secrets ``ob-docs/vault-agent-token``, origin header, session signing key
-  - CloudFront ``CloudFront-for-ob-docs``
+  - ECR ``ecr-for-ob-note``
+  - Log group ``/ecs/app-for-ob-note``
+  - Secrets ``ob-note/vault-agent-token``, origin header, session signing key
+  - CloudFront ``CloudFront-for-ob-note``
   - ALB / VPC / ECS cluster / S3 bucket / IAM roles
 
 Usage:
@@ -63,7 +63,7 @@ def setup_logging() -> logging.Logger:
         format="%(asctime)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    return logging.getLogger("ob-docs-uninstaller")
+    return logging.getLogger("ob-note-uninstaller")
 
 
 logger = setup_logging()
@@ -88,7 +88,7 @@ def clients(region: str) -> dict[str, Any]:
     }
 
 
-def delete_ob_docs_ecs_service(ecs) -> None:
+def delete_ob_note_ecs_service(ecs) -> None:
     logger.info("[1/9] Deleting ECS service %s", SERVICE_NAME)
     try:
         services = ecs.describe_services(cluster=CLUSTER, services=[SERVICE_NAME]).get(
@@ -168,7 +168,7 @@ def delete_vault_listener_rules(elbv2) -> None:
         logger.info("  No app path rules found")
 
 
-def delete_ob_docs_target_group(elbv2) -> None:
+def delete_ob_note_target_group(elbv2) -> None:
     logger.info("[4/9] Deleting target group %s", TG_NAME)
     try:
         tgs = elbv2.describe_target_groups(Names=[TG_NAME])["TargetGroups"]
@@ -522,7 +522,7 @@ def clean_local_config(cfg: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Uninstall standalone ob-docs AWS resources"
+        description="Uninstall standalone ob-note AWS resources"
     )
     parser.add_argument(
         "--yes",
@@ -548,7 +548,7 @@ def main() -> int:
     bucket = str(cfg.get("s3_bucket") or default_bucket_name(account, region))
 
     logger.info("=" * 60)
-    logger.info("ob-docs Infrastructure Cleanup")
+    logger.info("ob-note Infrastructure Cleanup")
     logger.info("=" * 60)
     logger.info("Project: %s", PROJECT)
     logger.info("Region:  %s", region)
@@ -572,10 +572,10 @@ def main() -> int:
 
     start = time.time()
     try:
-        delete_ob_docs_ecs_service(c["ecs"])
+        delete_ob_note_ecs_service(c["ecs"])
         deregister_task_definitions(c["ecs"])
         delete_vault_listener_rules(c["elbv2"])
-        delete_ob_docs_target_group(c["elbv2"])
+        delete_ob_note_target_group(c["elbv2"])
         delete_ecr_and_logs(c["ecr"], c["logs"])
         delete_secrets(c["sm"])
         delete_cloudfront(c["cloudfront"])

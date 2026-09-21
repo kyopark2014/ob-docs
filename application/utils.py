@@ -1,4 +1,4 @@
-"""Shared helpers for ob-docs."""
+"""Shared helpers for ob-note."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def project_name() -> str:
         (cfg.get("projectName") or "").strip()
         or (os.environ.get("PROJECT_NAME") or "").strip()
     )
-    return name or "ob-docs"
+    return name or "ob-note"
 
 
 def sharing_url() -> str:

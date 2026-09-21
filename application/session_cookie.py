@@ -1,4 +1,4 @@
-"""HMAC-signed session cookies for ob-docs.
+"""HMAC-signed session cookies for ob-note.
 
 Cookie: agent_user_id = v1.<payload_b64>.<sig_b64>
 Signing key resolution: SESSION_SIGNING_KEY → Secrets Manager ({project}/session-signing-key) → local file.
@@ -59,8 +59,8 @@ def _project_name() -> str:
         return (
             os.environ.get("PROJECT_NAME")
             or os.environ.get("SHARED_PROJECT_NAME")
-            or "ob-docs"
-        ).strip() or "ob-docs"
+            or "ob-note"
+        ).strip() or "ob-note"
 
 
 def _secret_name() -> str:

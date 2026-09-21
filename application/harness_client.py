@@ -1,4 +1,4 @@
-"""Bedrock AgentCore InvokeHarness client for ob-docs Open Agent.
+"""Bedrock AgentCore InvokeHarness client for ob-note Open Agent.
 
 Tools: websearch (Exa) + code interpreter.
 Skill: use-vault (S3). Attachments: S3 + presigned URL (no full body inline).
@@ -432,7 +432,7 @@ def iter_harness_events(
     if not harness_arn:
         raise RuntimeError(
             "HARNESS_ARN is not configured. Run `python installer.py` to provision "
-            "the ob-docs harness, or set HARNESS_ARN in config.json / env."
+            "the ob-note harness, or set HARNESS_ARN in config.json / env."
         )
 
     tools = default_invoke_tools()
