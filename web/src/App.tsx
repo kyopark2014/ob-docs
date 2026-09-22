@@ -237,6 +237,62 @@ function clearLastNotePath(path?: string): void {
   }
 }
 
+/** Normalize vault-relative note path from a deep-link query value. */
+function normalizeVaultNotePath(raw: string): string | null {
+  let p = raw.trim();
+  if (
+    (p.startsWith('"') && p.endsWith('"')) ||
+    (p.startsWith("'") && p.endsWith("'"))
+  ) {
+    p = p.slice(1, -1).trim();
+  }
+  try {
+    // Handle once- or twice-encoded values from copied links.
+    p = decodeURIComponent(p);
+  } catch {
+    /* keep as-is */
+  }
+  p = p.replace(/\\/g, "/").replace(/^\/+/, "").trim();
+  if (!p) return null;
+  if (p.split("/").some((seg) => seg === "..")) return null;
+  if (!/\.md$/i.test(p)) p = `${p}.md`;
+  return p;
+}
+
+/**
+ * Private deep link: `/?note=AI/Knowledge%20Graph/Note.md`
+ * (not a public share — requires login; path stays in the address bar).
+ */
+function readDeepLinkNotePath(): string | null {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get("note") ?? params.get("path");
+    if (!raw) return null;
+    return normalizeVaultNotePath(raw);
+  } catch {
+    return null;
+  }
+}
+
+function syncDeepLinkNotePath(path: string | null): void {
+  try {
+    const url = new URL(window.location.href);
+    if (path) {
+      url.searchParams.set("note", path);
+      url.searchParams.delete("path");
+    } else {
+      url.searchParams.delete("note");
+      url.searchParams.delete("path");
+    }
+    const next = `${url.pathname}${url.search}${url.hash}`;
+    if (`${window.location.pathname}${window.location.search}${window.location.hash}` !== next) {
+      window.history.replaceState(null, "", next);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 function noteParentDir(notePath: string): string {
   return notePath.includes("/") ? notePath.slice(0, notePath.lastIndexOf("/")) : "";
 }
@@ -589,6 +645,8 @@ export default function App() {
     setLoginError(null);
     setAuthBusy(false);
     setAuthError({});
+    // Allow restore (incl. ?note= deep link) after the next successful login.
+    didRestoreNote.current = false;
     try {
       const cfg = await api.getPublicConfig();
       setPublicConfig(cfg);
@@ -807,9 +865,9 @@ export default function App() {
   );
 
   const openFile = useCallback(
-    async (path: string) => {
+    async (path: string): Promise<boolean> => {
       // Notes only — images/binaries are moved via drag-and-drop, not opened as markdown
-      if (!/\.md$/i.test(path)) return;
+      if (!/\.md$/i.test(path)) return false;
       const currentPath = activePathRef.current;
       if (currentPath && path !== currentPath && dirty && draftRef.current !== file?.content) {
         try {
@@ -817,10 +875,11 @@ export default function App() {
           if (finalPath !== currentPath) {
             setActivePath(finalPath);
             writeLastNotePath(finalPath);
+            syncDeepLinkNotePath(finalPath);
           }
         } catch (err) {
           void showAlert(err instanceof Error ? err.message : String(err), "Save failed");
-          return;
+          return false;
         }
       }
       let payload;
@@ -859,10 +918,10 @@ export default function App() {
               "Open failed",
             );
           }
-          return;
+          return false;
         }
         void showAlert(err instanceof Error ? err.message : String(err), "Open failed");
-        return;
+        return false;
       }
       const resolvedPath = payload.path || path;
       setFile(payload);
@@ -870,6 +929,7 @@ export default function App() {
       setDirty(false);
       setActivePath(resolvedPath);
       writeLastNotePath(resolvedPath);
+      syncDeepLinkNotePath(resolvedPath);
       setTabs((prev) => {
         const withoutStale =
           resolvedPath === path ? prev : prev.filter((t) => t.path !== path);
@@ -889,27 +949,42 @@ export default function App() {
         setPanel("files");
       }
       setViewMode("preview");
+      return true;
     },
     [dirty, file?.content, persistNote, pinnedPaths, refreshTree, showAlert, updatePinnedPaths],
   );
 
-  // On refresh: restore last note, else open first markdown file
+  // Deep link (?note=…) → last note → first markdown. Login gate keeps ?note= until auth succeeds.
   useEffect(() => {
     if (!ready || didRestoreNote.current || authError) return;
     if (activePath) {
       didRestoreNote.current = true;
+      syncDeepLinkNotePath(activePath);
       return;
     }
-    const files = flattenMarkdownPaths(tree);
-    if (!files.length) {
-      didRestoreNote.current = true;
-      return;
-    }
-    const last = readLastNotePath();
-    const toOpen = last && files.includes(last) ? last : files[0];
+
+    const openFallback = () => {
+      const files = flattenMarkdownPaths(tree);
+      if (!files.length) return;
+      const last = readLastNotePath();
+      const toOpen = last && files.includes(last) ? last : files[0];
+      void openFile(toOpen);
+    };
+
+    const deep = readDeepLinkNotePath();
     didRestoreNote.current = true;
-    void openFile(toOpen);
-  }, [ready, tree, activePath, authError, openFile]);
+    if (deep) {
+      void (async () => {
+        const ok = await openFile(deep);
+        if (!ok) {
+          void showAlert(`노트를 열 수 없습니다: ${deep}`, "Deep link");
+          openFallback();
+        }
+      })();
+      return;
+    }
+    openFallback();
+  }, [ready, tree, activePath, authError, openFile, showAlert]);
 
   const closeTab = useCallback(
     (path: string) => {

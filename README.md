@@ -307,6 +307,30 @@ Runtime 엔드포인트는 **IAM SigV4**입니다. `remote_mcp`처럼 서명 없
 호출 principal에는 `bedrock-agentcore:InvokeAgentRuntime` (해당 Runtime ARN)이 필요합니다.  
 도구 호출 시 **`actor_id`에 vault 소유자 email**을 넘기세요. 로컬 개발만 할 때는 Gateway 없이 `python -m mcp_server_use_vault` → `http://localhost:8000/mcp`도 가능합니다 ([`MCP/use-vault/README.md`](MCP/use-vault/README.md)).
 
+## 노트 deep link (로그인 필요)
+
+주소창에 vault 상대경로를 넣어 **본인 계정**의 노트로 바로 이동합니다. public 공유(`/s/{token}`)가 아닙니다.  
+로그인되어 있지 않으면 로그인 화면을 띄운 뒤, 성공하면 해당 노트를 엽니다.
+
+**URL 형식**
+
+```text
+https://vault.my-agentic-ai.click/?note=AI/Knowledge%20Graph/Note.md
+```
+
+- 쿼리 키: `note` (별칭 `path`도 허용)
+- 값은 vault 상대경로. 공백·한글은 URL 인코딩(`%20` 등)
+- `.md` 생략 시 자동으로 붙입니다
+- 노트를 열 때마다 주소창의 `?note=`가 현재 경로로 갱신되므로, 주소창을 복사해 같은 계정으로 공유할 수 있습니다
+- `https://vault…:note?"…"` 형태는 포트/문법상 유효하지 않습니다. 반드시 `/?note=…`를 사용하세요
+
+**예시**
+
+```text
+https://vault.my-agentic-ai.click/?note=AI/Ontology.md
+https://vault.my-agentic-ai.click/?note=Meeting/Sprint-Review.md
+```
+
 ## 노트의 public 공유
 
 로그인된 사용자가 markdown 노트를 **쿠키 없이** 볼 수 있는 CloudFront URL로 공유합니다. 서버가 HTML markdown viewer를 렌더합니다.
