@@ -294,10 +294,12 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [publicConfig, setPublicConfig] = useState<{
+    auth_mode: "google" | "cognito";
     google_client_id: string;
     local_auth_bypass: boolean;
     sharing_url: string;
     project_name: string;
+    cognito_admin_username: string;
   } | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [panel, setPanel] = useState<PanelMode>("files");
@@ -530,6 +532,22 @@ export default function App() {
       setLoginError(null);
       try {
         const session = await api.createLocalSession(localUserId);
+        await finishLogin(session.user_id);
+      } catch (err) {
+        setLoginError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setAuthBusy(false);
+      }
+    },
+    [finishLogin],
+  );
+
+  const handleCognitoLogin = useCallback(
+    async (username: string, password: string) => {
+      setAuthBusy(true);
+      setLoginError(null);
+      try {
+        const session = await api.loginWithCognito(username, password);
         await finishLogin(session.user_id);
       } catch (err) {
         setLoginError(err instanceof Error ? err.message : String(err));
@@ -1839,11 +1857,14 @@ export default function App() {
   if (authError && !userId) {
     return (
       <GoogleLoginModal
+        authMode={publicConfig?.auth_mode === "cognito" ? "cognito" : "google"}
         clientId={publicConfig?.google_client_id || ""}
         localAuthBypass={Boolean(publicConfig?.local_auth_bypass)}
         projectName={publicConfig?.project_name || "ob-note"}
+        cognitoAdminUsername={publicConfig?.cognito_admin_username || "admin"}
         error={loginError || (authBusy ? "로그인 중…" : null)}
         onAccessToken={(token) => void handleGoogleAccessToken(token)}
+        onCognitoLogin={(u, p) => void handleCognitoLogin(u, p)}
         onLocalUserId={
           publicConfig?.local_auth_bypass
             ? (id) => void handleLocalUserId(id)

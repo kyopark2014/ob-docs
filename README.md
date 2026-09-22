@@ -396,12 +396,108 @@ python installer.py
 installer가 `route53_profile`(`stock`)으로 ACM 검증 CNAME과 A/AAAA alias를 자동 등록합니다.
 
 Google OAuth 콘솔 Authorized JavaScript origin에 `https://vault.my-agentic-ai.click` 을 추가하세요.
+
+### 인증하기
+
+installer는 `config.json`의 `google_client_id` 유무에 따라 인증 방식을 정합니다.
+
+| 조건 | `auth_mode` | 로그인 |
+|---|---|---|
+| `google_client_id` 있음 | `google` | Google OAuth |
+| `google_client_id` 없음 | 대화형 선택 → `google` 또는 `cognito` | Google 또는 Cognito `admin` |
+
+#### Google 인증
+
+`google_client_id`가 있으면 Google OAuth를 사용합니다. 없으면 installer가 Google을 선택했을 때 client ID를 물어봅니다.
+
+```json
+{
+  "auth_mode": "google",
+  "google_client_id": "123456789-xxxx.apps.googleusercontent.com"
+}
+```
+
+프론트는 GIS로 access token을 받은 뒤 세션을 만듭니다.
+
+```ts
+// web: Google access token → 세션 쿠키
+await api.setSessionWithAccessToken(accessToken);
+// POST /api/session  { "access_token": "..." }
+```
+
+백엔드는 tokeninfo로 audience를 검증한 뒤 email을 `user_id`로 씁니다.
+
+```python
+# application/api/routes_auth.py
+idinfo = verify_google_access_token(access_token, google_client_id)
+user_id = idinfo["email"]  # 예: alice@example.com
+```
+
+#### Cognito 인증
+
+`google_client_id`가 없을 때 Cognito를 선택하면 User Pool·App Client·`admin` 사용자를 만들고, admin 비밀번호는 Secrets Manager에만 저장합니다 (config.json에 평문 저장 안 함).
+
+```text
+Secret: ob-note/cognito-admin-password
+Username: admin
+```
+
+```json
+{
+  "auth_mode": "cognito",
+  "cognito_user_pool_id": "us-west-2_XXXXXXXXX",
+  "cognito_client_id": "xxxxxxxx",
+  "cognito_admin_username": "admin",
+  "cognito_region": "us-west-2"
+}
+```
+
+프론트는 ID/Password 폼으로 로그인합니다.
+
+```ts
+// web: Cognito username/password → 세션 쿠키
+await api.loginWithCognito(username, password);
+// POST /api/session  { "username": "admin", "password": "..." }
+```
+
+백엔드는 Cognito `USER_PASSWORD_AUTH`로 검증합니다.
+
+```python
+# application/api/routes_auth.py
+client.initiate_auth(
+    ClientId=cognito_client_id,
+    AuthFlow="USER_PASSWORD_AUTH",
+    AuthParameters={"USERNAME": username, "PASSWORD": password},
+)
+user_id = client.get_user(AccessToken=access_token)["Username"]  # 예: admin
+```
+
+Self-signup은 비활성화되어 있습니다(`AllowAdminCreateUserOnly`). 추가 사용자는 [`add_user.py`](./add_user.py)로 등록합니다. `config.json`의 Cognito 설정을 읽어 영구 비밀번호로 사용자를 만든 뒤, Web UI와 동일한 `USER_PASSWORD_AUTH` 로그인까지 검증합니다.
+
+```bash
+# 대화형 (username·password 입력)
+python add_user.py
+
+# username만 지정 (password는 getpass로 숨김 입력)
+python add_user.py --username user01
+
+# 로그인 검증 생략
+python add_user.py --username user01 --skip-login-test
+
+# config 경로 지정
+python add_user.py --config config.json --username user01
+```
+
+비밀번호 정책: 최소 8자, 대문자·소문자·숫자 각 1자 이상 (기호 선택).
+
+로컬 개발만 `ALLOW_LOCAL_AUTH_BYPASS=1`로 User ID 입력을 허용합니다 (loopback).
+
 ### config.json
 
 - 없으면 생성합니다. `accountId` / `region` / `s3_bucket` 등은 STS·기본값으로 채웁니다.
 - 버킷 기본값: `storage-for-ob-note-{account}-{region}`
 - `custom_domain` 기본값: `vault.my-agentic-ai.click` → `sharing_url`
-- Google 로그인에는 `google_client_id`가 필요합니다 (비어 있으면 배포는 되지만 로그인 불가).
+- 인증 키: `auth_mode`, `google_client_id` 또는 `cognito_*` (위 **인증하기** 참고)
 
 ### installer가 수행하는 일
 

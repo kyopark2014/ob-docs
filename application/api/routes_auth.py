@@ -1,4 +1,4 @@
-"""Session auth — Google sign-in + agent_user_id cookie.
+"""Session auth — Google / Cognito sign-in + agent_user_id cookie.
 
 Also accepts AgentCore ``Authorization: VaultAgent …`` credentials signed with
 ``vault-agent-token`` (runtime is denied session-signing-key).
@@ -14,6 +14,9 @@ import urllib.parse
 import urllib.request
 from urllib.parse import urlparse
 
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -24,6 +27,7 @@ logger = logging.getLogger("routes_auth")
 router = APIRouter(prefix="/api", tags=["session"])
 
 TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
+_COGNITO_RETRY_CONFIG = Config(retries={"max_attempts": 5, "mode": "adaptive"})
 
 
 class SessionRequest(BaseModel):
@@ -34,6 +38,18 @@ class SessionRequest(BaseModel):
     access_token: str | None = Field(
         default=None,
         description="Google OAuth access token",
+    )
+    username: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description="Cognito username",
+    )
+    password: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Cognito password",
     )
     user_id: str | None = Field(
         default=None,
@@ -50,10 +66,24 @@ class SessionResponse(BaseModel):
 
 
 class PublicConfigResponse(BaseModel):
+    auth_mode: str = "google"
     google_client_id: str
     local_auth_bypass: bool
     sharing_url: str
     project_name: str = "ob-note"
+    cognito_admin_username: str = ""
+
+
+def _auth_mode() -> str:
+    cfg = utils.load_config()
+    mode = (cfg.get("auth_mode") or "").strip().lower()
+    if mode in {"google", "cognito"}:
+        return mode
+    if (cfg.get("cognito_user_pool_id") or "").strip() and not (
+        cfg.get("google_client_id") or ""
+    ).strip():
+        return "cognito"
+    return "google"
 
 
 def _google_client_id() -> str:
@@ -62,6 +92,85 @@ def _google_client_id() -> str:
     if not client_id:
         raise HTTPException(status_code=500, detail="google_client_id is not configured")
     return client_id
+
+
+def _cognito_settings() -> tuple[str, str, str]:
+    cfg = utils.load_config()
+    user_pool_id = (cfg.get("cognito_user_pool_id") or "").strip()
+    client_id = (cfg.get("cognito_client_id") or "").strip()
+    cognito_region = (
+        cfg.get("cognito_region") or cfg.get("region") or "us-west-2"
+    ).strip()
+    if not user_pool_id or not client_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Cognito is not configured. Run installer.py to create the User Pool.",
+        )
+    return user_pool_id, client_id, cognito_region
+
+
+def _authenticate_with_cognito(username: str, password: str) -> str:
+    """Authenticate with Cognito and return the verified Username."""
+    _user_pool_id, client_id, cognito_region = _cognito_settings()
+    client = boto3.client(
+        "cognito-idp",
+        region_name=cognito_region,
+        config=_COGNITO_RETRY_CONFIG,
+    )
+    try:
+        response = client.initiate_auth(
+            ClientId=client_id,
+            AuthFlow="USER_PASSWORD_AUTH",
+            AuthParameters={
+                "USERNAME": username,
+                "PASSWORD": password,
+            },
+        )
+    except ClientError as e:
+        err = e.response.get("Error", {}) or {}
+        code = err.get("Code", "") or ""
+        cognito_message = err.get("Message", "") or ""
+        logger.warning(
+            "Cognito auth failed for %s: %s (%s)",
+            username,
+            code,
+            cognito_message or type(e).__name__,
+        )
+        if code in (
+            "NotAuthorizedException",
+            "UserNotFoundException",
+            "UserNotConfirmedException",
+            "PasswordResetRequiredException",
+        ):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        if code == "InvalidParameterException":
+            raise HTTPException(
+                status_code=400, detail="Invalid authentication parameters"
+            )
+        raise HTTPException(status_code=502, detail="Authentication service error")
+
+    challenge = response.get("ChallengeName")
+    if challenge:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Additional authentication required: {challenge}",
+        )
+    auth_result = response.get("AuthenticationResult") or {}
+    access_token = (auth_result.get("AccessToken") or "").strip()
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    try:
+        user = client.get_user(AccessToken=access_token)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        logger.warning("Cognito GetUser failed after login: %s", code)
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+    verified = (user.get("Username") or "").strip()
+    if not verified:
+        raise HTTPException(status_code=401, detail="Authentication failed")
+    return verified
 
 
 def _env_bypass_flag() -> bool:
@@ -268,10 +377,12 @@ def bind_request_vault_user(request: Request) -> str | None:
 def get_public_config(request: Request) -> PublicConfigResponse:
     cfg = utils.load_config()
     return PublicConfigResponse(
+        auth_mode=_auth_mode(),
         google_client_id=(cfg.get("google_client_id") or "").strip(),
         local_auth_bypass=local_auth_bypass_enabled(request),
         sharing_url=utils.sharing_url(),
         project_name=(cfg.get("projectName") or "ob-note").strip() or "ob-note",
+        cognito_admin_username=(cfg.get("cognito_admin_username") or "").strip(),
     )
 
 
@@ -303,10 +414,22 @@ def get_session(request: Request) -> SessionResponse:
 def set_session(
     request: Request, body: SessionRequest, response: Response
 ) -> SessionResponse:
-    """Create session via Google token, or local bypass user_id."""
+    """Create session via Google token, Cognito credentials, or local bypass."""
     credential = (body.credential or "").strip()
     access_token = (body.access_token or "").strip()
+    username = (body.username or "").strip()
+    password = body.password or ""
     local_user_id = (body.user_id or "").strip()
+
+    if username and password:
+        user_id = _authenticate_with_cognito(username, password)
+        _set_user_cookie(response, request, user_id)
+        _ensure_user_on_login(user_id)
+        return SessionResponse(
+            user_id=user_id,
+            sharing_url=utils.sharing_url(),
+            authenticated=True,
+        )
 
     if credential or access_token:
         try:
@@ -330,7 +453,10 @@ def set_session(
     if not local_auth_bypass_enabled(request):
         raise HTTPException(
             status_code=403,
-            detail="Provide a Google credential, or enable local auth bypass",
+            detail=(
+                "Provide Google credentials, Cognito username/password, "
+                "or enable local auth bypass"
+            ),
         )
     user_id = local_user_id or "local-dev"
     _set_user_cookie(response, request, user_id)

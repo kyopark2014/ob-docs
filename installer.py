@@ -4,12 +4,16 @@
 Creates (idempotent):
   - Infra if missing (S3, secrets, IAM roles, ECS cluster, VPC/ALB, CloudFront)
     via ``shared_infra.py`` (``ob-note`` resource naming)
+  - Auth: Google OAuth (``google_client_id``) or Cognito User Pool + admin
+    (admin password stored in Secrets Manager ``ob-note/cognito-admin-password``)
   - ECR repository
   - ALB target group TG-for-ob-note (port 8502)
   - Listener rule: path /* (+ CloudFront origin header) → ob-note TG
   - ECS task definition + Fargate service on cluster-for-ob-note
 
 ``config.json`` may be missing or partial — installer bootstraps it.
+When ``google_client_id`` is absent, the installer interactively offers
+Google vs Cognito auth.
 
 Usage:
   python installer.py
@@ -17,6 +21,7 @@ Usage:
 
 from __future__ import annotations
 
+import getpass
 import json
 import logging
 import subprocess
@@ -67,6 +72,9 @@ ECR_NAME = f"ecr-for-{PROJECT}"
 CONTAINER_PORT = 8502
 LOG_GROUP = f"/ecs/app-for-{PROJECT}"
 VAULT_AGENT_SECRET = f"{PROJECT}/vault-agent-token"
+COGNITO_ADMIN_PASSWORD_SECRET = f"{PROJECT}/cognito-admin-password"
+COGNITO_CLIENT_NAME = f"{PROJECT}-web-ui"
+COGNITO_ADMIN_USERNAME = "admin"
 
 
 def load_config() -> dict[str, Any]:
@@ -88,6 +96,7 @@ def clients(region: str):
         "sm": boto3.client("secretsmanager", region_name=region),
         "sts": boto3.client("sts", region_name=region),
         "iam": boto3.client("iam"),
+        "cognito_idp": boto3.client("cognito-idp", region_name=region),
         "cloudfront": boto3.client("cloudfront", region_name="us-east-1"),
         "acm": boto3.client("acm", region_name="us-east-1"),
     }
@@ -195,6 +204,335 @@ def ensure_vault_agent_token(sm) -> str:
     )
     logger.info("Created secret %s", VAULT_AGENT_SECRET)
     return resp["ARN"]
+
+
+def _cognito_password_valid(password: str) -> Optional[str]:
+    if len(password) < 8:
+        return "Password must be at least 8 characters"
+    if not any(c.isupper() for c in password):
+        return "Password must include at least one uppercase letter"
+    if not any(c.islower() for c in password):
+        return "Password must include at least one lowercase letter"
+    if not any(c.isdigit() for c in password):
+        return "Password must include at least one number"
+    return None
+
+
+def prompt_auth_choice() -> str:
+    """Ask operator to choose Google or Cognito when neither is configured."""
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "google_client_id is missing and no Cognito pool is configured. "
+            "Set google_client_id in config.json, or run installer interactively "
+            "to choose Google / Cognito auth."
+        )
+    logger.info("")
+    logger.info("Authentication is not configured (no google_client_id).")
+    logger.info("  1) Google OAuth  — provide a Google OAuth client ID")
+    logger.info("  2) Cognito       — create User Pool + admin user")
+    while True:
+        choice = input("Select auth [1=Google / 2=Cognito]: ").strip().lower()
+        if choice in {"1", "g", "google"}:
+            return "google"
+        if choice in {"2", "c", "cognito"}:
+            return "cognito"
+        logger.warning("  Enter 1 (Google) or 2 (Cognito).")
+
+
+def prompt_google_client_id() -> str:
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "google_client_id must be set in config.json for non-interactive runs."
+        )
+    logger.info("")
+    logger.info("Google OAuth client ID")
+    logger.info(
+        "  Create an OAuth 2.0 Web client in Google Cloud Console and paste the client ID."
+    )
+    while True:
+        value = input("Enter google_client_id: ").strip()
+        if value:
+            return value
+        logger.warning("  google_client_id cannot be empty.")
+
+
+def prompt_cognito_admin_password() -> str:
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "Cognito admin password must be entered interactively. "
+            "Run `python installer.py` in a terminal, or store the password in "
+            f"Secrets Manager as `{COGNITO_ADMIN_PASSWORD_SECRET}` first."
+        )
+    logger.info("")
+    logger.info("Cognito admin user registration")
+    logger.info("  Username: %s", COGNITO_ADMIN_USERNAME)
+    logger.info(
+        "  Password policy: min 8 chars, uppercase, lowercase, number "
+        "(symbols optional)"
+    )
+    while True:
+        password = getpass.getpass(
+            f"Enter password for Cognito admin '{COGNITO_ADMIN_USERNAME}': "
+        )
+        error = _cognito_password_valid(password)
+        if error:
+            logger.warning("  %s. Try again.", error)
+            continue
+        confirm = getpass.getpass("Confirm password: ")
+        if password != confirm:
+            logger.warning("  Passwords do not match. Try again.")
+            continue
+        return password
+
+
+def ensure_cognito_admin_password_secret(sm, password: str) -> str:
+    """Store Cognito admin password in Secrets Manager; return secret ARN."""
+    try:
+        arn = sm.describe_secret(SecretId=COGNITO_ADMIN_PASSWORD_SECRET)["ARN"]
+        sm.put_secret_value(
+            SecretId=COGNITO_ADMIN_PASSWORD_SECRET,
+            SecretString=password,
+        )
+        logger.info("Updated secret %s", COGNITO_ADMIN_PASSWORD_SECRET)
+        return arn
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceNotFoundException":
+            raise
+    resp = sm.create_secret(
+        Name=COGNITO_ADMIN_PASSWORD_SECRET,
+        SecretString=password,
+        Description=f"Cognito admin password for {PROJECT} ({COGNITO_ADMIN_USERNAME})",
+        Tags=[
+            {"Key": "Name", "Value": COGNITO_ADMIN_PASSWORD_SECRET},
+            {"Key": "Project", "Value": PROJECT},
+        ],
+    )
+    logger.info("Created secret %s", COGNITO_ADMIN_PASSWORD_SECRET)
+    return resp["ARN"]
+
+
+def _read_cognito_admin_password_secret(sm) -> Optional[str]:
+    try:
+        value = (
+            sm.get_secret_value(SecretId=COGNITO_ADMIN_PASSWORD_SECRET).get(
+                "SecretString"
+            )
+            or ""
+        ).strip()
+        return value or None
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceNotFoundException":
+            raise
+        return None
+
+
+def _get_or_prompt_cognito_admin_password(sm) -> str:
+    existing = _read_cognito_admin_password_secret(sm)
+    if existing:
+        logger.info(
+            "Reusing Cognito admin password from secret %s",
+            COGNITO_ADMIN_PASSWORD_SECRET,
+        )
+        return existing
+    password = prompt_cognito_admin_password()
+    ensure_cognito_admin_password_secret(sm, password)
+    return password
+
+
+def _find_cognito_user_pool_id(cognito_idp, pool_name: str) -> Optional[str]:
+    next_token: Optional[str] = None
+    while True:
+        kwargs: dict[str, Any] = {"MaxResults": 60}
+        if next_token:
+            kwargs["NextToken"] = next_token
+        response = cognito_idp.list_user_pools(**kwargs)
+        for pool in response.get("UserPools") or []:
+            if pool.get("Name") == pool_name:
+                return str(pool["Id"])
+        next_token = response.get("NextToken")
+        if not next_token:
+            return None
+
+
+def _cognito_user_pool_exists(cognito_idp, user_pool_id: str) -> bool:
+    try:
+        cognito_idp.describe_user_pool(UserPoolId=user_pool_id)
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ResourceNotFoundException":
+            return False
+        raise
+
+
+def _resolve_cognito_user_pool_id(
+    cognito_idp, cfg: dict[str, Any], pool_name: str
+) -> Optional[str]:
+    pool_id = (cfg.get("cognito_user_pool_id") or "").strip()
+    if pool_id and _cognito_user_pool_exists(cognito_idp, pool_id):
+        return pool_id
+    return _find_cognito_user_pool_id(cognito_idp, pool_name)
+
+
+def _find_cognito_client_id(
+    cognito_idp, user_pool_id: str, client_name: str
+) -> Optional[str]:
+    next_token: Optional[str] = None
+    while True:
+        kwargs: dict[str, Any] = {"UserPoolId": user_pool_id, "MaxResults": 60}
+        if next_token:
+            kwargs["NextToken"] = next_token
+        response = cognito_idp.list_user_pool_clients(**kwargs)
+        for client in response.get("UserPoolClients") or []:
+            if client.get("ClientName") == client_name:
+                return str(client["ClientId"])
+        next_token = response.get("NextToken")
+        if not next_token:
+            return None
+
+
+def _cognito_admin_exists(cognito_idp, user_pool_id: str, username: str) -> bool:
+    try:
+        cognito_idp.admin_get_user(UserPoolId=user_pool_id, Username=username)
+        return True
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("UserNotFoundException", "ResourceNotFoundException"):
+            return False
+        raise
+
+
+def _create_cognito_admin_user(
+    cognito_idp, user_pool_id: str, username: str, password: str
+) -> None:
+    cognito_idp.admin_create_user(
+        UserPoolId=user_pool_id,
+        Username=username,
+        TemporaryPassword=password,
+        MessageAction="SUPPRESS",
+    )
+    cognito_idp.admin_set_user_password(
+        UserPoolId=user_pool_id,
+        Username=username,
+        Password=password,
+        Permanent=True,
+    )
+
+
+def create_cognito_user_pool(
+    cognito_idp, sm, cfg: dict[str, Any]
+) -> dict[str, str]:
+    """Create or reuse Cognito User Pool + app client + admin user."""
+    region = str(cfg["region"])
+    pool_name = PROJECT
+    logger.info("Cognito User Pool for Web UI authentication")
+
+    user_pool_id = _resolve_cognito_user_pool_id(cognito_idp, cfg, pool_name)
+    if user_pool_id:
+        logger.info("  Reusing Cognito User Pool: %s (name=%s)", user_pool_id, pool_name)
+    else:
+        response = cognito_idp.create_user_pool(
+            PoolName=pool_name,
+            Policies={
+                "PasswordPolicy": {
+                    "MinimumLength": 8,
+                    "RequireUppercase": True,
+                    "RequireLowercase": True,
+                    "RequireNumbers": True,
+                    "RequireSymbols": False,
+                }
+            },
+            MfaConfiguration="OFF",
+            AdminCreateUserConfig={"AllowAdminCreateUserOnly": True},
+            Schema=[
+                {
+                    "Name": "email",
+                    "AttributeDataType": "String",
+                    "Mutable": True,
+                    "Required": False,
+                }
+            ],
+        )
+        user_pool_id = response["UserPool"]["Id"]
+        logger.info("  Created Cognito User Pool: %s (name=%s)", user_pool_id, pool_name)
+
+    client_id = _find_cognito_client_id(cognito_idp, user_pool_id, COGNITO_CLIENT_NAME)
+    if client_id:
+        logger.info("  Reusing Cognito App Client: %s", client_id)
+    else:
+        client_response = cognito_idp.create_user_pool_client(
+            UserPoolId=user_pool_id,
+            ClientName=COGNITO_CLIENT_NAME,
+            GenerateSecret=False,
+            ExplicitAuthFlows=[
+                "ALLOW_USER_PASSWORD_AUTH",
+                "ALLOW_REFRESH_TOKEN_AUTH",
+                "ALLOW_USER_SRP_AUTH",
+            ],
+            PreventUserExistenceErrors="ENABLED",
+        )
+        client_id = client_response["UserPoolClient"]["ClientId"]
+        logger.info("  Created Cognito App Client: %s", client_id)
+
+    if _cognito_admin_exists(cognito_idp, user_pool_id, COGNITO_ADMIN_USERNAME):
+        logger.info("  Cognito admin user already exists: %s", COGNITO_ADMIN_USERNAME)
+        # Keep password in Secrets Manager if an operator provided one previously;
+        # do not prompt again when admin already exists.
+        if not _read_cognito_admin_password_secret(sm):
+            logger.info(
+                "  Secret %s not found (admin already exists — password not re-prompted)",
+                COGNITO_ADMIN_PASSWORD_SECRET,
+            )
+    else:
+        password = _get_or_prompt_cognito_admin_password(sm)
+        _create_cognito_admin_user(
+            cognito_idp, user_pool_id, COGNITO_ADMIN_USERNAME, password
+        )
+        logger.info("  Created Cognito admin user: %s", COGNITO_ADMIN_USERNAME)
+
+    return {
+        "cognito_user_pool_id": user_pool_id,
+        "cognito_user_pool_name": pool_name,
+        "cognito_client_id": client_id,
+        "cognito_client_name": COGNITO_CLIENT_NAME,
+        "cognito_admin_username": COGNITO_ADMIN_USERNAME,
+        "cognito_region": region,
+        "auth_mode": "cognito",
+    }
+
+
+def ensure_auth_config(cfg: dict[str, Any], sm, cognito_idp) -> dict[str, Any]:
+    """Ensure Google or Cognito auth is configured before deploy.
+
+    When ``google_client_id`` is missing and Cognito is not already set up,
+    prompts the operator to choose Google or Cognito.
+    """
+    google_id = (cfg.get("google_client_id") or "").strip()
+    existing_mode = (cfg.get("auth_mode") or "").strip().lower()
+    cognito_pool = (cfg.get("cognito_user_pool_id") or "").strip()
+
+    if google_id:
+        cfg["google_client_id"] = google_id
+        cfg["auth_mode"] = "google"
+        logger.info("Auth: Google OAuth (google_client_id configured)")
+        return cfg
+
+    if existing_mode == "cognito" or cognito_pool:
+        logger.info("Auth: Cognito (reusing existing configuration)")
+        cognito_info = create_cognito_user_pool(cognito_idp, sm, cfg)
+        cfg.update(cognito_info)
+        return cfg
+
+    choice = prompt_auth_choice()
+    if choice == "google":
+        cfg["google_client_id"] = prompt_google_client_id()
+        cfg["auth_mode"] = "google"
+        logger.info("Auth: Google OAuth (client id accepted)")
+        return cfg
+
+    cognito_info = create_cognito_user_pool(cognito_idp, sm, cfg)
+    cfg.update(cognito_info)
+    logger.info("Auth: Cognito (admin password stored in Secrets Manager)")
+    return cfg
 
 
 def ensure_target_group(elbv2, vpc_id: str) -> str:
@@ -500,11 +838,23 @@ def register_task_definition(
         "s3_arn": cfg.get("s3_arn", f"arn:aws:s3:::{cfg['s3_bucket']}"),
         "s3_files_vault_prefix": "vault/",
         "s3_files_vault_mount_path": "/mnt/vault",
+        "auth_mode": (cfg.get("auth_mode") or "").strip().lower()
+        or ("google" if cfg.get("google_client_id") else "cognito"),
         "google_client_id": cfg.get("google_client_id", ""),
         "sharing_url": cfg.get("sharing_url") or "",
         "HARNESS_ARN": cfg.get("HARNESS_ARN") or "",
         "harnessName": cfg.get("harnessName") or "",
     }
+    for key in (
+        "cognito_user_pool_id",
+        "cognito_user_pool_name",
+        "cognito_client_id",
+        "cognito_client_name",
+        "cognito_admin_username",
+        "cognito_region",
+    ):
+        if cfg.get(key):
+            app_config[key] = cfg[key]
     if s3_files_app_data_info:
         apply_app_data_config(app_config, s3_files_app_data_info)
     elif cfg.get("s3_files_app_data_access_point_arn"):
@@ -922,6 +1272,10 @@ def main() -> int:
         )
         cfg["accountId"] = str(ident["Account"])
 
+    logger.info("[0/7] Auth configuration (Google or Cognito)")
+    cfg = ensure_auth_config(cfg, c["sm"], c["cognito_idp"])
+    save_config(cfg)
+
     logger.info("[0/7] Ensure standalone ob-note infra (S3/ALB/CF/secrets)")
     cfg, network, origin_header = ensure_infra_stack(
         cfg=cfg,
@@ -1073,7 +1427,14 @@ def main() -> int:
             s3_files_app_data_info.get("access_point_arn"),
             s3_files_app_data_info.get("mount_path"),
         )
-    if not cfg.get("google_client_id"):
+    if (cfg.get("auth_mode") or "").strip().lower() == "cognito":
+        logger.info(
+            "Cognito login: user=%s pool=%s (password in secret %s)",
+            cfg.get("cognito_admin_username") or COGNITO_ADMIN_USERNAME,
+            cfg.get("cognito_user_pool_id"),
+            COGNITO_ADMIN_PASSWORD_SECRET,
+        )
+    elif not cfg.get("google_client_id"):
         logger.warning(
             "google_client_id is empty — set it in config.json for Google sign-in"
         )

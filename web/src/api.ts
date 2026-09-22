@@ -117,12 +117,22 @@ export const api = {
         body: JSON.stringify({ access_token }),
       },
     ),
+  loginWithCognito: (username: string, password: string) =>
+    request<{ user_id: string; sharing_url: string; authenticated: boolean }>(
+      "/session",
+      {
+        method: "POST",
+        body: JSON.stringify({ username, password }),
+      },
+    ),
   getPublicConfig: () =>
     request<{
+      auth_mode: "google" | "cognito";
       google_client_id: string;
       local_auth_bypass: boolean;
       sharing_url: string;
       project_name: string;
+      cognito_admin_username: string;
     }>("/config"),
   clearSession: () =>
     request<{ ok: boolean }>("/session", { method: "DELETE" }),

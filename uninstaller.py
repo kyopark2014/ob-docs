@@ -55,6 +55,7 @@ TG_NAME = f"TG-for-{PROJECT}"
 ECR_NAME = f"ecr-for-{PROJECT}"
 LOG_GROUP = f"/ecs/app-for-{PROJECT}"
 VAULT_AGENT_SECRET = f"{PROJECT}/vault-agent-token"
+COGNITO_ADMIN_PASSWORD_SECRET = f"{PROJECT}/cognito-admin-password"
 
 
 def setup_logging() -> logging.Logger:
@@ -84,6 +85,7 @@ def clients(region: str) -> dict[str, Any]:
         "sm": boto3.client("secretsmanager", region_name=region),
         "iam": boto3.client("iam"),
         "sts": boto3.client("sts", region_name=region),
+        "cognito_idp": boto3.client("cognito-idp", region_name=region),
         "cloudfront": boto3.client("cloudfront", region_name="us-east-1"),
     }
 
@@ -216,7 +218,12 @@ def delete_ecr_and_logs(ecr, logs) -> None:
 
 def delete_secrets(sm) -> None:
     logger.info("[6/9] Deleting secrets")
-    for name in (VAULT_AGENT_SECRET, ORIGIN_HEADER_SECRET, SESSION_SECRET):
+    for name in (
+        VAULT_AGENT_SECRET,
+        ORIGIN_HEADER_SECRET,
+        SESSION_SECRET,
+        COGNITO_ADMIN_PASSWORD_SECRET,
+    ):
         try:
             sm.delete_secret(SecretId=name, ForceDeleteWithoutRecovery=True)
             logger.info("  ✓ Deleted %s", name)
@@ -225,6 +232,57 @@ def delete_secrets(sm) -> None:
                 logger.warning("  Secret %s: %s", name, e)
             else:
                 logger.info("  Secret not found: %s", name)
+
+
+def _find_cognito_user_pool_id(cognito_idp, pool_name: str) -> Optional[str]:
+    next_token: Optional[str] = None
+    while True:
+        kwargs: dict[str, Any] = {"MaxResults": 60}
+        if next_token:
+            kwargs["NextToken"] = next_token
+        response = cognito_idp.list_user_pools(**kwargs)
+        for pool in response.get("UserPools") or []:
+            if pool.get("Name") == pool_name:
+                return str(pool["Id"])
+        next_token = response.get("NextToken")
+        if not next_token:
+            return None
+
+
+def delete_cognito_user_pool(cognito_idp, cfg: dict[str, Any]) -> None:
+    logger.info("[6.5/9] Deleting Cognito User Pool")
+    pool_name = PROJECT
+    user_pool_id = (cfg.get("cognito_user_pool_id") or "").strip() or None
+    if not user_pool_id:
+        try:
+            user_pool_id = _find_cognito_user_pool_id(cognito_idp, pool_name)
+        except ClientError as e:
+            logger.warning("  Could not list Cognito User Pools: %s", e)
+            return
+    if not user_pool_id:
+        logger.info("  Cognito User Pool not found (name=%s)", pool_name)
+        return
+    try:
+        clients_resp = cognito_idp.list_user_pool_clients(
+            UserPoolId=user_pool_id, MaxResults=60
+        )
+        for client in clients_resp.get("UserPoolClients") or []:
+            client_id = client["ClientId"]
+            try:
+                cognito_idp.delete_user_pool_client(
+                    UserPoolId=user_pool_id, ClientId=client_id
+                )
+                logger.info("  ✓ Deleted Cognito App Client: %s", client_id)
+            except ClientError as e:
+                logger.warning("  Could not delete Cognito App Client %s: %s", client_id, e)
+        cognito_idp.delete_user_pool(UserPoolId=user_pool_id)
+        logger.info("  ✓ Deleted Cognito User Pool: %s (name=%s)", user_pool_id, pool_name)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "ResourceNotFoundException":
+            logger.info("  Cognito User Pool already deleted: %s", user_pool_id)
+        else:
+            logger.warning("  Could not delete Cognito User Pool: %s", e)
 
 
 def empty_s3_prefix(s3, bucket: str, prefix: str) -> int:
@@ -559,7 +617,7 @@ def main() -> int:
     if not args.yes:
         logger.info("")
         logger.info(
-            "Will delete: ECS, TG, /vault rules, ECR, logs, secrets, "
+            "Will delete: ECS, TG, /vault rules, ECR, logs, secrets, Cognito, "
             "CloudFront, ALB/VPC/cluster/IAM%s",
             "" if args.keep_s3 else ", S3 bucket",
         )
@@ -578,6 +636,7 @@ def main() -> int:
         delete_ob_note_target_group(c["elbv2"])
         delete_ecr_and_logs(c["ecr"], c["logs"])
         delete_secrets(c["sm"])
+        delete_cognito_user_pool(c["cognito_idp"], cfg)
         delete_cloudfront(c["cloudfront"])
         logger.info("Deleting S3 Files app-data storage")
         delete_app_data_storage(

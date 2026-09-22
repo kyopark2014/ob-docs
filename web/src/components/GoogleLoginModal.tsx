@@ -2,12 +2,15 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 interface Props {
+  authMode?: "google" | "cognito";
   clientId: string;
   onAccessToken: (accessToken: string) => void;
+  onCognitoLogin?: (username: string, password: string) => void;
   onLocalUserId?: (userId: string) => void;
   localAuthBypass?: boolean;
   error?: string | null;
   projectName?: string | null;
+  cognitoAdminUsername?: string | null;
 }
 
 type TokenClient = {
@@ -102,18 +105,22 @@ function GoogleMark({ className }: { className?: string }) {
 }
 
 export function GoogleLoginModal({
+  authMode = "google",
   clientId,
   onAccessToken,
+  onCognitoLogin,
   onLocalUserId,
   localAuthBypass = false,
   error,
   projectName,
+  cognitoAdminUsername,
 }: Props) {
   const title = (projectName || "ob-note").trim() || "ob-note";
   const tokenClientRef = useRef<TokenClient | null>(null);
   const [scriptError, setScriptError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const showLocalBypass = Boolean(localAuthBypass || isBrowserLocalHost());
+  const isCognito = authMode === "cognito";
 
   const handleTokenResponse = useCallback(
     (response: {
@@ -137,7 +144,7 @@ export function GoogleLoginModal({
   );
 
   useEffect(() => {
-    if (!clientId) return;
+    if (isCognito || !clientId) return;
     let cancelled = false;
 
     (async () => {
@@ -168,7 +175,7 @@ export function GoogleLoginModal({
     return () => {
       cancelled = true;
     };
-  }, [clientId, handleTokenResponse]);
+  }, [clientId, handleTokenResponse, isCognito]);
 
   function handleGoogleClick() {
     setScriptError(null);
@@ -198,17 +205,61 @@ export function GoogleLoginModal({
   }
 
   const displayError = error || scriptError;
+  const loginBusy = busy || displayError === "로그인 중…";
+
+  function handleCognitoSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!onCognitoLogin || loginBusy) return;
+    const form = new FormData(e.currentTarget);
+    const username = String(form.get("username") ?? "").trim();
+    const password = String(form.get("password") ?? "");
+    if (!username || !password) return;
+    onCognitoLogin(username, password);
+  }
 
   const googleButton = (
     <button
       type="button"
       className="auth-google-btn"
       onClick={handleGoogleClick}
-      disabled={busy || !clientId}
+      disabled={loginBusy || !clientId}
     >
       <GoogleMark className="auth-google-mark" />
-      <span>{busy ? "Google 연결 중…" : "Google로 계속하기"}</span>
+      <span>{loginBusy ? "Google 연결 중…" : "Google로 계속하기"}</span>
     </button>
+  );
+
+  const cognitoForm = (
+    <form className="local-auth-bypass" onSubmit={handleCognitoSubmit}>
+      <label className="auth-field" htmlFor="cognito-username">
+        <span className="auth-field-label">ID</span>
+        <input
+          id="cognito-username"
+          name="username"
+          placeholder={cognitoAdminUsername || "admin"}
+          defaultValue={cognitoAdminUsername || "admin"}
+          autoComplete="username"
+          autoFocus
+          required
+          disabled={loginBusy}
+        />
+      </label>
+      <label className="auth-field" htmlFor="cognito-password">
+        <span className="auth-field-label">Password</span>
+        <input
+          id="cognito-password"
+          name="password"
+          type="password"
+          placeholder="비밀번호"
+          autoComplete="current-password"
+          required
+          disabled={loginBusy}
+        />
+      </label>
+      <button type="submit" className="auth-primary-btn" disabled={loginBusy}>
+        {loginBusy ? "로그인 중…" : "로그인"}
+      </button>
+    </form>
   );
 
   return createPortal(
@@ -225,7 +276,34 @@ export function GoogleLoginModal({
           <div className="auth-brand-mark" aria-hidden="true" />
           <h2 id="google-login-title">{title}</h2>
 
-          {showLocalBypass && onLocalUserId ? (
+          {isCognito ? (
+            <>
+              <p className="auth-subtitle">Cognito 계정으로 로그인하세요.</p>
+              {displayError && <p className="modal-error">{displayError}</p>}
+              {cognitoForm}
+              {showLocalBypass && onLocalUserId && (
+                <>
+                  <div className="google-login-divider">
+                    <span>또는</span>
+                  </div>
+                  <form className="local-auth-bypass" onSubmit={handleLocalSubmit}>
+                    <label className="auth-field">
+                      <span className="auth-field-label">User ID (local)</span>
+                      <input
+                        name="user_id"
+                        placeholder="예: user01"
+                        autoComplete="username"
+                        required
+                      />
+                    </label>
+                    <button type="submit" className="auth-primary-btn">
+                      로컬로 시작하기
+                    </button>
+                  </form>
+                </>
+              )}
+            </>
+          ) : showLocalBypass && onLocalUserId ? (
             <>
               <p className="auth-subtitle">시작하려면 User ID를 입력하세요.</p>
               {displayError && <p className="modal-error">{displayError}</p>}

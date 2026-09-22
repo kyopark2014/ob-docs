@@ -343,6 +343,29 @@ def ensure_ecs_roles(iam, account: str, region: str, bucket: str) -> dict[str, s
     _put_role_policy(iam, exec_role, f"ecs-execution-secrets-for-{PROJECT}", secrets_doc)
     _put_role_policy(iam, task_role, f"ecs-task-secrets-for-{PROJECT}", secrets_doc)
 
+    _put_role_policy(
+        iam,
+        task_role,
+        f"ecs-task-cognito-policy-for-{PROJECT}",
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "CognitoUserPasswordAuth",
+                    "Effect": "Allow",
+                    "Action": [
+                        "cognito-idp:InitiateAuth",
+                        "cognito-idp:RespondToAuthChallenge",
+                        "cognito-idp:GetUser",
+                        "cognito-idp:DescribeUserPool",
+                        "cognito-idp:DescribeUserPoolClient",
+                    ],
+                    "Resource": ["*"],
+                }
+            ],
+        },
+    )
+
     return {"task_role_arn": task_arn, "execution_role_arn": exec_arn}
 
 
