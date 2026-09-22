@@ -84,4 +84,4 @@ python create_mcp.py
 ```
 
 ECR + AgentCore Runtime(MCP, IAM SigV4)만 배포합니다 (Gateway 없음).  
-자세한 설정·`mcp.json` 예시는 루트 [README.md ### Vault MCP](../../README.md#vault-mcp)를 보세요.
+자세한 설정·`mcp.json` 예시는 루트 [README.md ### MCP 활용](../../README.md#mcp-활용)을 보세요.

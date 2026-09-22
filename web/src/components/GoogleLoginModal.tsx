@@ -115,7 +115,7 @@ export function GoogleLoginModal({
   projectName,
   cognitoAdminUsername,
 }: Props) {
-  const title = (projectName || "ob-note").trim() || "ob-note";
+  const title = (projectName || "OB Note").trim() || "OB Note";
   const tokenClientRef = useRef<TokenClient | null>(null);
   const [scriptError, setScriptError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

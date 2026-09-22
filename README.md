@@ -237,10 +237,88 @@ UI (Agent 패널)
 
 SSE 이벤트 예: `session`, `token`, `text`, `tool`, `tool_result`, `note_updated`, `done`, `error`.
 
-### Vault MCP
+다른 앱에서 vault를 쓰려면 [외부 공유하기](#외부-공유하기)를 보세요.
 
-Open Agent의 **use-vault skill**과 별도로, 같은 vault API를 **AgentCore Runtime MCP**(Streamable HTTP)로 배포해 다른 앱에서도 쓸 수 있습니다.  
-harness-work의 KB MCP는 **Gateway + Runtime**이지만, ob-note는 **Runtime MCP만** 제공합니다 (Gateway 없음).
+## 외부 공유하기
+
+다른 에이전트·앱이 OB Note vault를 읽고 쓰려면 **SKILL** 또는 **MCP**를 사용합니다.  
+둘 다 같은 vault HTTP API(`https://vault.my-agentic-ai.click/api/…`)를 호출하며, 계정은 `actor_id` / `USER_ID`(email)로 분리됩니다.
+
+| 방식 | 적합한 경우 | 진입점 |
+|---|---|---|
+| **SKILL** | AgentCore / LangGraph 런타임에서 스크립트로 vault 조작 | [my-vaults](https://github.com/kyopark2014/agentic-work/tree/main/runtime_agent/langgraph/skills/my-vaults) |
+| **MCP** | MCP 클라이언트·다른 AgentCore 앱에서 도구로 vault 조작 | [`MCP/use-vault/`](MCP/use-vault/) + [`create_mcp.py`](create_mcp.py) |
+
+인증: Secrets Manager `ob-note/vault-agent-token` (또는 동일 값의 `agentic-work/vault-agent-token`) → `Authorization: VaultAgent …`.
+
+### SKILL 활용
+
+외부 앱용 vault skill은 agentic-work의 **[my-vaults](https://github.com/kyopark2014/agentic-work/tree/main/runtime_agent/langgraph/skills/my-vaults)** 입니다.  
+(ob-note 내부 Open Agent용 `skills/use-vault`와 역할은 같고, 외부 런타임에서는 `my-vaults` 스크립트를 실행합니다.)
+
+```text
+Other app (AgentCore / LangGraph)
+  → skills/my-vaults/scripts/read_vault.py | write_vault.py
+       → https://vault.my-agentic-ai.click/api/…  (VaultAgent HMAC)
+            → vault/{USER_ID}/…
+```
+
+#### 구성
+
+| 경로 | 역할 |
+|------|------|
+| [`SKILL.md`](https://github.com/kyopark2014/agentic-work/blob/main/runtime_agent/langgraph/skills/my-vaults/SKILL.md) | when-to-use, 폴더 규칙, deep link, 트러블슈팅 |
+| `scripts/read_vault.py` | health / tree / list / read / search / graph / backlinks |
+| `scripts/write_vault.py` | write / append / mkdir / rename / delete / rebuild |
+| `scripts/lib_vault.py` | HTTP·인증 헬퍼 (직접 실행하지 않음) |
+
+에이전트 working directory 기준 **전체 경로**로 실행하세요 (`scripts/...`로 줄이지 않음).
+
+#### 환경 변수
+
+| 변수 | 기본 | 설명 |
+| --- | --- | --- |
+| `OB_DOCS_URL` / `VAULT_API_URL` | `https://vault.my-agentic-ai.click` | OB Note base URL |
+| `USER_ID` / `CURRENT_USER_ID` | `local-dev` | vault 소유자 email (프로덕션) |
+| `VAULT_AGENT_TOKEN` | Secrets Manager `ob-note/vault-agent-token` 등 | Agent HMAC |
+
+#### Quick start
+
+```bash
+# 연결 확인
+python skills/my-vaults/scripts/read_vault.py health
+
+# 목록 / 검색 / 읽기
+python skills/my-vaults/scripts/read_vault.py list --prefix AI
+python skills/my-vaults/scripts/read_vault.py search "온톨로지"
+python skills/my-vaults/scripts/read_vault.py read AI/Ontology.md
+
+# 쓰기 (본문은 # 제목으로 시작, YAML frontmatter 금지, 루트 저장 금지)
+python skills/my-vaults/scripts/write_vault.py mkdir Meeting
+python skills/my-vaults/scripts/write_vault.py write Meeting/Sprint-Review.md --content "# Sprint Review\n\n본문"
+```
+
+#### 규칙 요약
+
+- 경로는 vault 상대경로 (`Meeting/Note.md`). path에 email을 넣지 않습니다.
+- 새 노트는 카테고리 폴더 아래만 (`AI/…`, `Meeting/…`). vault 루트에 두지 않습니다.
+- 덮어쓰기 전 `read`, 부분 추가는 `append` 우선.
+- 응답 JSON의 `url`(deep link `/?note=…`)을 사용자에게 path와 함께 전달합니다.
+
+로컬 연동:
+
+```bash
+export OB_DOCS_URL=http://127.0.0.1:8502
+export USER_ID='you@example.com'
+python skills/my-vaults/scripts/read_vault.py list
+```
+
+자세한 폴더 카테고리·트러블슈팅은 [my-vaults SKILL.md](https://github.com/kyopark2014/agentic-work/blob/main/runtime_agent/langgraph/skills/my-vaults/SKILL.md)를 보세요.
+
+### MCP 활용
+
+같은 vault API를 **AgentCore Runtime MCP**(Streamable HTTP)로 배포하면 MCP 도구로 읽고 쓸 수 있습니다.  
+harness-work의 KB MCP는 **Gateway + Runtime**이지만, OB Note는 **Runtime MCP만** 제공합니다 (Gateway 없음).
 
 #### 구성 코드
 
@@ -259,6 +337,15 @@ Other app (SigV4)
             → https://vault…/api/files|search|graph  (VaultAgent HMAC)
                  → vault/{actor_id}/…
 ```
+
+#### 도구
+
+| Tool | 설명 |
+|------|------|
+| `vault_health` / `vault_tree` / `vault_list` / `vault_read` | 조회 |
+| `vault_search` / `vault_graph` / `vault_backlinks` | 검색·그래프 |
+| `vault_write` / `vault_append` / `vault_mkdir` / `vault_rename` / `vault_delete` | 쓰기 |
+| `vault_rebuild` | 그래프 재빌드 |
 
 #### 배포
 
@@ -305,7 +392,8 @@ Runtime 엔드포인트는 **IAM SigV4**입니다. `remote_mcp`처럼 서명 없
 | `auth_service` | `bedrock-agentcore` |
 
 호출 principal에는 `bedrock-agentcore:InvokeAgentRuntime` (해당 Runtime ARN)이 필요합니다.  
-도구 호출 시 **`actor_id`에 vault 소유자 email**을 넘기세요. 로컬 개발만 할 때는 Gateway 없이 `python -m mcp_server_use_vault` → `http://localhost:8000/mcp`도 가능합니다 ([`MCP/use-vault/README.md`](MCP/use-vault/README.md)).
+도구 호출 시 **`actor_id`에 vault 소유자 email**을 넘기세요.  
+로컬 개발만 할 때는 Gateway 없이 `python -m mcp_server_use_vault` → `http://localhost:8000/mcp`도 가능합니다 ([`MCP/use-vault/README.md`](MCP/use-vault/README.md)).
 
 ## 노트 deep link (로그인 필요)
 

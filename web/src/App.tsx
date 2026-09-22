@@ -1935,7 +1935,7 @@ export default function App() {
         authMode={publicConfig?.auth_mode === "cognito" ? "cognito" : "google"}
         clientId={publicConfig?.google_client_id || ""}
         localAuthBypass={Boolean(publicConfig?.local_auth_bypass)}
-        projectName={publicConfig?.project_name || "ob-note"}
+        projectName={publicConfig?.project_name || "OB Note"}
         cognitoAdminUsername={publicConfig?.cognito_admin_username || "admin"}
         error={loginError || (authBusy ? "로그인 중…" : null)}
         onAccessToken={(token) => void handleGoogleAccessToken(token)}

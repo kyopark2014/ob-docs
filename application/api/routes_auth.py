@@ -376,12 +376,13 @@ def bind_request_vault_user(request: Request) -> str | None:
 @router.get("/config", response_model=PublicConfigResponse)
 def get_public_config(request: Request) -> PublicConfigResponse:
     cfg = utils.load_config()
+    raw_project = (cfg.get("projectName") or "ob-note").strip() or "ob-note"
     return PublicConfigResponse(
         auth_mode=_auth_mode(),
         google_client_id=(cfg.get("google_client_id") or "").strip(),
         local_auth_bypass=local_auth_bypass_enabled(request),
         sharing_url=utils.sharing_url(),
-        project_name=(cfg.get("projectName") or "ob-note").strip() or "ob-note",
+        project_name="OB Note" if raw_project == "ob-note" else raw_project,
         cognito_admin_username=(cfg.get("cognito_admin_username") or "").strip(),
     )
 
