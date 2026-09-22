@@ -2854,10 +2854,16 @@ button.agent-loaded-file-open:focus-visible {
   min-height: 24px;
   max-height: 160px;
   overflow-y: auto;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 1.55;
   outline: none;
   padding: 2px 2px 0;
-  font: inherit;
+  font-family: inherit;
+}
+
+.agent-chat-input::placeholder {
+  font-size: 13px;
+  color: var(--text-muted);
 }
 
 .agent-chat-input-toolbar {
