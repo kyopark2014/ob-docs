@@ -835,11 +835,10 @@ def _norm_wiki_key(name: str) -> str:
 
 
 def _slugify_heading(text: str) -> str:
-    """Rough GitHub/Obsidian-style heading slug for cross-note anchors."""
-    s = unicodedata.normalize("NFC", (text or "").strip()).lower()
-    s = re.sub(r"\s+", "-", s)
-    s = re.sub(r"[^\w\u0080-\uffff-]", "", s, flags=re.UNICODE)
-    return s
+    """Heading slug for share anchors — same rules as the public viewer."""
+    from application.viewer_html import slugify_heading
+
+    return slugify_heading(text)
 
 
 def _folder_sibling_map(sibling_names: list[str]) -> dict[str, str]:
@@ -855,11 +854,7 @@ def resolve_folder_share_wiki_target(
     target: str,
     sibling_names: list[str],
 ) -> Optional[str]:
-    """Resolve ``[[target]]`` to a direct sibling ``.md`` basename, or None.
-
-    Only notes listed in ``sibling_names`` (shared folder direct children) can
-    resolve — no vault-wide lookup, so unpublished notes stay private.
-    """
+    """Resolve ``[[target]]`` to a direct sibling ``.md`` basename, or None."""
     raw = (target or "").strip().replace("\\", "/")
     if not raw or ".." in raw.split("/"):
         return None
@@ -873,31 +868,140 @@ def resolve_folder_share_wiki_target(
     return None
 
 
+def folder_sibling_full_path(folder_path: str, basename: str) -> str:
+    folder = (folder_path or "").replace("\\", "/").lstrip("/")
+    name = (basename or "").replace("\\", "/").lstrip("/")
+    return f"{folder}/{name}" if folder else name
+
+
+def is_folder_share_direct_child(folder_path: str, rel_path: str) -> bool:
+    folder = (folder_path or "").replace("\\", "/").lstrip("/")
+    rel = (rel_path or "").replace("\\", "/").lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        return False
+    if not folder:
+        return "/" not in rel and rel.lower().endswith(".md")
+    prefix = folder + "/"
+    if not rel.startswith(prefix):
+        return False
+    rest = rel[len(prefix) :]
+    return bool(rest) and "/" not in rest and rest.lower().endswith(".md")
+
+
+def folder_share_public_path(
+    token: str,
+    rel_path: str,
+    *,
+    folder_path: str,
+) -> str:
+    """``/n/{basename}`` for direct children, else ``/w/{vault-path}``."""
+    rel = (rel_path or "").replace("\\", "/").lstrip("/")
+    if is_folder_share_direct_child(folder_path, rel):
+        return public_folder_note_path(token, Path(rel).name)
+    return public_note_wiki_path(token, rel)
+
+
+def folder_share_allowed_paths(
+    folder_path: str,
+    sibling_names: list[str],
+) -> set[str]:
+    """Direct folder children + one-hop wiki targets from those children only.
+
+    External notes opened via ``/w/`` do not expand the allowed set further, so
+    sharing a folder does not unlock the whole vault through chained hops.
+    """
+    from application import vault_index
+
+    folder = (folder_path or "").replace("\\", "/").lstrip("/")
+    allowed: set[str] = set()
+    for name in sibling_names:
+        full = folder_sibling_full_path(folder, name)
+        allowed.add(full)
+        text = read_vault_text(full) or ""
+        for target in extract_wiki_link_targets(text):
+            try:
+                resolved = vault_index.resolve_link(target, from_path=full)
+            except Exception:
+                resolved = None
+            if not resolved:
+                continue
+            cleaned = resolved.replace("\\", "/").lstrip("/")
+            if not cleaned or ".." in cleaned.split("/"):
+                continue
+            if vault_object_exists(cleaned):
+                allowed.add(cleaned)
+    return allowed
+
+
+def resolve_folder_share_link_target(
+    target: str,
+    *,
+    from_path: str,
+    folder_path: str,
+    sibling_names: list[str],
+    allowed_paths: set[str],
+) -> Optional[str]:
+    """Resolve wiki/md target to a vault path within the folder-share allowed set."""
+    from application import vault_index
+
+    raw = (target or "").strip().replace("\\", "/")
+    if not raw or ".." in raw.split("/"):
+        return None
+    # Prefer same-folder sibling basename first (matches app UX).
+    sib = resolve_folder_share_wiki_target(raw, sibling_names)
+    if sib:
+        full = folder_sibling_full_path(folder_path, sib)
+        if full in allowed_paths:
+            return full
+    by_key = _allowed_path_map(allowed_paths)
+    key = _norm_wiki_key(raw)
+    if key in by_key:
+        return by_key[key]
+    basename = _norm_wiki_key(raw.split("/")[-1])
+    if basename in by_key:
+        return by_key[basename]
+    try:
+        resolved = vault_index.resolve_link(raw, from_path=from_path or None)
+    except Exception:
+        resolved = None
+    if not resolved:
+        return None
+    cleaned = resolved.replace("\\", "/").lstrip("/")
+    if cleaned in allowed_paths:
+        return cleaned
+    return None
+
+
 def rewrite_wiki_links_for_folder_share(
     text: str,
     token: str,
     *,
+    from_path: str,
+    folder_path: str,
     sibling_names: list[str],
+    allowed_paths: set[str],
 ) -> str:
-    """Turn ``[[Note]]`` into markdown links to ``/s/{token}/n/{Note.md}``.
-
-    Targets that do not resolve to a direct shared-folder sibling are left as
-    plain label text (no vault leak via unpublished notes).
-    """
+    """Turn ``[[Note]]`` into ``/n/`` (sibling) or ``/w/`` (one-hop outside) links."""
 
     def repl(match: re.Match[str]) -> str:
-        _embed = match.group(1)
         target = (match.group(2) or "").strip()
         heading = (match.group(3) or "").strip()
         alias = (match.group(4) or "").strip()
         label = alias or target
-        resolved = resolve_folder_share_wiki_target(target, sibling_names)
+        resolved = resolve_folder_share_link_target(
+            target,
+            from_path=from_path,
+            folder_path=folder_path,
+            sibling_names=sibling_names,
+            allowed_paths=allowed_paths,
+        )
         if not resolved:
             return label
-        url = public_folder_note_path(token, resolved)
+        url = folder_share_public_path(
+            token, resolved, folder_path=folder_path
+        )
         if heading:
             url = f"{url}#{_slugify_heading(heading)}"
-        # Fully percent-encoded path — no angle brackets (python-markdown escapes <…>).
         return f"[{label}]({url})"
 
     return _WIKI_LINK_RE.sub(repl, text or "")
@@ -907,9 +1011,12 @@ def rewrite_md_note_links_for_folder_share(
     text: str,
     token: str,
     *,
+    from_path: str,
+    folder_path: str,
     sibling_names: list[str],
+    allowed_paths: set[str],
 ) -> str:
-    """Rewrite relative ``[label](Sibling.md)`` links to folder-share URLs."""
+    """Rewrite relative ``[label](Note.md)`` links within the folder-share allowed set."""
 
     def repl(match: re.Match[str]) -> str:
         label = match.group(1)
@@ -929,17 +1036,24 @@ def rewrite_md_note_links_for_folder_share(
         ):
             return match.group(0)
         path_only = inner.split("#", 1)[0].strip()
-        resolved = resolve_folder_share_wiki_target(path_only, sibling_names)
+        resolved = resolve_folder_share_link_target(
+            path_only,
+            from_path=from_path,
+            folder_path=folder_path,
+            sibling_names=sibling_names,
+            allowed_paths=allowed_paths,
+        )
         if not resolved:
             return match.group(0)
-        url = public_folder_note_path(token, resolved)
+        url = folder_share_public_path(
+            token, resolved, folder_path=folder_path
+        )
         if "#" in inner:
             frag = inner.split("#", 1)[1]
             if frag:
                 url = f"{url}#{_slugify_heading(frag)}"
         return f"[{label}]({url})"
 
-    # Skip images (![...]) — only regular links
     return re.sub(
         r"(?<!!)\[([^\]]*)\]\(([^)\n]+)\)",
         repl,
@@ -951,17 +1065,29 @@ def prepare_folder_share_note_markdown(
     text: str,
     token: str,
     *,
-    note_name: str,
+    note_path: str,
+    folder_path: str,
     sibling_names: list[str],
+    allowed_paths: set[str],
 ) -> str:
-    """Wiki + relative note links + image assets for a folder-share note view."""
+    """Wiki (siblings + one-hop) + assets for a folder-share note view."""
     out = rewrite_wiki_links_for_folder_share(
-        text, token, sibling_names=sibling_names
+        text,
+        token,
+        from_path=note_path,
+        folder_path=folder_path,
+        sibling_names=sibling_names,
+        allowed_paths=allowed_paths,
     )
     out = rewrite_md_note_links_for_folder_share(
-        out, token, sibling_names=sibling_names
+        out,
+        token,
+        from_path=note_path,
+        folder_path=folder_path,
+        sibling_names=sibling_names,
+        allowed_paths=allowed_paths,
     )
-    out = rewrite_md_assets_for_share(out, token, note_name=note_name)
+    out = rewrite_md_assets_for_note_share(out, token, doc_path=note_path)
     return out
 
 

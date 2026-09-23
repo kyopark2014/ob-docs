@@ -4,6 +4,124 @@ from __future__ import annotations
 
 import html
 import re
+import unicodedata
+from typing import Callable
+
+
+def slugify_heading(text: str) -> str:
+    """Match web ``slugifyHeading`` (Unicode letters/numbers/marks + hyphen)."""
+    s = unicodedata.normalize("NFC", (text or "").strip()).lower()
+    s = re.sub(r"\s+", "-", s)
+    out: list[str] = []
+    for ch in s:
+        if ch == "-":
+            out.append(ch)
+            continue
+        cat = unicodedata.category(ch)
+        if cat.startswith("L") or cat.startswith("N") or cat in {"Mn", "Mc", "Me"}:
+            out.append(ch)
+    return "".join(out) or "section"
+
+
+def _unique_slugger() -> Callable[[str], str]:
+    counts: dict[str, int] = {}
+
+    def slug(text: str) -> str:
+        base = slugify_heading(text) or "section"
+        n = counts.get(base, 0)
+        counts[base] = n + 1
+        return base if n == 0 else f"{base}-{n}"
+
+    return slug
+
+
+def _strip_md_inline(text: str) -> str:
+    t = text or ""
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)
+    t = re.sub(r"`([^`]+)`", r"\1", t)
+    t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", t)
+    return t.strip()
+
+
+_TOC_TITLE_RE = re.compile(
+    r"^(목차|contents|table of contents|toc)$",
+    re.IGNORECASE,
+)
+
+
+def linkify_toc_in_markdown(text: str) -> str:
+    """Turn plain TOC list items into ``[Heading](#slug)`` when they match a heading."""
+    lines = (text or "").splitlines()
+    headings: list[str] = []
+    for line in lines:
+        m = re.match(r"^(#{1,6})\s+(.+)$", line.strip())
+        if m:
+            headings.append(_strip_md_inline(m.group(2)))
+
+    heading_by_key: dict[str, str] = {}
+    for h in headings:
+        key = unicodedata.normalize("NFC", h.strip().lower())
+        heading_by_key.setdefault(key, h)
+
+    out: list[str] = []
+    in_toc = False
+    toc_level = 0
+    for line in lines:
+        stripped = line.strip()
+        hm = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if hm:
+            level = len(hm.group(1))
+            title = _strip_md_inline(hm.group(2))
+            if _TOC_TITLE_RE.match(title):
+                in_toc = True
+                toc_level = level
+            elif in_toc and level <= toc_level:
+                in_toc = False
+            out.append(line)
+            continue
+
+        if in_toc:
+            lm = re.match(r"^([ \t]*(?:[-*+]|\d+\.))(\s+)(.*)$", line)
+            if lm:
+                bullet, sp, item = lm.group(1), lm.group(2), lm.group(3).strip()
+                if (
+                    re.match(r"^\[.+\]\([^)]+\)$", item)
+                    or item.startswith("[[")
+                    or item.startswith("http://")
+                    or item.startswith("https://")
+                ):
+                    out.append(line)
+                    continue
+                key = unicodedata.normalize("NFC", _strip_md_inline(item).lower())
+                if key in heading_by_key:
+                    slug = slugify_heading(heading_by_key[key])
+                    out.append(f"{bullet}{sp}[{item}](#{slug})")
+                    continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def add_heading_ids(html_body: str) -> str:
+    """Add unique ``id`` attributes to ``h1``–``h6`` (skip if already present)."""
+    slugger = _unique_slugger()
+
+    def repl(match: re.Match[str]) -> str:
+        level = match.group(1)
+        attrs = match.group(2) or ""
+        inner = match.group(3)
+        if re.search(r"\bid\s*=", attrs, flags=re.I):
+            return match.group(0)
+        plain = re.sub(r"<[^>]+>", "", inner)
+        plain = html.unescape(plain).strip()
+        sid = html.escape(slugger(plain), quote=True)
+        return f"<h{level} id=\"{sid}\"{attrs}>{inner}</h{level}>"
+
+    return re.sub(
+        r"<h([1-6])(\s[^>]*)?>(.*?)</h\1>",
+        repl,
+        html_body or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
 
 def _simple_markdown_to_html(text: str) -> str:
@@ -12,11 +130,11 @@ def _simple_markdown_to_html(text: str) -> str:
     out: list[str] = []
     in_code = False
     in_ul = False
+    slugger = _unique_slugger()
 
     def inline_format(line: str) -> str:
         rendered = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
         rendered = re.sub(r"`([^`]+)`", r"<code>\1</code>", rendered)
-        # Images then links (destinations already html-escaped from source).
         rendered = re.sub(
             r"!\[([^\]]*)\]\(([^)\n]+)\)",
             r'<img src="\2" alt="\1" />',
@@ -50,7 +168,10 @@ def _simple_markdown_to_html(text: str) -> str:
                 out.append("</ul>")
                 in_ul = False
             level = len(heading.group(1))
-            out.append(f"<h{level}>{inline_format(heading.group(2))}</h{level}>")
+            inner = inline_format(heading.group(2))
+            plain = html.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
+            sid = html.escape(slugger(plain), quote=True)
+            out.append(f'<h{level} id="{sid}">{inner}</h{level}>')
             continue
         if re.match(r"^[-*]\s+", line):
             if not in_ul:
@@ -73,16 +194,18 @@ def _simple_markdown_to_html(text: str) -> str:
 
 
 def markdown_to_safe_html(text: str) -> str:
+    prepared = linkify_toc_in_markdown(text or "")
     try:
         import markdown as md_lib  # type: ignore
 
-        return md_lib.markdown(
-            text,
+        body = md_lib.markdown(
+            prepared,
             extensions=["fenced_code", "tables", "nl2br", "sane_lists"],
             output_format="html5",
         )
     except Exception:
-        return _simple_markdown_to_html(text)
+        body = _simple_markdown_to_html(prepared)
+    return add_heading_ids(body)
 
 
 _MARKDOWN_BODY_CSS = """
@@ -92,11 +215,13 @@ _MARKDOWN_BODY_CSS = """
       line-height: 1.6;
       font-size: 15px;
     }
-    .markdown-body h1, .markdown-body h2, .markdown-body h3 {
+    .markdown-body h1, .markdown-body h2, .markdown-body h3,
+    .markdown-body h4, .markdown-body h5, .markdown-body h6 {
       margin: 1.2em 0 0.5em;
       font-weight: 650;
       border-bottom: 1px solid #30363d;
       padding-bottom: 0.3em;
+      scroll-margin-top: 64px;
     }
     .markdown-body p { margin: 0.75em 0; }
     .markdown-body ul, .markdown-body ol { padding-left: 1.5em; }
@@ -135,6 +260,12 @@ _MARKDOWN_BODY_CSS = """
       text-align: left;
     }
     .markdown-body a { color: #58a6ff; }
+    .markdown-body a[href^="#"] {
+      text-decoration: none;
+    }
+    .markdown-body a[href^="#"]:hover {
+      text-decoration: underline;
+    }
     .markdown-body blockquote {
       margin: 0.75em 0;
       padding: 0 1em;

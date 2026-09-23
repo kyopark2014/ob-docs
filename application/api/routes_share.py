@@ -187,43 +187,62 @@ def view_share(token: str) -> HTMLResponse:
 
 
 @public_router.get("/{token}/w/{note_path:path}")
-def view_note_share_wiki(token: str, note_path: str) -> HTMLResponse:
-    """Render a wiki-linked note under a single-note share (one-hop from root only)."""
+def view_share_wiki_note(token: str, note_path: str) -> HTMLResponse:
+    """Render a one-hop wiki-linked note under a note or folder share token."""
     entry = vault_share.get_share(token, refresh=True)
     if not entry:
         raise HTTPException(status_code=404, detail="Share not found")
-    if vault_share.share_entry_type(entry) != "note":
-        raise HTTPException(status_code=404, detail="Not a note share")
     owner = entry.get("user_id")
     if not owner:
         raise HTTPException(status_code=404, detail="Share not found")
-    root_path = (entry.get("path") or "").replace("\\", "/").lstrip("/")
+    share_path = (entry.get("path") or "").replace("\\", "/").lstrip("/")
+    share_type = vault_share.share_entry_type(entry)
     decoded = unquote(note_path or "").replace("\\", "/").lstrip("/")
     if not decoded or ".." in decoded.split("/"):
         raise HTTPException(status_code=404, detail="Shared note not found")
+
     with vault_backend.user_scope(owner):
-        root_text = vault_share.read_vault_text(root_path)
-        if root_text is None:
-            raise HTTPException(status_code=404, detail="Shared note no longer exists")
-        allowed = vault_share.note_share_allowed_paths(root_path, root_text)
-        if not vault_share.is_path_in_note_share_allowed(decoded, allowed):
-            raise HTTPException(status_code=404, detail="Shared note not found")
-        text = vault_share.read_vault_text(decoded)
-        if text is None:
-            raise HTTPException(status_code=404, detail="Shared note not found")
-        text = vault_share.prepare_note_share_markdown(
-            text,
-            token,
-            note_path=decoded,
-            root_path=root_path,
-            allowed_paths=allowed,
-        )
-    root_title = entry.get("title") or Path(root_path).stem
+        if share_type == "folder":
+            siblings = vault_share.list_folder_share_notes(share_path)
+            allowed = vault_share.folder_share_allowed_paths(share_path, siblings)
+            if not vault_share.is_path_in_note_share_allowed(decoded, allowed):
+                raise HTTPException(status_code=404, detail="Shared note not found")
+            text = vault_share.read_vault_text(decoded)
+            if text is None:
+                raise HTTPException(status_code=404, detail="Shared note not found")
+            text = vault_share.prepare_folder_share_note_markdown(
+                text,
+                token,
+                note_path=decoded,
+                folder_path=share_path,
+                sibling_names=siblings,
+                allowed_paths=allowed,
+            )
+            back_title = entry.get("title") or Path(share_path).name
+        else:
+            root_text = vault_share.read_vault_text(share_path)
+            if root_text is None:
+                raise HTTPException(status_code=404, detail="Shared note no longer exists")
+            allowed = vault_share.note_share_allowed_paths(share_path, root_text)
+            if not vault_share.is_path_in_note_share_allowed(decoded, allowed):
+                raise HTTPException(status_code=404, detail="Shared note not found")
+            text = vault_share.read_vault_text(decoded)
+            if text is None:
+                raise HTTPException(status_code=404, detail="Shared note not found")
+            text = vault_share.prepare_note_share_markdown(
+                text,
+                token,
+                note_path=decoded,
+                root_path=share_path,
+                allowed_paths=allowed,
+            )
+            back_title = entry.get("title") or Path(share_path).stem
+
     note_title = Path(decoded).stem
     back = vault_share.public_share_path(token)
     topbar = (
         f'<a class="action" href="{html.escape(back, quote=True)}">'
-        f"← {html.escape(root_title)}</a>"
+        f"← {html.escape(back_title)}</a>"
         '<span style="color:#8b949e;font-size:12px">Public share</span>'
     )
     page = viewer_html.build_markdown_viewer_page(
@@ -236,7 +255,7 @@ def view_note_share_wiki(token: str, note_path: str) -> HTMLResponse:
 
 @public_router.get("/{token}/n/{name}")
 def view_folder_share_note(token: str, name: str) -> HTMLResponse:
-    """Render a direct .md under a folder share (folder-scoped URL only)."""
+    """Render a direct .md under a folder share (siblings + one-hop wiki links)."""
     entry = vault_share.get_share(token, refresh=True)
     if not entry:
         raise HTTPException(status_code=404, detail="Share not found")
@@ -254,13 +273,15 @@ def view_folder_share_note(token: str, name: str) -> HTMLResponse:
         text = vault_share.read_vault_text(note_path)
         if text is None:
             raise HTTPException(status_code=404, detail="Shared note not found")
-        basename = Path(note_path).name
         siblings = vault_share.list_folder_share_notes(folder_path)
+        allowed = vault_share.folder_share_allowed_paths(folder_path, siblings)
         text = vault_share.prepare_folder_share_note_markdown(
             text,
             token,
-            note_name=basename,
+            note_path=note_path,
+            folder_path=folder_path,
             sibling_names=siblings,
+            allowed_paths=allowed,
         )
     folder_title = entry.get("title") or Path(folder_path).name
     note_title = Path(note_path).stem
@@ -299,11 +320,19 @@ def share_raw_asset(
     }
     with vault_backend.user_scope(owner):
         if share_type == "folder":
-            if not note:
-                raise HTTPException(status_code=400, detail="note query required")
-            note_path = vault_share.resolve_folder_note(share_path, unquote(note))
-            if not note_path:
-                raise HTTPException(status_code=404, detail="Shared note not found")
+            siblings = vault_share.list_folder_share_notes(share_path)
+            allowed = vault_share.folder_share_allowed_paths(share_path, siblings)
+            if doc:
+                doc_path = unquote(doc).replace("\\", "/").lstrip("/")
+                if not vault_share.is_path_in_note_share_allowed(doc_path, allowed):
+                    raise HTTPException(status_code=404, detail="Asset not found")
+                note_path = doc_path
+            elif note:
+                note_path = vault_share.resolve_folder_note(share_path, unquote(note))
+                if not note_path:
+                    raise HTTPException(status_code=404, detail="Shared note not found")
+            else:
+                raise HTTPException(status_code=400, detail="note or doc query required")
         else:
             if doc:
                 doc_path = unquote(doc).replace("\\", "/").lstrip("/")
@@ -315,8 +344,10 @@ def share_raw_asset(
             else:
                 note_path = share_path
         rel = _share_asset_rel(note_path, path)
-        if share_type == "folder" and not vault_share.path_under_folder(share_path, rel):
-            raise HTTPException(status_code=404, detail="Asset not found")
+        if share_type == "folder":
+            # Assets must stay under the note's directory; for out-of-folder
+            # one-hop notes that is the linked note's folder, not the share root.
+            pass
         try:
             target = vault_backend.resolve_vault_path(rel)
             if target.is_file():
