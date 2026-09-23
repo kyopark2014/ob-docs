@@ -427,13 +427,18 @@ https://vault.my-agentic-ai.click/?note=Meeting/Sprint-Review.md
 
 1. 노트 또는 폴더 우클릭 → **Share public link** → 새 탭에서 공개 페이지 오픈
 2. Settings → **Shared List** → 제목 · 종류(Note/Folder) · 공유 시각 · URL 목록, **Link**(열기) / **삭제**
+3. Settings → **Share permission** → 폴더 공유 위키 범위: Current / 1-hop(기본) / Shared folder / Entire vault
 
 **폴더 공유**
 
 - 폴더당 토큰 하나. 방문 시 해당 폴더의 **직속 `.md`만** 동적으로 나열합니다 (하위 폴더는 포함하지 않음).
 - 목록의 노트는 `/s/{token}/n/{Note.md}` 로만 열리며, 노트별 독립 public 토큰은 만들지 않습니다.
 - 폴더 토큰을 삭제하면 인덱스·노트·asset URL이 모두 무효화됩니다.
-- 노트 본문의 `[[위키링크]]` 는 폴더 **직속 노트**뿐 아니라, 그 노트들이 직접 가리키는 문서(1-hop, 상위/다른 폴더 포함)도 `/s/{token}/w/…` 로 엽니다. 인덱스 목록은 직속만이며, 외부 노트의 추가 hop은 열리지 않습니다.
+- 노트 본문의 `[[위키링크]]` 는 Settings → **Share permission** 에 따라 공개 범위가 정해집니다 (기본값 **1-hop**).
+  - **Current**: 공유 폴더 **직속 `.md`** 끼리만
+  - **1-hop**: 직속 노트 + 그 노트들이 **직접** 가리키는 문서(`/s/{token}/w/…`, 상위·다른 폴더 포함). 외부 노트의 추가 hop은 열리지 않음
+  - **Shared folder**: 공유 폴더 트리 아래 모든 `.md` (하위 폴더 포함). 인덱스 목록은 여전히 직속만
+  - **Entire vault**: vault 내 임의 노트
 - **단일 노트 공유**에서도 `[[위키링크]]` 가 동작합니다. 공유 노트에서 **직접** 가리키는 노트만 같은 토큰의 `/s/{token}/w/…` 로 열리며, vault 전체는 노출되지 않습니다.
 
 **노트·폴더 삭제·이동**
@@ -456,6 +461,10 @@ POST /api/files/share  { "path": "folder" }           # 폴더
   → {user}/.vault/shares.json 에 token 등록 (type: note|folder)
   → vault/_public/shares_index.json 에 token → user_id 등록
   → { url, url_path, token, title, type, created_at } 반환
+
+GET  /api/files/share/permission
+PUT  /api/files/share/permission  { "permission": "one_hop" }
+  → current | one_hop | folder | vault  (기본 one_hop, shares.json top-level)
 ```
 
 **접속 흐름** (인증 불필요)
@@ -468,6 +477,8 @@ GET /s/{token}
 
 GET /s/{token}/n/{Note.md}   # folder share only
   → {folder}/{Note.md} 를 HTML viewer 로 반환
+
+GET /s/{token}/w/{vault/path.md}  # Share permission 범위 안의 위키 대상
 ```
 
 - 노트 본문 상대 이미지(`![](img.png)`)는 `/s/{token}/raw?path=…` (폴더 공유는 `?note=…&path=…`) 로 다시 쓰여 공개 제공됩니다.

@@ -42,6 +42,71 @@ function preferSameFolder(hits: WikiFile[], fromPath?: string | null): WikiFile 
   return same[0] || hits[0];
 }
 
+const PREFIX_BOUNDARY = new Set([
+  " ",
+  "\t",
+  "(",
+  "-",
+  "—",
+  "–",
+  ":",
+  "|",
+  "/",
+  "[",
+  "]",
+  "·",
+  "•",
+]);
+
+function isPrefixTitleMatch(name: string, key: string): boolean {
+  if (!key || !name || name === key) return false;
+  if (!name.startsWith(key)) return false;
+  return PREFIX_BOUNDARY.has(name[key.length] || "");
+}
+
+function isNumberedCopyStem(stem: string): boolean {
+  return / \d+$/.test(stem || "");
+}
+
+function fileStem(file: WikiFile): string {
+  const base = file.name || file.path.split("/").pop() || "";
+  return base.toLowerCase().endsWith(".md") ? base.slice(0, -3) : base;
+}
+
+function resolvePrefixMatch(
+  key: string,
+  mdFiles: WikiFile[],
+  fromPath?: string | null,
+): string | null {
+  if (!key) return null;
+  let hits = mdFiles.filter((f) => {
+    const stem = normWikiKey(fileStem(f));
+    return isPrefixTitleMatch(stem, key);
+  });
+  if (!hits.length) return null;
+  if (fromPath) {
+    const parent = noteParentDir(fromPath);
+    const same = hits.filter((f) => noteParentDir(f.path) === parent);
+    if (same.length) hits = same;
+  }
+  if (hits.length === 1) return hits[0].path;
+  const nonNumbered = hits.filter((f) => !isNumberedCopyStem(fileStem(f)));
+  if (nonNumbered.length === 1) return nonNumbered[0].path;
+  if (nonNumbered.length > 1) return null;
+  hits = [...hits].sort((a, b) => {
+    const sa = fileStem(a);
+    const sb = fileStem(b);
+    const na = /(\d+)$/.exec(sa)?.[1];
+    const nb = /(\d+)$/.exec(sb)?.[1];
+    const ia = na ? Number(na) : 1e9;
+    const ib = nb ? Number(nb) : 1e9;
+    if (ia !== ib) return ia - ib;
+    if (sa.length !== sb.length) return sa.length - sb.length;
+    return a.path.localeCompare(b.path);
+  });
+  return hits[0]?.path ?? null;
+}
+
 /**
  * Resolve [[target]] to a vault-relative markdown path.
  * Mirrors application.vault_index.resolve_link for the client tree.
@@ -98,12 +163,10 @@ export function resolveWikiTarget(
     }
   }
 
-  // 5. Full-needle stem match (no path) already covered; try title-like path includes last
-  if (!needle.includes("/")) {
-    const includes = mdFiles.filter((f) => pathKey(f.path).includes(needle));
-    if (includes.length === 1) return includes[0].path;
-    const preferred = preferSameFolder(includes, fromPath);
-    if (preferred && normWikiKey(preferred.name) === needle) return preferred.path;
+  // 5. Unique title prefix (short wiki → longer note title)
+  for (const key of needle === basename ? [needle] : [needle, basename]) {
+    const prefixHit = resolvePrefixMatch(key, mdFiles, fromPath);
+    if (prefixHit) return prefixHit;
   }
 
   return null;

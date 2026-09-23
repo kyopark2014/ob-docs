@@ -126,6 +126,30 @@ def delete_share(request: Request, body: DeleteShareBody) -> dict:
     return {"ok": True, "token": body.token}
 
 
+class SharePermissionBody(BaseModel):
+    permission: str = Field(..., min_length=1, max_length=32)
+
+
+@api_router.get("/share/permission")
+def get_share_permission(request: Request) -> dict:
+    """Folder-share wiki scope: current | one_hop | folder | vault."""
+    require_user_id(request)
+    permission = vault_share.get_share_permission()
+    return {
+        "ok": True,
+        "permission": permission,
+        "options": list(vault_share.SHARE_PERMISSIONS),
+        "default": vault_share.DEFAULT_SHARE_PERMISSION,
+    }
+
+
+@api_router.put("/share/permission")
+def put_share_permission(request: Request, body: SharePermissionBody) -> dict:
+    require_user_id(request)
+    permission = vault_share.set_share_permission(body.permission)
+    return {"ok": True, "permission": permission}
+
+
 @public_router.get("/{token}")
 def view_share(token: str) -> HTMLResponse:
     entry = vault_share.get_share(token, refresh=True)
@@ -205,7 +229,7 @@ def view_share_wiki_note(token: str, note_path: str) -> HTMLResponse:
         if share_type == "folder":
             siblings = vault_share.list_folder_share_notes(share_path)
             allowed = vault_share.folder_share_allowed_paths(share_path, siblings)
-            if not vault_share.is_path_in_note_share_allowed(decoded, allowed):
+            if not vault_share.is_share_path_allowed(decoded, allowed):
                 raise HTTPException(status_code=404, detail="Shared note not found")
             text = vault_share.read_vault_text(decoded)
             if text is None:
@@ -324,7 +348,7 @@ def share_raw_asset(
             allowed = vault_share.folder_share_allowed_paths(share_path, siblings)
             if doc:
                 doc_path = unquote(doc).replace("\\", "/").lstrip("/")
-                if not vault_share.is_path_in_note_share_allowed(doc_path, allowed):
+                if not vault_share.is_share_path_allowed(doc_path, allowed):
                     raise HTTPException(status_code=404, detail="Asset not found")
                 note_path = doc_path
             elif note:

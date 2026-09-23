@@ -187,6 +187,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ token }),
     }),
+  getSharePermission: () =>
+    request<{
+      ok: boolean;
+      permission: string;
+      options: string[];
+      default: string;
+    }>("/files/share/permission"),
+  setSharePermission: (permission: string) =>
+    request<{ ok: boolean; permission: string }>("/files/share/permission", {
+      method: "PUT",
+      body: JSON.stringify({ permission }),
+    }),
   deletePath: (path: string) =>
     request<{ ok: boolean }>("/files/delete", {
       method: "POST",

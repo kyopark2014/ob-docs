@@ -97,6 +97,42 @@ import type {
 const THEME_OPTIONS = ["Light", "Dark"] as const;
 const VIEW_OPTIONS = ["Images"] as const;
 const GRAPH_OPTIONS = ["Sync", "Rebuild", "Graph", "Configure"] as const;
+const SHARE_PERMISSION_OPTIONS = [
+  "Current",
+  "1-hop",
+  "Shared folder",
+  "Entire vault",
+] as const;
+
+type SharePermission = "current" | "one_hop" | "folder" | "vault";
+
+function sharePermissionToLabel(permission: SharePermission): string {
+  switch (permission) {
+    case "current":
+      return "Current";
+    case "folder":
+      return "Shared folder";
+    case "vault":
+      return "Entire vault";
+    case "one_hop":
+    default:
+      return "1-hop";
+  }
+}
+
+function labelToSharePermission(label: string): SharePermission {
+  switch (label) {
+    case "Current":
+      return "current";
+    case "Shared folder":
+      return "folder";
+    case "Entire vault":
+      return "vault";
+    case "1-hop":
+    default:
+      return "one_hop";
+  }
+}
 
 function themeToLabel(theme: Theme): string {
   return theme === "light" ? "Light" : "Dark";
@@ -390,6 +426,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
+  const [sharePermissionOpen, setSharePermissionOpen] = useState(false);
+  const [sharePermission, setSharePermission] = useState<SharePermission>("one_hop");
   const [graphMenuOpen, setGraphMenuOpen] = useState(false);
   const [sharedListOpen, setSharedListOpen] = useState(false);
   const [notesGraphOpen, setNotesGraphOpen] = useState(false);
@@ -443,6 +481,7 @@ export default function App() {
   const [pastingImage, setPastingImage] = useState(false);
   const settingsBtnRef = useRef<HTMLButtonElement>(null);
   const appearanceBtnRef = useRef<HTMLButtonElement>(null);
+  const sharePermissionBtnRef = useRef<HTMLButtonElement>(null);
   const viewBtnRef = useRef<HTMLButtonElement>(null);
   const graphBtnRef = useRef<HTMLButtonElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
@@ -618,6 +657,7 @@ export default function App() {
     setSettingsOpen(false);
     setAppearanceOpen(false);
     setViewOpen(false);
+    setSharePermissionOpen(false);
     setGraphMenuOpen(false);
     setSharedListOpen(false);
     try {
@@ -782,12 +822,24 @@ export default function App() {
     if (!settingsOpen) {
       setAppearanceOpen(false);
       setViewOpen(false);
+      setSharePermissionOpen(false);
       setGraphMenuOpen(false);
       setModelMenuOpen(false);
       setSettingsFlyoutPos(null);
       return;
     }
     void refreshSyncStatus();
+    void api
+      .getSharePermission()
+      .then((res) => {
+        const p = (res.permission || "one_hop") as SharePermission;
+        if (["current", "one_hop", "folder", "vault"].includes(p)) {
+          setSharePermission(p);
+        }
+      })
+      .catch(() => {
+        /* keep default */
+      });
 
     function updatePos() {
       const btn = settingsBtnRef.current;
@@ -2093,6 +2145,7 @@ export default function App() {
             onClick={() => {
               setAppearanceOpen(false);
               setViewOpen(false);
+              setSharePermissionOpen(false);
               void runVaultSync();
             }}
           >
@@ -2111,12 +2164,29 @@ export default function App() {
             onClick={() => {
               setAppearanceOpen(false);
               setViewOpen(false);
+              setSharePermissionOpen(false);
               setSettingsOpen(false);
               setSharedListOpen(true);
             }}
           >
             <ShareListIcon />
             <span>Shared List</span>
+          </button>
+          <button
+            ref={sharePermissionBtnRef}
+            type="button"
+            className={`rail-settings-btn${sharePermissionOpen ? " is-active" : ""}`}
+            aria-expanded={sharePermissionOpen}
+            aria-haspopup="dialog"
+            title="Folder share wiki link scope"
+            onClick={() => {
+              setAppearanceOpen(false);
+              setViewOpen(false);
+              setSharePermissionOpen((v) => !v);
+            }}
+          >
+            <ShareListIcon />
+            <span>Share permission ({sharePermissionToLabel(sharePermission)})</span>
           </button>
           <button
             ref={viewBtnRef}
@@ -2126,6 +2196,7 @@ export default function App() {
             aria-haspopup="dialog"
             onClick={() => {
               setAppearanceOpen(false);
+              setSharePermissionOpen(false);
               setViewOpen((v) => !v);
             }}
           >
@@ -2140,6 +2211,7 @@ export default function App() {
             aria-haspopup="dialog"
             onClick={() => {
               setViewOpen(false);
+              setSharePermissionOpen(false);
               setAppearanceOpen((v) => !v);
             }}
           >
@@ -2153,6 +2225,7 @@ export default function App() {
             onClick={() => {
               setAppearanceOpen(false);
               setViewOpen(false);
+              setSharePermissionOpen(false);
               void handleLogout();
             }}
           >
@@ -2231,6 +2304,25 @@ export default function App() {
             if (next[0]) setTheme(labelToTheme(next[0]));
           }}
           onClose={() => setAppearanceOpen(false)}
+        />
+      )}
+      {sharePermissionOpen && (
+        <ConfigDrawer
+          title="Share permission"
+          options={[...SHARE_PERMISSION_OPTIONS]}
+          selected={[sharePermissionToLabel(sharePermission)]}
+          mode="single"
+          anchorEl={sharePermissionBtnRef.current}
+          onChange={(next) => {
+            const label = next[0];
+            if (!label) return;
+            const permission = labelToSharePermission(label);
+            setSharePermission(permission);
+            void api.setSharePermission(permission).catch(() => {
+              /* keep optimistic value; next open reloads */
+            });
+          }}
+          onClose={() => setSharePermissionOpen(false)}
         />
       )}
       {viewOpen && (

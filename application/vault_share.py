@@ -8,6 +8,8 @@ Share ``type``:
   - ``note`` (default / missing): single markdown file at ``path``
   - ``folder``: folder at ``path``; public index lists direct ``.md`` children only;
     notes open under ``/s/{token}/n/{name}`` (no per-note tokens).
+    Wiki scope is controlled by shares.json ``permission``
+    (``current`` | ``one_hop`` | ``folder`` | ``vault``, default ``one_hop``).
 """
 
 from __future__ import annotations
@@ -27,6 +29,10 @@ from application import vault_backend
 _lock = threading.Lock()
 _TOKEN_RE = re.compile(r"^[a-zA-Z0-9_-]{16,64}$")
 _INDEX_NAME = "shares_index.json"
+
+# Folder public-share wiki scope (stored in shares.json top-level ``permission``).
+SHARE_PERMISSIONS = ("current", "one_hop", "folder", "vault")
+DEFAULT_SHARE_PERMISSION = "one_hop"
 
 
 def _shares_path() -> Path:
@@ -129,17 +135,59 @@ def pull_shares_index() -> bool:
 def _load() -> dict[str, Any]:
     path = _shares_path()
     if not path.is_file():
-        return {"shares": {}}
+        return {"shares": {}, "permission": DEFAULT_SHARE_PERMISSION}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return {"shares": {}}
+        return {"shares": {}, "permission": DEFAULT_SHARE_PERMISSION}
     if not isinstance(data, dict):
-        return {"shares": {}}
+        return {"shares": {}, "permission": DEFAULT_SHARE_PERMISSION}
     shares = data.get("shares")
     if not isinstance(shares, dict):
         data["shares"] = {}
     return data
+
+
+def normalize_share_permission(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "current": "current",
+        "direct": "current",
+        "one_hop": "one_hop",
+        "onehop": "one_hop",
+        "1_hop": "one_hop",
+        "1hop": "one_hop",
+        "folder": "folder",
+        "shared_folder": "folder",
+        "vault": "vault",
+        "entire": "vault",
+        "all": "vault",
+    }
+    return aliases.get(raw, DEFAULT_SHARE_PERMISSION)
+
+
+def get_share_permission() -> str:
+    """Return folder-share wiki permission for the current vault user."""
+    with _lock:
+        pull_shares_registry()
+        data = _load()
+    return normalize_share_permission(
+        data.get("permission") or data.get("folder_permission")
+    )
+
+
+def set_share_permission(permission: str) -> str:
+    """Persist folder-share wiki permission (also published with shares.json)."""
+    normalized = normalize_share_permission(permission)
+    if normalized not in SHARE_PERMISSIONS:
+        normalized = DEFAULT_SHARE_PERMISSION
+    with _lock:
+        pull_shares_registry()
+        data = _load()
+        data["permission"] = normalized
+        data.pop("folder_permission", None)
+        _save(data)
+    return normalized
 
 
 def _load_index() -> dict[str, Any]:
@@ -901,24 +949,96 @@ def folder_share_public_path(
     return public_note_wiki_path(token, rel)
 
 
+def list_folder_tree_notes(folder_path: str) -> set[str]:
+    """Vault-relative paths of all ``.md`` files under ``folder_path`` (recursive)."""
+    cleaned = (folder_path or "").replace("\\", "/").lstrip("/")
+    if ".." in cleaned.split("/"):
+        return set()
+    found: set[str] = set()
+    try:
+        root = vault_backend.vault_root()
+        if cleaned:
+            target = vault_backend.resolve_vault_path(cleaned)
+        else:
+            target = root
+        if target.is_dir():
+            for path_item in target.rglob("*.md"):
+                if not path_item.is_file() or path_item.name.startswith("."):
+                    continue
+                try:
+                    rel = path_item.resolve().relative_to(root.resolve()).as_posix()
+                except ValueError:
+                    continue
+                if "/." in f"/{rel}":
+                    continue
+                found.add(rel)
+    except (ValueError, OSError):
+        pass
+
+    bucket, region = vault_backend.s3_bucket_and_region()
+    if bucket:
+        prefix = vault_backend.s3_prefix() + (cleaned + "/" if cleaned else "")
+        try:
+            import boto3
+
+            client = boto3.client("s3", region_name=region)
+            paginator = client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents") or []:
+                    key = str(obj.get("Key") or "")
+                    if not key.startswith(prefix):
+                        continue
+                    rel = key[len(vault_backend.s3_prefix()) :]
+                    if (
+                        not rel
+                        or not rel.lower().endswith(".md")
+                        or "/." in f"/{rel}"
+                        or rel.startswith(".vault/")
+                    ):
+                        continue
+                    found.add(rel)
+        except Exception:
+            pass
+    return found
+
+
 def folder_share_allowed_paths(
     folder_path: str,
     sibling_names: list[str],
-) -> set[str]:
-    """Direct folder children + one-hop wiki targets from those children only.
+    *,
+    permission: Optional[str] = None,
+) -> Optional[set[str]]:
+    """Allowed vault paths for a folder share, or ``None`` = entire vault (``vault`` mode).
 
-    External notes opened via ``/w/`` do not expand the allowed set further, so
-    sharing a folder does not unlock the whole vault through chained hops.
+    Modes:
+      - ``current``: direct children only
+      - ``one_hop``: direct children + wiki targets linked from those children
+      - ``folder``: all ``.md`` under the shared folder tree
+      - ``vault``: any vault note (sentinel ``None``)
     """
     from application import vault_index
 
+    perm = normalize_share_permission(permission or get_share_permission())
     folder = (folder_path or "").replace("\\", "/").lstrip("/")
+
+    if perm == "vault":
+        return None
+
+    if perm == "folder":
+        return list_folder_tree_notes(folder)
+
     allowed: set[str] = set()
     for name in sibling_names:
         full = folder_sibling_full_path(folder, name)
         allowed.add(full)
-        text = read_vault_text(full) or ""
-        for target in extract_wiki_link_targets(text):
+
+    if perm == "current":
+        return allowed
+
+    for name in sibling_names:
+        full = folder_sibling_full_path(folder, name)
+        text_body = read_vault_text(full) or ""
+        for target in extract_wiki_link_targets(text_body):
             try:
                 resolved = vault_index.resolve_link(target, from_path=full)
             except Exception:
@@ -933,13 +1053,26 @@ def folder_share_allowed_paths(
     return allowed
 
 
+def is_share_path_allowed(
+    rel_path: str,
+    allowed_paths: Optional[set[str]],
+) -> bool:
+    """``allowed_paths is None`` means entire-vault mode."""
+    cleaned = (rel_path or "").replace("\\", "/").lstrip("/")
+    if not cleaned or ".." in cleaned.split("/") or not cleaned.lower().endswith(".md"):
+        return False
+    if allowed_paths is None:
+        return vault_object_exists(cleaned)
+    return cleaned in allowed_paths
+
+
 def resolve_folder_share_link_target(
     target: str,
     *,
     from_path: str,
     folder_path: str,
     sibling_names: list[str],
-    allowed_paths: set[str],
+    allowed_paths: Optional[set[str]],
 ) -> Optional[str]:
     """Resolve wiki/md target to a vault path within the folder-share allowed set."""
     from application import vault_index
@@ -947,19 +1080,19 @@ def resolve_folder_share_link_target(
     raw = (target or "").strip().replace("\\", "/")
     if not raw or ".." in raw.split("/"):
         return None
-    # Prefer same-folder sibling basename first (matches app UX).
     sib = resolve_folder_share_wiki_target(raw, sibling_names)
     if sib:
         full = folder_sibling_full_path(folder_path, sib)
-        if full in allowed_paths:
+        if is_share_path_allowed(full, allowed_paths):
             return full
-    by_key = _allowed_path_map(allowed_paths)
-    key = _norm_wiki_key(raw)
-    if key in by_key:
-        return by_key[key]
-    basename = _norm_wiki_key(raw.split("/")[-1])
-    if basename in by_key:
-        return by_key[basename]
+    if allowed_paths is not None:
+        by_key = _allowed_path_map(allowed_paths)
+        key = _norm_wiki_key(raw)
+        if key in by_key:
+            return by_key[key]
+        basename = _norm_wiki_key(raw.split("/")[-1])
+        if basename in by_key:
+            return by_key[basename]
     try:
         resolved = vault_index.resolve_link(raw, from_path=from_path or None)
     except Exception:
@@ -967,7 +1100,7 @@ def resolve_folder_share_link_target(
     if not resolved:
         return None
     cleaned = resolved.replace("\\", "/").lstrip("/")
-    if cleaned in allowed_paths:
+    if is_share_path_allowed(cleaned, allowed_paths):
         return cleaned
     return None
 
@@ -979,9 +1112,9 @@ def rewrite_wiki_links_for_folder_share(
     from_path: str,
     folder_path: str,
     sibling_names: list[str],
-    allowed_paths: set[str],
+    allowed_paths: Optional[set[str]],
 ) -> str:
-    """Turn ``[[Note]]`` into ``/n/`` (sibling) or ``/w/`` (one-hop outside) links."""
+    """Turn ``[[Note]]`` into ``/n/`` (sibling) or ``/w/`` (allowed) links."""
 
     def repl(match: re.Match[str]) -> str:
         target = (match.group(2) or "").strip()
@@ -1014,7 +1147,7 @@ def rewrite_md_note_links_for_folder_share(
     from_path: str,
     folder_path: str,
     sibling_names: list[str],
-    allowed_paths: set[str],
+    allowed_paths: Optional[set[str]],
 ) -> str:
     """Rewrite relative ``[label](Note.md)`` links within the folder-share allowed set."""
 
@@ -1068,9 +1201,9 @@ def prepare_folder_share_note_markdown(
     note_path: str,
     folder_path: str,
     sibling_names: list[str],
-    allowed_paths: set[str],
+    allowed_paths: Optional[set[str]],
 ) -> str:
-    """Wiki (siblings + one-hop) + assets for a folder-share note view."""
+    """Wiki (per share permission) + assets for a folder-share note view."""
     out = rewrite_wiki_links_for_folder_share(
         text,
         token,
@@ -1089,6 +1222,7 @@ def prepare_folder_share_note_markdown(
     )
     out = rewrite_md_assets_for_note_share(out, token, doc_path=note_path)
     return out
+
 
 
 def public_note_wiki_path(token: str, rel_path: str) -> str:

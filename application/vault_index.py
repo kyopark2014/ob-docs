@@ -178,6 +178,70 @@ def _prefer_same_folder(candidates: list[str], from_path: str | None) -> str | N
     return same[0] if same else candidates[0]
 
 
+# Separators that may follow a short wiki title when the real stem is longer
+# (e.g. ``Context Engineering 개요`` → ``…개요 (LangChain)``).
+_PREFIX_BOUNDARY_CHARS = frozenset(" \t(-—–:|/[]·•")
+
+
+def _is_prefix_title_match(name: str, key: str) -> bool:
+    """True when ``name`` starts with ``key`` at a title-like boundary.
+
+    Exact equality is handled by the name map; here we only accept longer titles
+    that continue with whitespace/punctuation (not mid-word, e.g. note↛notebook).
+    """
+    if not key or not name or name == key:
+        return False
+    if not name.startswith(key):
+        return False
+    return name[len(key)] in _PREFIX_BOUNDARY_CHARS
+
+
+def _is_numbered_copy_stem(stem: str) -> bool:
+    """Obsidian-style duplicate filename: ``Note 2``, ``Note 3``, …"""
+    return bool(re.search(r" \d+$", stem or ""))
+
+
+def _resolve_prefix_match(key: str, *, from_path: str | None) -> str | None:
+    """Unique Obsidian-style prefix match on stem / title / alias.
+
+    Ambiguous prefixes (e.g. ``Context Engineering`` → several notes) return
+    ``None``. Numbered copies (``… 2.md``) yield to the unnumbered original.
+    """
+    if not key:
+        return None
+    hits: list[str] = []
+    for rel, meta in _index.items():
+        names = {_norm_key(Path(rel).stem), _norm_key(meta.title)}
+        names.update(_norm_key(a) for a in meta.aliases)
+        if any(_is_prefix_title_match(n, key) for n in names if n):
+            hits.append(rel)
+    if not hits:
+        return None
+    # Prefer notes in the same folder as the source.
+    if from_path:
+        from_parent = Path(from_path).parent
+        same = [p for p in hits if Path(p).parent == from_parent]
+        if same:
+            hits = same
+    if len(hits) == 1:
+        return hits[0]
+    # Drop ``Name 2.md`` / ``Name 3.md`` when an unnumbered sibling exists.
+    non_numbered = [p for p in hits if not _is_numbered_copy_stem(Path(p).stem)]
+    if len(non_numbered) == 1:
+        return non_numbered[0]
+    if len(non_numbered) > 1:
+        return None
+    # Only numbered copies left — pick the lowest number / shortest stem.
+    return sorted(
+        hits,
+        key=lambda p: (
+            int(m.group(1)) if (m := re.search(r" (\d+)$", Path(p).stem)) else 10**9,
+            len(Path(p).stem),
+            p.casefold(),
+        ),
+    )[0]
+
+
 def rebuild_index() -> dict[str, Any]:
     global _built
     root = vault_backend.vault_root()
@@ -266,6 +330,8 @@ def resolve_link(name: str, *, from_path: str | None = None) -> str | None:
     2. Path relative to the source note's folder
     3. Unique path suffix match
     4. Basename / title / alias (prefer same folder when ambiguous)
+    5. Same-folder basename fallback for path-style links
+    6. Unique title prefix (``[[Short]]`` → ``Short (subtitle).md``)
     """
     ensure_index()
     raw = unicodedata.normalize("NFC", (name or "").strip()).replace("\\", "/")
@@ -333,6 +399,15 @@ def resolve_link(name: str, *, from_path: str | None = None) -> str | None:
                 return same
             if len(stem_hits) == 1:
                 return stem_hits[0]
+
+        # 6. Unique prefix on stem / title / alias (short wiki → longer note title)
+        prefix_keys = [key]
+        if basename_key and basename_key != key:
+            prefix_keys.append(basename_key)
+        for pk in prefix_keys:
+            hit = _resolve_prefix_match(pk, from_path=from_path)
+            if hit:
+                return hit
 
         return None
 
