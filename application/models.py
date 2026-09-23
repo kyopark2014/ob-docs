@@ -29,6 +29,7 @@ MODEL_NAMES: list[str] = [
     "OpenAI GPT 5.6 Luna",
     "OpenAI OSS 120B",
     "OpenAI OSS 20B",
+    "Kimi K3",
     "Nova 2 Lite",
     "Nova Premier",
     "Nova Pro",
@@ -123,6 +124,11 @@ _MODEL_PROFILES: dict[str, dict[str, Any]] = {
     "OpenAI OSS 20B": {
         "model_type": "openai",
         "model_id": "openai.gpt-oss-20b-1:0",
+    },
+    "Kimi K3": {
+        "model_type": "kimi",
+        "model_id": "us.moonshotai.kimi-k3",
+        "apiFormat": "chat_completions",
     },
     "Nova 2 Lite": {
         "model_type": "nova",

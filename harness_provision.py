@@ -301,6 +301,14 @@ def create_harness_execution_role(
             ],
         },
         {
+            # Kimi K3 Chat Completions (apiFormat=chat_completions) via
+            # bedrock-runtime …/openai/v1
+            "Sid": "BedrockRuntimeBearerToken",
+            "Effect": "Allow",
+            "Action": ["bedrock:CallWithBearerToken"],
+            "Resource": ["*"],
+        },
+        {
             "Sid": "AgentCoreAccess",
             "Effect": "Allow",
             "Action": ["bedrock-agentcore:*"],
