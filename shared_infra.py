@@ -366,6 +366,34 @@ def ensure_ecs_roles(iam, account: str, region: str, bucket: str) -> dict[str, s
         },
     )
 
+    # Documents Foundation Model Parser calls Bedrock InvokeModel directly
+    # from the ECS task (not via AgentCore Harness).
+    _put_role_policy(
+        iam,
+        task_role,
+        f"ecs-task-bedrock-policy-for-{PROJECT}",
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "InvokeBedrockModels",
+                    "Effect": "Allow",
+                    "Action": [
+                        "bedrock:InvokeModel",
+                        "bedrock:InvokeModelWithResponseStream",
+                        "bedrock:GetInferenceProfile",
+                        "bedrock:GetFoundationModel",
+                    ],
+                    "Resource": [
+                        "arn:aws:bedrock:*::foundation-model/*",
+                        f"arn:aws:bedrock:{region}:{account}:inference-profile/*",
+                        f"arn:aws:bedrock:*:{account}:inference-profile/*",
+                    ],
+                }
+            ],
+        },
+    )
+
     return {"task_role_arn": task_arn, "execution_role_arn": exec_arn}
 
 
