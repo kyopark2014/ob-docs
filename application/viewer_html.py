@@ -12,6 +12,23 @@ def _simple_markdown_to_html(text: str) -> str:
     out: list[str] = []
     in_code = False
     in_ul = False
+
+    def inline_format(line: str) -> str:
+        rendered = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
+        rendered = re.sub(r"`([^`]+)`", r"<code>\1</code>", rendered)
+        # Images then links (destinations already html-escaped from source).
+        rendered = re.sub(
+            r"!\[([^\]]*)\]\(([^)\n]+)\)",
+            r'<img src="\2" alt="\1" />',
+            rendered,
+        )
+        rendered = re.sub(
+            r"\[([^\]]+)\]\(([^)\n]+)\)",
+            r'<a href="\2">\1</a>',
+            rendered,
+        )
+        return rendered
+
     for line in lines:
         if line.strip().startswith("```"):
             if in_code:
@@ -33,13 +50,13 @@ def _simple_markdown_to_html(text: str) -> str:
                 out.append("</ul>")
                 in_ul = False
             level = len(heading.group(1))
-            out.append(f"<h{level}>{heading.group(2)}</h{level}>")
+            out.append(f"<h{level}>{inline_format(heading.group(2))}</h{level}>")
             continue
         if re.match(r"^[-*]\s+", line):
             if not in_ul:
                 out.append("<ul>")
                 in_ul = True
-            out.append(f"<li>{re.sub(r'^[-*]\s+', '', line)}</li>")
+            out.append(f"<li>{inline_format(re.sub(r'^[-*]\s+', '', line))}</li>")
             continue
         if in_ul:
             out.append("</ul>")
@@ -47,9 +64,7 @@ def _simple_markdown_to_html(text: str) -> str:
         if not line.strip():
             out.append("")
             continue
-        rendered = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
-        rendered = re.sub(r"`([^`]+)`", r"<code>\1</code>", rendered)
-        out.append(f"<p>{rendered}</p>")
+        out.append(f"<p>{inline_format(line)}</p>")
     if in_code:
         out.append("</code></pre>")
     if in_ul:
@@ -199,6 +214,130 @@ def build_markdown_viewer_page(
   </div>
   <div class="wrap">
     <article class="markdown-body">{body_inner}</article>
+  </div>
+</body>
+</html>
+"""
+
+
+def build_folder_share_page(
+    folder_title: str,
+    notes: list[dict[str, str]],
+    *,
+    topbar_right_html: str = "",
+) -> str:
+    """Public index listing direct markdown notes under a shared folder.
+
+    ``notes`` items: ``{"name": display stem or filename, "url": "/s/.../n/..."}``.
+    """
+    title = html.escape(folder_title)
+    if notes:
+        items_html = []
+        for note in notes:
+            name = html.escape(note.get("name") or "")
+            href = html.escape(note.get("url") or "", quote=True)
+            items_html.append(
+                f'<li class="share-note-item">'
+                f'<a class="share-note-link" href="{href}">{name}</a>'
+                f"</li>"
+            )
+        list_html = '<ul class="share-note-list">' + "\n".join(items_html) + "</ul>"
+    else:
+        list_html = (
+            '<p class="share-empty">이 폴더에 공유할 마크다운 노트가 없습니다.</p>'
+        )
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title}</title>
+  <style>
+    :root {{ color-scheme: light dark; }}
+    body {{
+      margin: 0;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    }}
+    .topbar {{
+      position: sticky; top: 0; z-index: 2;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 10px 20px;
+      border-bottom: 1px solid #30363d;
+      background: rgba(13, 17, 23, 0.92);
+      backdrop-filter: blur(8px);
+    }}
+    .topbar h1 {{
+      margin: 0; font-size: 14px; font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }}
+    .topbar-actions {{
+      display: flex; align-items: center; gap: 14px; flex-shrink: 0;
+    }}
+    .wrap {{
+      box-sizing: border-box;
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 28px 20px 64px;
+    }}
+    .share-intro {{
+      margin: 0 0 20px;
+      color: #8b949e;
+      font-size: 13px;
+    }}
+    .share-note-list {{
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      overflow: hidden;
+    }}
+    .share-note-item {{
+      border-bottom: 1px solid #30363d;
+    }}
+    .share-note-item:last-child {{ border-bottom: none; }}
+    .share-note-link {{
+      display: block;
+      padding: 14px 16px;
+      color: #58a6ff;
+      text-decoration: none;
+      font-size: 15px;
+      font-weight: 500;
+    }}
+    .share-note-link:hover {{
+      background: rgba(56, 139, 253, 0.08);
+      text-decoration: underline;
+    }}
+    .share-empty {{
+      margin: 0;
+      padding: 24px 16px;
+      color: #8b949e;
+      font-size: 14px;
+      text-align: center;
+      border: 1px dashed #30363d;
+      border-radius: 10px;
+    }}
+    @media (prefers-color-scheme: light) {{
+      body {{ background: #ffffff; color: #1f2328; }}
+      .topbar {{ background: rgba(255,255,255,0.92); border-bottom-color: #d0d7de; }}
+      .share-intro {{ color: #656d76; }}
+      .share-note-list {{ border-color: #d0d7de; }}
+      .share-note-item {{ border-bottom-color: #d0d7de; }}
+      .share-note-link:hover {{ background: rgba(9, 105, 218, 0.06); }}
+      .share-empty {{ color: #656d76; border-color: #d0d7de; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>{title}</h1>
+    <div class="topbar-actions">{topbar_right_html}</div>
+  </div>
+  <div class="wrap">
+    <p class="share-intro">Shared folder — direct notes only</p>
+    {list_html}
   </div>
 </body>
 </html>

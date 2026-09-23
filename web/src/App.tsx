@@ -1736,6 +1736,19 @@ export default function App() {
         }
         return;
       }
+      if (action === "share") {
+        try {
+          const res = await api.createShare(path);
+          const url =
+            res.url && res.url.startsWith("http")
+              ? res.url
+              : `${window.location.origin}${res.url_path}`;
+          window.open(url, "_blank", "noopener,noreferrer");
+        } catch (err) {
+          void showAlert(err instanceof Error ? err.message : String(err), "Share failed");
+        }
+        return;
+      }
       if (action === "rename") {
         setDraftFolder(null);
         setRenamingPath(path);

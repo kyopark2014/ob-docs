@@ -160,7 +160,8 @@ export function SharedListModal({ open, onClose }: Props) {
                 </p>
               ) : (
                 <p className="share-list-muted">
-                  공개 공유 중인 문서가 없습니다. 노트 우클릭 → Share public link로 추가하세요.
+                  공개 공유 중인 항목이 없습니다. 노트 또는 폴더 우클릭 → Share public
+                  link로 추가하세요.
                 </p>
               )
             ) : (
@@ -174,11 +175,13 @@ export function SharedListModal({ open, onClose }: Props) {
                   {shares.map((entry) => {
                     const isDeleting = deletingToken === entry.token;
                     const url = shareAbsoluteUrl(entry);
+                    const kind = entry.type === "folder" ? "Folder" : "Note";
                     return (
                       <li key={entry.token} className="share-doc-list-item">
                         <div className="share-doc-list-meta">
                           <span className="share-doc-list-name" title={entry.title}>
                             {entry.title}
+                            <span className="share-doc-list-kind"> · {kind}</span>
                           </span>
                           <span className="share-doc-list-sub" title={url}>
                             {formatSharedAt(entry.created_at)} · {url}

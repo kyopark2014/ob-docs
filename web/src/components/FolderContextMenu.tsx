@@ -5,6 +5,7 @@ export type FolderMenuAction =
   | "new-note"
   | "new-folder"
   | "duplicate"
+  | "share"
   | "pin"
   | "rename"
   | "delete";
@@ -59,6 +60,7 @@ function folderItems(pinned: boolean): MenuItem[] {
     { action: "new-note", label: "New note" },
     { action: "new-folder", label: "New folder" },
     { action: "duplicate", label: "Duplicate", sepBefore: true },
+    { action: "share", label: "Share public link", sepBefore: true },
     { action: "pin", label: pinned ? "Unpin" : "Pin", sepBefore: true },
     { action: "rename", label: "Rename..." },
     { action: "delete", label: "Delete" },
@@ -108,7 +110,7 @@ export function FolderContextMenu({
   }, [onClose]);
 
   const pad = 8;
-  const approxH = menu.kind === "panel" ? 90 : 290;
+  const approxH = menu.kind === "panel" ? 90 : 320;
   const approxW = 200;
   const left = Math.min(menu.x, window.innerWidth - approxW - pad);
   const top = Math.min(menu.y, window.innerHeight - approxH - pad);

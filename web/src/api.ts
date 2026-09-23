@@ -4,6 +4,7 @@ export type ShareEntry = {
   token: string;
   path: string;
   title: string;
+  type?: "note" | "folder";
   created_at: number;
   url_path: string;
   url?: string;
@@ -171,6 +172,7 @@ export const api = {
       token: string;
       path: string;
       title: string;
+      type?: "note" | "folder";
       created_at?: number;
       url_path: string;
       url?: string;

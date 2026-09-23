@@ -1313,6 +1313,10 @@ def main() -> int:
         s3_bucket_name=str(bucket),
         ecs_sg_id=network.security_groups[0] if network.security_groups else "",
         ecs_task_role_name=ecs_task_role,
+        preferred_file_system_id=str(
+            cfg.get("s3_files_app_data_file_system_id") or ""
+        ).strip(),
+        cleanup_duplicates=True,
     )
     apply_app_data_config(cfg, s3_files_app_data_info)
     save_config(cfg)

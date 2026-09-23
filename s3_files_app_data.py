@@ -217,6 +217,34 @@ class S3FilesAppDataProvisioner:
                 return tag.get("value") or tag.get("Value") or ""
         return item.get("name") or ""
 
+    def _get_file_system_detail(self, file_system_id: str) -> Optional[dict[str, str]]:
+        """Fetch one FS; list APIs often omit ``prefix``, so get is authoritative."""
+        if not file_system_id:
+            return None
+        try:
+            item = self.s3files.get_file_system(fileSystemId=file_system_id)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code in {
+                "ResourceNotFoundException",
+                "FileSystemNotFound",
+                "NotFound",
+                "404",
+            }:
+                return None
+            logger.warning("  get_file_system %s: %s", file_system_id, e)
+            return None
+        fs_id = item.get("fileSystemId") or file_system_id
+        return {
+            "file_system_id": fs_id,
+            "file_system_arn": item.get("fileSystemArn")
+            or f"arn:aws:s3files:{self.region}:{self.account_id}:file-system/{fs_id}",
+            "prefix": self._normalize_prefix(item.get("prefix") or ""),
+            "bucket": item.get("bucket") or "",
+            "name": self._file_system_name_tag(item) or (item.get("name") or ""),
+            "status": (item.get("status") or "").lower(),
+        }
+
     def _find_file_system(
         self, s3_bucket_arn: str, prefix: str, name_tag: str
     ) -> Optional[dict[str, str]]:
@@ -230,15 +258,27 @@ class S3FilesAppDataProvisioner:
                 fs_id = item.get("fileSystemId") or ""
                 if not fs_id:
                     continue
-                item_prefix = self._normalize_prefix(item.get("prefix") or "")
-                if item_prefix != want_prefix:
+                # list_file_systems often returns prefix=None — resolve via get.
+                item_prefix = item.get("prefix")
+                name = self._file_system_name_tag(item) or (item.get("name") or "")
+                if item_prefix is None or item_prefix == "":
+                    detail = self._get_file_system_detail(fs_id)
+                    if not detail:
+                        continue
+                    item_prefix = detail.get("prefix") or ""
+                    name = detail.get("name") or name
+                    arn = detail.get("file_system_arn") or ""
+                else:
+                    item_prefix = self._normalize_prefix(item_prefix)
+                    arn = item.get("fileSystemArn") or ""
+                if self._normalize_prefix(item_prefix) != want_prefix:
                     continue
                 matches.append(
                     {
                         "file_system_id": fs_id,
-                        "file_system_arn": item.get("fileSystemArn", ""),
-                        "prefix": item_prefix,
-                        "name": self._file_system_name_tag(item),
+                        "file_system_arn": arn,
+                        "prefix": self._normalize_prefix(item_prefix),
+                        "name": name,
                     }
                 )
         if not matches:
@@ -264,7 +304,36 @@ class S3FilesAppDataProvisioner:
         *,
         prefix: str,
         name_tag: str,
+        preferred_file_system_id: str = "",
     ) -> dict[str, str]:
+        want_prefix = self._normalize_prefix(prefix)
+        preferred = (preferred_file_system_id or "").strip()
+        if preferred:
+            detail = self._get_file_system_detail(preferred)
+            if (
+                detail
+                and detail.get("status") == "available"
+                and detail.get("bucket") == s3_bucket_arn
+                and (
+                    not detail.get("prefix")
+                    or detail.get("prefix") == want_prefix
+                )
+            ):
+                logger.info(
+                    "  Reusing preferred S3 Files file system: %s (prefix=%s)",
+                    preferred,
+                    detail.get("prefix") or want_prefix,
+                )
+                return {
+                    "file_system_id": detail["file_system_id"],
+                    "file_system_arn": detail["file_system_arn"],
+                    "prefix": detail.get("prefix") or want_prefix,
+                }
+            logger.warning(
+                "  Preferred FS %s not reusable — falling back to search/create",
+                preferred,
+            )
+
         existing = self._find_file_system(s3_bucket_arn, prefix, name_tag)
         if existing and existing.get("file_system_id"):
             logger.info(
@@ -292,6 +361,109 @@ class S3FilesAppDataProvisioner:
             "file_system_arn": resp.get("fileSystemArn", ""),
             "prefix": normalized,
         }
+
+    def cleanup_duplicate_file_systems(
+        self,
+        *,
+        keep_file_system_id: str,
+        s3_bucket_arn: str,
+        prefix: str,
+        name_tag: str,
+    ) -> list[str]:
+        """Delete same-bucket/prefix/name FS duplicates, keeping ``keep_file_system_id``."""
+        keep = (keep_file_system_id or "").strip()
+        if not keep:
+            return []
+        want_prefix = self._normalize_prefix(prefix)
+        deleted: list[str] = []
+        paginator = self.s3files.get_paginator("list_file_systems")
+        candidates: list[str] = []
+        for page in paginator.paginate():
+            for item in page.get("fileSystems", []):
+                if item.get("bucket") != s3_bucket_arn:
+                    continue
+                fs_id = item.get("fileSystemId") or ""
+                if not fs_id or fs_id == keep:
+                    continue
+                name = self._file_system_name_tag(item) or (item.get("name") or "")
+                item_prefix = item.get("prefix")
+                if item_prefix is None or item_prefix == "":
+                    detail = self._get_file_system_detail(fs_id)
+                    if not detail:
+                        continue
+                    item_prefix = detail.get("prefix") or ""
+                    name = detail.get("name") or name
+                if name and name != name_tag:
+                    continue
+                if (
+                    item_prefix
+                    and self._normalize_prefix(item_prefix) != want_prefix
+                ):
+                    continue
+                # Same name tag (or empty name with matching prefix) → orphan duplicate
+                if name == name_tag or (
+                    not name and self._normalize_prefix(item_prefix) == want_prefix
+                ):
+                    candidates.append(fs_id)
+
+        for fs_id in candidates:
+            logger.info("  Cleaning duplicate S3 Files FS %s …", fs_id)
+            try:
+                ap_paginator = self.s3files.get_paginator("list_access_points")
+                for page in ap_paginator.paginate(fileSystemId=fs_id):
+                    for ap in page.get("accessPoints") or []:
+                        ap_id = ap.get("accessPointId")
+                        if not ap_id:
+                            continue
+                        try:
+                            self.s3files.delete_access_point(accessPointId=ap_id)
+                            logger.info("    Deleted access point %s", ap_id)
+                        except ClientError as e:
+                            logger.warning("    delete_access_point %s: %s", ap_id, e)
+                mt_paginator = self.s3files.get_paginator("list_mount_targets")
+                mt_ids: list[str] = []
+                for page in mt_paginator.paginate(fileSystemId=fs_id):
+                    for mt in page.get("mountTargets") or []:
+                        mt_id = mt.get("mountTargetId")
+                        if not mt_id:
+                            continue
+                        mt_ids.append(mt_id)
+                        try:
+                            self.s3files.delete_mount_target(mountTargetId=mt_id)
+                            logger.info("    Deleted mount target %s", mt_id)
+                        except ClientError as e:
+                            logger.warning("    delete_mount_target %s: %s", mt_id, e)
+                # Mount targets must finish deleting before the FS can be removed.
+                deadline = time.time() + 180
+                while time.time() < deadline:
+                    remaining = []
+                    for page in mt_paginator.paginate(fileSystemId=fs_id):
+                        for mt in page.get("mountTargets") or []:
+                            mid = mt.get("mountTargetId")
+                            if mid:
+                                remaining.append(mid)
+                    if not remaining:
+                        break
+                    time.sleep(5)
+                else:
+                    logger.warning(
+                        "  Mount targets still present on %s after wait — skip FS delete",
+                        fs_id,
+                    )
+                    continue
+                time.sleep(2)
+                self.s3files.delete_file_system(fileSystemId=fs_id, forceDelete=True)
+                logger.info("  ✓ Deleted duplicate file system %s", fs_id)
+                deleted.append(fs_id)
+            except ClientError as e:
+                logger.warning("  Could not delete duplicate FS %s: %s", fs_id, e)
+        if deleted:
+            logger.info(
+                "  Removed %d duplicate S3 Files FS(s); kept %s",
+                len(deleted),
+                keep,
+            )
+        return deleted
 
     def _ensure_nfs_access(self, client_sg_id: str, mount_sg_id: str) -> None:
         if not client_sg_id or not mount_sg_id:
@@ -581,13 +753,16 @@ class S3FilesAppDataProvisioner:
         s3_bucket_name: str,
         ecs_sg_id: str = "",
         ecs_task_role_name: str = "",
+        preferred_file_system_id: str = "",
+        cleanup_duplicates: bool = True,
     ) -> dict[str, Any]:
-        """Provision app-data/ S3 Files FS + mount targets for ECS."""
-        logger.info("Creating S3 Files app-data storage (ECS → %s)", APP_DATA_MOUNT_PATH)
+        """Provision or reuse app-data/ S3 Files FS + mount targets for ECS."""
+        logger.info("Ensuring S3 Files app-data storage (ECS → %s)", APP_DATA_MOUNT_PATH)
         if not subnet_ids:
             raise RuntimeError("At least one subnet is required for S3 Files mount targets")
 
         s3_bucket_arn = f"arn:aws:s3:::{s3_bucket_name}"
+        name_tag = f"s3files-app-data-for-{self.project_name}"
         try:
             self.s3.put_object(Bucket=s3_bucket_name, Key=S3_FILES_APP_DATA_PREFIX, Body=b"")
         except ClientError as e:
@@ -598,9 +773,18 @@ class S3FilesAppDataProvisioner:
             s3_bucket_arn,
             sync_role_arn,
             prefix=S3_FILES_APP_DATA_PREFIX,
-            name_tag=f"s3files-app-data-for-{self.project_name}",
+            name_tag=name_tag,
+            preferred_file_system_id=preferred_file_system_id,
         )
         file_system_id = file_system["file_system_id"]
+
+        if cleanup_duplicates:
+            self.cleanup_duplicate_file_systems(
+                keep_file_system_id=file_system_id,
+                s3_bucket_arn=s3_bucket_arn,
+                prefix=S3_FILES_APP_DATA_PREFIX,
+                name_tag=name_tag,
+            )
 
         mount_sg_id = self._get_or_create_mount_sg(
             vpc_id, [ecs_sg_id] if ecs_sg_id else []

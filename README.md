@@ -111,7 +111,7 @@ data/vault/                      # working copy (계정별 하위 폴더)
 | POST | `/api/files/append` | 노트 이어쓰기 |
 | POST | `/api/files/sync` | pending flush 후 S3→로컬 incremental pull |
 | GET | `/api/files/sync` | pending 큐 상태 |
-| POST | `/api/files/share` | 노트 public 공유 링크 생성/재사용 |
+| POST | `/api/files/share` | 노트·폴더 public 공유 링크 생성/재사용 |
 | GET | `/api/files/shares` | 공유 목록 |
 | POST | `/api/files/share/delete` | 공유 토큰 삭제 |
 | GET | `/s/{token}` | **공개** markdown viewer (쿠키 불필요) |
@@ -421,42 +421,56 @@ https://vault.my-agentic-ai.click/?note=Meeting/Sprint-Review.md
 
 ## 노트의 public 공유
 
-로그인된 사용자가 markdown 노트를 **쿠키 없이** 볼 수 있는 CloudFront URL로 공유합니다. 서버가 HTML markdown viewer를 렌더합니다.
+로그인된 사용자가 markdown 노트 또는 **폴더**를 **쿠키 없이** 볼 수 있는 CloudFront URL로 공유합니다. 서버가 HTML viewer를 렌더합니다.
 
 **UI**
 
-1. 노트 우클릭 → **Share public link** → 새 탭에서 공개 페이지 오픈
-2. Settings → **Shared List** → 제목 · 공유 시각 · URL 목록, **Link**(열기) / **삭제**
+1. 노트 또는 폴더 우클릭 → **Share public link** → 새 탭에서 공개 페이지 오픈
+2. Settings → **Shared List** → 제목 · 종류(Note/Folder) · 공유 시각 · URL 목록, **Link**(열기) / **삭제**
 
-**노트 삭제·이동**
+**폴더 공유**
+
+- 폴더당 토큰 하나. 방문 시 해당 폴더의 **직속 `.md`만** 동적으로 나열합니다 (하위 폴더는 포함하지 않음).
+- 목록의 노트는 `/s/{token}/n/{Note.md}` 로만 열리며, 노트별 독립 public 토큰은 만들지 않습니다.
+- 폴더 토큰을 삭제하면 인덱스·노트·asset URL이 모두 무효화됩니다.
+- 노트 본문의 `[[위키링크]]` 는 같은 폴더의 직속 노트로 해석되어 `/s/{token}/n/…` 링크로 연결됩니다 (공유 폴더 밖 노트는 열리지 않음).
+- **단일 노트 공유**에서도 `[[위키링크]]` 가 동작합니다. 공유 노트에서 **직접** 가리키는 노트만 같은 토큰의 `/s/{token}/w/…` 로 열리며, vault 전체는 노출되지 않습니다.
+
+**노트·폴더 삭제·이동**
 
 - 노트(또는 폴더) **삭제** 시 해당 경로의 public share 는 Shared List / `{user}/.vault/shares.json` 과 `_public/shares_index.json` 에서 함께 제거됩니다. 공개 URL은 더 이상 열리지 않습니다.
-- 노트 **이동·이름 변경** 시 share 경로가 새 위치로 갱신되고, 노트 본문도 S3에 다시 올려 CloudFront에서도 이어집니다.
+- 노트·폴더 **이동·이름 변경** 시 share 경로가 새 위치로 갱신되고, 노트 본문도 S3에 다시 올려 CloudFront에서도 이어집니다.
 
 **URL 형식** (`config.json`의 `sharing_url`)
 
 ```text
-https://vault.my-agentic-ai.click/s/{token}
+https://vault.my-agentic-ai.click/s/{token}              # 노트 viewer 또는 폴더 인덱스
+https://vault.my-agentic-ai.click/s/{token}/n/{Note.md}  # 폴더 공유 안의 직속 노트
 ```
 
 **생성 흐름** (인증 필요)
 
 ```text
-POST /api/files/share  { "path": "folder/Note.md" }
-  → {user}/.vault/shares.json 에 token 등록
+POST /api/files/share  { "path": "folder/Note.md" }   # 노트
+POST /api/files/share  { "path": "folder" }           # 폴더
+  → {user}/.vault/shares.json 에 token 등록 (type: note|folder)
   → vault/_public/shares_index.json 에 token → user_id 등록
-  → { url, url_path, token, title, created_at } 반환
+  → { url, url_path, token, title, type, created_at } 반환
 ```
 
 **접속 흐름** (인증 불필요)
 
 ```text
 GET /s/{token}
-  → _public/shares_index.json 에서 token → user_id + path
-  → 해당 계정 vault에서 .md 를 HTML viewer 로 반환
+  → _public/shares_index.json 에서 token → user_id + path (+ type)
+  → type=note  : vault .md → HTML viewer
+  → type=folder: 직속 .md 목록 → 인덱스 HTML
+
+GET /s/{token}/n/{Note.md}   # folder share only
+  → {folder}/{Note.md} 를 HTML viewer 로 반환
 ```
 
-- 본문 상대 이미지(`![](img.png)`)는 `/s/{token}/raw?path=…` 로 다시 쓰여 공개 제공됩니다.
+- 노트 본문 상대 이미지(`![](img.png)`)는 `/s/{token}/raw?path=…` (폴더 공유는 `?note=…&path=…`) 로 다시 쓰여 공개 제공됩니다.
 - SPA catch-all(`/{path}`)은 `api/`, `s/` 를 제외합니다. 공개 URL이 vault 앱 전체가 보이면 **구버전 배포**이거나 롤아웃 전일 수 있습니다.
 
 ## ECS / ALB

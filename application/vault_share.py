@@ -1,8 +1,13 @@
-"""Public share links for vault notes (token → path, no cookie required).
+"""Public share links for vault notes and folders (token → path, no cookie required).
 
 Per-user registry: ``{user}/.vault/shares.json`` (list/create/delete).
 Global index: ``_public/shares_index.json`` (token → user_id + path) so
 anonymous ``/s/{token}`` can resolve the owning vault without scanning users.
+
+Share ``type``:
+  - ``note`` (default / missing): single markdown file at ``path``
+  - ``folder``: folder at ``path``; public index lists direct ``.md`` children only;
+    notes open under ``/s/{token}/n/{name}`` (no per-note tokens).
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ import re
 import secrets
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
@@ -183,17 +189,30 @@ def _save_index(data: dict[str, Any]) -> None:
         pass
 
 
+def share_entry_type(entry: Optional[dict[str, Any]]) -> str:
+    """Return ``note`` or ``folder`` (missing type → note for backward compat)."""
+    if not isinstance(entry, dict):
+        return "note"
+    if entry.get("type") == "folder":
+        return "folder"
+    return "note"
+
+
 def _index_upsert(token: str, entry: dict[str, Any]) -> None:
     user_id = entry.get("user_id") or vault_backend.current_user_id()
     if not user_id:
         return
     index = _load_index()
-    index.setdefault("shares", {})[token] = {
+    payload: dict[str, Any] = {
         "user_id": user_id,
         "path": entry.get("path"),
         "title": entry.get("title"),
         "created_at": entry.get("created_at"),
     }
+    st = share_entry_type(entry)
+    if st == "folder":
+        payload["type"] = "folder"
+    index.setdefault("shares", {})[token] = payload
     _save_index(index)
 
 
@@ -225,11 +244,17 @@ def _index_update_paths(from_path: str, to_path: str, user_id: Optional[str]) ->
         path = (entry.get("path") or "").replace("\\", "/").lstrip("/")
         if path == from_path:
             entry["path"] = to_path
-            entry["title"] = Path(to_path).stem
+            if share_entry_type(entry) == "folder":
+                entry["title"] = Path(to_path).name
+            else:
+                entry["title"] = Path(to_path).stem
             updated += 1
         elif path.startswith(from_path + "/"):
             entry["path"] = to_path + path[len(from_path) :]
-            entry["title"] = Path(entry["path"]).stem
+            if share_entry_type(entry) == "folder":
+                entry["title"] = Path(entry["path"]).name
+            else:
+                entry["title"] = Path(entry["path"]).stem
             updated += 1
     if updated:
         _save_index(index)
@@ -275,53 +300,69 @@ def get_share(token: str, *, refresh: bool = True) -> Optional[dict[str, Any]]:
 
 
 def create_or_get_share(path: str) -> dict[str, Any]:
-    """Create a durable share token for a markdown note (reuse if exists)."""
+    """Create a durable share token for a markdown note or folder (reuse if exists)."""
     cleaned = (path or "").replace("\\", "/").lstrip("/")
-    if not cleaned.lower().endswith(".md"):
-        raise ValueError("Only markdown notes can be shared")
-    target = vault_backend.resolve_vault_path(cleaned)
-    if not target.is_file():
-        raise FileNotFoundError("Note not found")
+    if not cleaned:
+        raise ValueError("Path is required")
+    if ".." in cleaned.split("/"):
+        raise ValueError("Invalid path")
 
     user_id = vault_backend.current_user_id()
     if not user_id:
         raise ValueError("vault user_id is required to create a share")
 
-    title = target.stem
-    try:
-        publish_vault_file_to_s3(cleaned)
-    except Exception:
-        pass
+    if cleaned.lower().endswith(".md"):
+        share_type = "note"
+        target = vault_backend.resolve_vault_path(cleaned)
+        if not target.is_file():
+            raise FileNotFoundError("Note not found")
+        title = target.stem
+        try:
+            publish_vault_file_to_s3(cleaned)
+        except Exception:
+            pass
+    else:
+        share_type = "folder"
+        if not vault_folder_exists(cleaned):
+            raise FileNotFoundError("Folder not found")
+        title = Path(cleaned).name
 
     existing = find_share_by_path(cleaned)
     if existing:
         if "user_id" not in existing:
             existing = {**existing, "user_id": user_id}
+        if share_entry_type(existing) != share_type:
+            existing = {**existing, "type": share_type, "title": title}
         with _lock:
             pull_shares_index()
             _index_upsert(existing["token"], existing)
         return existing
 
     token = secrets.token_urlsafe(18)
-    entry = {
+    entry: dict[str, Any] = {
         "path": cleaned,
         "title": title,
         "created_at": time.time(),
         "user_id": user_id,
+        "type": share_type,
     }
     with _lock:
         data = _load()
         for tok, ent in (data.get("shares") or {}).items():
             if isinstance(ent, dict) and ent.get("path") == cleaned:
                 out = {"token": tok, "user_id": user_id, **ent}
+                if "type" not in out:
+                    out["type"] = share_type
                 pull_shares_index()
                 _index_upsert(tok, out)
                 return out
-        data.setdefault("shares", {})[token] = {
+        stored: dict[str, Any] = {
             "path": cleaned,
             "title": title,
             "created_at": entry["created_at"],
+            "type": share_type,
         }
+        data.setdefault("shares", {})[token] = stored
         _save(data)
         pull_shares_index()
         _index_upsert(token, entry)
@@ -329,7 +370,7 @@ def create_or_get_share(path: str) -> dict[str, Any]:
 
 
 def list_shares() -> list[dict[str, Any]]:
-    """Return share entries newest-first, dropping broken file refs."""
+    """Return share entries newest-first, dropping broken file/folder refs."""
     with _lock:
         pull_shares_registry()
         data = _load()
@@ -343,15 +384,23 @@ def list_shares() -> list[dict[str, Any]]:
             if not path:
                 stale.append(token)
                 continue
-            if not vault_object_exists(path):
-                stale.append(token)
-                continue
-            title = entry.get("title") or Path(path).stem
+            st = share_entry_type(entry)
+            if st == "folder":
+                if not vault_folder_exists(path):
+                    stale.append(token)
+                    continue
+                title = entry.get("title") or Path(path).name
+            else:
+                if not vault_object_exists(path):
+                    stale.append(token)
+                    continue
+                title = entry.get("title") or Path(path).stem
             items.append(
                 {
                     "token": token,
                     "path": path,
                     "title": title,
+                    "type": st,
                     "created_at": float(entry.get("created_at") or 0),
                     "url_path": public_share_path(token),
                     "url": public_share_url(token),
@@ -404,11 +453,17 @@ def rewrite_share_paths(from_path: str, to_path: str) -> int:
             path = (entry.get("path") or "").replace("\\", "/").lstrip("/")
             if path == cleaned_from:
                 entry["path"] = cleaned_to
-                entry["title"] = Path(cleaned_to).stem
+                if share_entry_type(entry) == "folder":
+                    entry["title"] = Path(cleaned_to).name
+                else:
+                    entry["title"] = Path(cleaned_to).stem
                 updated += 1
             elif path.startswith(cleaned_from + "/"):
                 entry["path"] = cleaned_to + path[len(cleaned_from) :]
-                entry["title"] = Path(entry["path"]).stem
+                if share_entry_type(entry) == "folder":
+                    entry["title"] = Path(entry["path"]).name
+                else:
+                    entry["title"] = Path(entry["path"]).stem
                 updated += 1
         if updated:
             _save(data)
@@ -461,6 +516,11 @@ def public_share_path(token: str) -> str:
     return f"/s/{quote(token, safe='')}"
 
 
+def public_folder_note_path(token: str, name: str) -> str:
+    """Public path for a direct note under a folder share."""
+    return f"/s/{quote(token, safe='')}/n/{quote(name, safe='')}"
+
+
 def public_share_url(token: str) -> str:
     """Absolute public URL (CloudFront sharing_url when configured)."""
     from application import utils
@@ -503,6 +563,110 @@ def vault_object_exists(rel_path: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def vault_folder_exists(rel_path: str) -> bool:
+    """True if folder exists locally or has at least one object under its S3 prefix."""
+    cleaned = (rel_path or "").replace("\\", "/").lstrip("/")
+    if not cleaned or ".." in cleaned.split("/"):
+        return False
+    try:
+        target = vault_backend.resolve_vault_path(cleaned)
+        if target.is_dir():
+            return True
+    except ValueError:
+        pass
+    bucket, region = vault_backend.s3_bucket_and_region()
+    if not bucket:
+        return False
+    prefix = vault_backend.s3_prefix() + cleaned + "/"
+    try:
+        import boto3
+
+        resp = boto3.client("s3", region_name=region).list_objects_v2(
+            Bucket=bucket, Prefix=prefix, MaxKeys=1
+        )
+        return bool(resp.get("Contents") or resp.get("CommonPrefixes"))
+    except Exception:
+        return False
+
+
+def _safe_note_basename(name: str) -> Optional[str]:
+    """Return a safe direct .md basename, or None if invalid."""
+    cleaned = (name or "").replace("\\", "/").strip().lstrip("/")
+    if not cleaned or "/" in cleaned or cleaned in {".", ".."} or ".." in cleaned:
+        return None
+    if not cleaned.lower().endswith(".md"):
+        return None
+    if cleaned.startswith("."):
+        return None
+    return cleaned
+
+
+def list_folder_share_notes(folder_path: str) -> list[str]:
+    """Basenames of direct ``.md`` children under ``folder_path`` (not recursive)."""
+    cleaned = (folder_path or "").replace("\\", "/").lstrip("/")
+    if not cleaned or ".." in cleaned.split("/"):
+        return []
+    names: set[str] = set()
+    try:
+        target = vault_backend.resolve_vault_path(cleaned)
+        if target.is_dir():
+            for child in target.iterdir():
+                if (
+                    child.is_file()
+                    and child.suffix.lower() == ".md"
+                    and not child.name.startswith(".")
+                ):
+                    names.add(child.name)
+    except (ValueError, OSError):
+        pass
+
+    bucket, region = vault_backend.s3_bucket_and_region()
+    if bucket:
+        prefix = vault_backend.s3_prefix() + cleaned + "/"
+        try:
+            import boto3
+
+            client = boto3.client("s3", region_name=region)
+            paginator = client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
+                for obj in page.get("Contents") or []:
+                    key = str(obj.get("Key") or "")
+                    if not key.startswith(prefix):
+                        continue
+                    rel = key[len(prefix) :]
+                    if not rel or "/" in rel:
+                        continue
+                    if rel.lower().endswith(".md") and not rel.startswith("."):
+                        names.add(rel)
+        except Exception:
+            pass
+
+    return sorted(names, key=lambda s: s.lower())
+
+
+def resolve_folder_note(folder_path: str, name: str) -> Optional[str]:
+    """Resolve a direct child note under a folder share to a vault-relative path."""
+    basename = _safe_note_basename(name)
+    if not basename:
+        return None
+    folder = (folder_path or "").replace("\\", "/").lstrip("/")
+    if not folder or ".." in folder.split("/"):
+        return None
+    full = f"{folder}/{basename}"
+    if not vault_object_exists(full):
+        return None
+    return full
+
+
+def path_under_folder(folder_path: str, rel_path: str) -> bool:
+    """True if ``rel_path`` is strictly under ``folder_path`` (or equal to a child)."""
+    folder = (folder_path or "").replace("\\", "/").lstrip("/")
+    rel = (rel_path or "").replace("\\", "/").lstrip("/")
+    if not folder or not rel or ".." in rel.split("/"):
+        return False
+    return rel == folder or rel.startswith(folder + "/")
 
 
 def publish_vault_file_to_s3(rel_path: str) -> bool:
@@ -616,7 +780,12 @@ def read_vault_bytes(rel_path: str) -> Optional[bytes]:
         return None
 
 
-def rewrite_md_assets_for_share(text: str, token: str) -> str:
+def rewrite_md_assets_for_share(
+    text: str,
+    token: str,
+    *,
+    note_name: Optional[str] = None,
+) -> str:
     """Point relative markdown images/links at the public share asset endpoint."""
 
     def repl(match: re.Match[str]) -> str:
@@ -637,9 +806,343 @@ def rewrite_md_assets_for_share(text: str, token: str) -> str:
             or inner.startswith("#")
         ):
             return match.group(0)
-        url = f"/s/{quote(token, safe='')}/raw?path={quote(inner, safe='')}"
+        if note_name:
+            url = (
+                f"/s/{quote(token, safe='')}/raw"
+                f"?note={quote(note_name, safe='')}"
+                f"&path={quote(inner, safe='')}"
+            )
+        else:
+            url = f"/s/{quote(token, safe='')}/raw?path={quote(inner, safe='')}"
         if wrapped:
             return f"![{alt}](<{url}>)"
         return f"![{alt}]({url})"
 
     return re.sub(r"!\[([^\]]*)\]\(([^)\n]+)\)", repl, text or "")
+
+
+_WIKI_LINK_RE = re.compile(
+    r"(!)?\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]"
+)
+
+
+def _norm_wiki_key(name: str) -> str:
+    s = (name or "").strip().replace("\\", "/")
+    s = unicodedata.normalize("NFC", s)
+    if s.lower().endswith(".md"):
+        s = s[:-3]
+    return s.lower()
+
+
+def _slugify_heading(text: str) -> str:
+    """Rough GitHub/Obsidian-style heading slug for cross-note anchors."""
+    s = unicodedata.normalize("NFC", (text or "").strip()).lower()
+    s = re.sub(r"\s+", "-", s)
+    s = re.sub(r"[^\w\u0080-\uffff-]", "", s, flags=re.UNICODE)
+    return s
+
+
+def _folder_sibling_map(sibling_names: list[str]) -> dict[str, str]:
+    """Map normalized stem / basename → exact ``Note.md`` filename."""
+    by_key: dict[str, str] = {}
+    for name in sibling_names:
+        by_key[_norm_wiki_key(name)] = name
+        by_key[_norm_wiki_key(Path(name).stem)] = name
+    return by_key
+
+
+def resolve_folder_share_wiki_target(
+    target: str,
+    sibling_names: list[str],
+) -> Optional[str]:
+    """Resolve ``[[target]]`` to a direct sibling ``.md`` basename, or None.
+
+    Only notes listed in ``sibling_names`` (shared folder direct children) can
+    resolve — no vault-wide lookup, so unpublished notes stay private.
+    """
+    raw = (target or "").strip().replace("\\", "/")
+    if not raw or ".." in raw.split("/"):
+        return None
+    by_key = _folder_sibling_map(sibling_names)
+    key = _norm_wiki_key(raw)
+    if key in by_key:
+        return by_key[key]
+    basename = _norm_wiki_key(raw.split("/")[-1])
+    if basename in by_key:
+        return by_key[basename]
+    return None
+
+
+def rewrite_wiki_links_for_folder_share(
+    text: str,
+    token: str,
+    *,
+    sibling_names: list[str],
+) -> str:
+    """Turn ``[[Note]]`` into markdown links to ``/s/{token}/n/{Note.md}``.
+
+    Targets that do not resolve to a direct shared-folder sibling are left as
+    plain label text (no vault leak via unpublished notes).
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        _embed = match.group(1)
+        target = (match.group(2) or "").strip()
+        heading = (match.group(3) or "").strip()
+        alias = (match.group(4) or "").strip()
+        label = alias or target
+        resolved = resolve_folder_share_wiki_target(target, sibling_names)
+        if not resolved:
+            return label
+        url = public_folder_note_path(token, resolved)
+        if heading:
+            url = f"{url}#{_slugify_heading(heading)}"
+        # Fully percent-encoded path — no angle brackets (python-markdown escapes <…>).
+        return f"[{label}]({url})"
+
+    return _WIKI_LINK_RE.sub(repl, text or "")
+
+
+def rewrite_md_note_links_for_folder_share(
+    text: str,
+    token: str,
+    *,
+    sibling_names: list[str],
+) -> str:
+    """Rewrite relative ``[label](Sibling.md)`` links to folder-share URLs."""
+
+    def repl(match: re.Match[str]) -> str:
+        label = match.group(1)
+        dest = match.group(2).strip()
+        if dest.startswith("<") and dest.endswith(">"):
+            inner = dest[1:-1].strip()
+        else:
+            inner = dest
+        if (
+            not inner
+            or inner.startswith("http://")
+            or inner.startswith("https://")
+            or inner.startswith("data:")
+            or inner.startswith("/")
+            or inner.startswith("#")
+            or inner.startswith("/s/")
+        ):
+            return match.group(0)
+        path_only = inner.split("#", 1)[0].strip()
+        resolved = resolve_folder_share_wiki_target(path_only, sibling_names)
+        if not resolved:
+            return match.group(0)
+        url = public_folder_note_path(token, resolved)
+        if "#" in inner:
+            frag = inner.split("#", 1)[1]
+            if frag:
+                url = f"{url}#{_slugify_heading(frag)}"
+        return f"[{label}]({url})"
+
+    # Skip images (![...]) — only regular links
+    return re.sub(
+        r"(?<!!)\[([^\]]*)\]\(([^)\n]+)\)",
+        repl,
+        text or "",
+    )
+
+
+def prepare_folder_share_note_markdown(
+    text: str,
+    token: str,
+    *,
+    note_name: str,
+    sibling_names: list[str],
+) -> str:
+    """Wiki + relative note links + image assets for a folder-share note view."""
+    out = rewrite_wiki_links_for_folder_share(
+        text, token, sibling_names=sibling_names
+    )
+    out = rewrite_md_note_links_for_folder_share(
+        out, token, sibling_names=sibling_names
+    )
+    out = rewrite_md_assets_for_share(out, token, note_name=note_name)
+    return out
+
+
+def public_note_wiki_path(token: str, rel_path: str) -> str:
+    """Public path for a wiki-linked note under a single-note share token."""
+    cleaned = (rel_path or "").replace("\\", "/").lstrip("/")
+    return f"/s/{quote(token, safe='')}/w/{quote(cleaned, safe='')}"
+
+
+def note_share_public_path(token: str, rel_path: str, *, root_path: str) -> str:
+    """URL for ``rel_path`` under a note share (root → ``/s/token``, else ``/w/``)."""
+    root = (root_path or "").replace("\\", "/").lstrip("/")
+    rel = (rel_path or "").replace("\\", "/").lstrip("/")
+    if rel == root:
+        return public_share_path(token)
+    return public_note_wiki_path(token, rel)
+
+
+def extract_wiki_link_targets(text: str) -> list[str]:
+    """Return raw ``[[target]]`` strings (no aliases/headings) from markdown."""
+    out: list[str] = []
+    for match in _WIKI_LINK_RE.finditer(text or ""):
+        target = (match.group(2) or "").strip()
+        if target:
+            out.append(target)
+    return out
+
+
+def note_share_allowed_paths(root_path: str, root_text: str) -> set[str]:
+    """Vault paths reachable from a note share: the root note + its direct wiki targets.
+
+    Does not recurse — only one hop from the published note — so the rest of the
+    vault stays private unless separately shared.
+    """
+    from application import vault_index
+
+    root = (root_path or "").replace("\\", "/").lstrip("/")
+    allowed: set[str] = set()
+    if root:
+        allowed.add(root)
+    for target in extract_wiki_link_targets(root_text):
+        try:
+            resolved = vault_index.resolve_link(target, from_path=root or None)
+        except Exception:
+            resolved = None
+        if not resolved:
+            continue
+        cleaned = resolved.replace("\\", "/").lstrip("/")
+        if ".." in cleaned.split("/"):
+            continue
+        if vault_object_exists(cleaned):
+            allowed.add(cleaned)
+    return allowed
+
+
+def _allowed_path_map(allowed_paths: set[str]) -> dict[str, str]:
+    by_key: dict[str, str] = {}
+    for path in allowed_paths:
+        by_key[_norm_wiki_key(path)] = path
+        by_key[_norm_wiki_key(Path(path).stem)] = path
+        by_key[_norm_wiki_key(Path(path).name)] = path
+    return by_key
+
+
+def resolve_note_share_wiki_target(
+    target: str,
+    *,
+    from_path: str,
+    allowed_paths: set[str],
+) -> Optional[str]:
+    """Resolve ``[[target]]`` to a vault path only if it is in ``allowed_paths``."""
+    from application import vault_index
+
+    raw = (target or "").strip().replace("\\", "/")
+    if not raw or ".." in raw.split("/"):
+        return None
+    by_key = _allowed_path_map(allowed_paths)
+    key = _norm_wiki_key(raw)
+    if key in by_key:
+        return by_key[key]
+    basename = _norm_wiki_key(raw.split("/")[-1])
+    if basename in by_key:
+        return by_key[basename]
+    try:
+        resolved = vault_index.resolve_link(raw, from_path=from_path or None)
+    except Exception:
+        resolved = None
+    if not resolved:
+        return None
+    cleaned = resolved.replace("\\", "/").lstrip("/")
+    if cleaned in allowed_paths:
+        return cleaned
+    return None
+
+
+def rewrite_wiki_links_for_note_share(
+    text: str,
+    token: str,
+    *,
+    from_path: str,
+    root_path: str,
+    allowed_paths: set[str],
+) -> str:
+    """Turn ``[[Note]]`` into links under the same note-share token (allowed set only)."""
+
+    def repl(match: re.Match[str]) -> str:
+        target = (match.group(2) or "").strip()
+        heading = (match.group(3) or "").strip()
+        alias = (match.group(4) or "").strip()
+        label = alias or target
+        resolved = resolve_note_share_wiki_target(
+            target, from_path=from_path, allowed_paths=allowed_paths
+        )
+        if not resolved:
+            return label
+        url = note_share_public_path(token, resolved, root_path=root_path)
+        if heading:
+            url = f"{url}#{_slugify_heading(heading)}"
+        return f"[{label}]({url})"
+
+    return _WIKI_LINK_RE.sub(repl, text or "")
+
+
+def rewrite_md_assets_for_note_share(
+    text: str,
+    token: str,
+    *,
+    doc_path: str,
+) -> str:
+    """Point relative images at ``/s/{token}/raw?doc=…&path=…`` for note shares."""
+
+    def repl(match: re.Match[str]) -> str:
+        alt = match.group(1)
+        dest = match.group(2).strip()
+        if dest.startswith("<") and dest.endswith(">"):
+            inner = dest[1:-1].strip()
+            wrapped = True
+        else:
+            inner = dest
+            wrapped = False
+        if (
+            not inner
+            or inner.startswith("http://")
+            or inner.startswith("https://")
+            or inner.startswith("data:")
+            or inner.startswith("/")
+            or inner.startswith("#")
+        ):
+            return match.group(0)
+        url = (
+            f"/s/{quote(token, safe='')}/raw"
+            f"?doc={quote(doc_path, safe='')}"
+            f"&path={quote(inner, safe='')}"
+        )
+        if wrapped:
+            return f"![{alt}](<{url}>)"
+        return f"![{alt}]({url})"
+
+    return re.sub(r"!\[([^\]]*)\]\(([^)\n]+)\)", repl, text or "")
+
+
+def prepare_note_share_markdown(
+    text: str,
+    token: str,
+    *,
+    note_path: str,
+    root_path: str,
+    allowed_paths: set[str],
+) -> str:
+    """Wiki links (allowed set) + assets for a single-note public share view."""
+    out = rewrite_wiki_links_for_note_share(
+        text,
+        token,
+        from_path=note_path,
+        root_path=root_path,
+        allowed_paths=allowed_paths,
+    )
+    out = rewrite_md_assets_for_note_share(out, token, doc_path=note_path)
+    return out
+
+
+def is_path_in_note_share_allowed(rel_path: str, allowed_paths: set[str]) -> bool:
+    cleaned = (rel_path or "").replace("\\", "/").lstrip("/")
+    return cleaned in allowed_paths
