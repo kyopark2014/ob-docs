@@ -38,14 +38,19 @@ export function TabContextMenu({
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
     }
-    function onPointer(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    }
+    let removeOutside: (() => void) | undefined;
+    const attachTimer = window.setTimeout(() => {
+      function onOutside(e: Event) {
+        if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+      }
+      window.addEventListener("pointerdown", onOutside, true);
+      removeOutside = () => window.removeEventListener("pointerdown", onOutside, true);
+    }, 450);
     window.addEventListener("keydown", onKey);
-    window.addEventListener("mousedown", onPointer);
     return () => {
+      window.clearTimeout(attachTimer);
+      removeOutside?.();
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("mousedown", onPointer);
     };
   }, [onClose]);
 

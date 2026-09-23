@@ -2290,21 +2290,6 @@ export default function App() {
             </span>
           </button>
           <button
-            type="button"
-            className={`rail-settings-btn${sharedListOpen ? " is-active" : ""}`}
-            onClick={() => {
-              setAppearanceOpen(false);
-              setViewOpen(false);
-              setSharePermissionOpen(false);
-              setDocumentsMenuOpen(false);
-              setSettingsOpen(false);
-              setSharedListOpen(true);
-            }}
-          >
-            <ShareListIcon />
-            <span>Shared List</span>
-          </button>
-          <button
             ref={documentsBtnRef}
             type="button"
             className={`rail-settings-btn${documentsMenuOpen || documentsSyncBusy || documentsConfigureOpen || documentsListOpen ? " is-active" : ""}`}
@@ -2322,6 +2307,21 @@ export default function App() {
             <span>
               {documentsSyncBusy ? "Documents (Syncing…)" : "Documents"}
             </span>
+          </button>
+          <button
+            type="button"
+            className={`rail-settings-btn${sharedListOpen ? " is-active" : ""}`}
+            onClick={() => {
+              setAppearanceOpen(false);
+              setViewOpen(false);
+              setSharePermissionOpen(false);
+              setDocumentsMenuOpen(false);
+              setSettingsOpen(false);
+              setSharedListOpen(true);
+            }}
+          >
+            <ShareListIcon />
+            <span>Shared List</span>
           </button>
           <button
             ref={sharePermissionBtnRef}

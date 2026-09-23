@@ -188,6 +188,27 @@ export function hasExternalFileDrag(e: DragEvent): boolean {
   return hasExternalFiles(e);
 }
 
+/** True only for fine pointers (mouse); HTML5 drag steals long-press on touch. */
+function useNativeDragEnabled(wantDrag: boolean): boolean {
+  const [ok, setOk] = useState(() =>
+    wantDrag && typeof window !== "undefined"
+      ? window.matchMedia("(pointer: fine)").matches
+      : false,
+  );
+  useEffect(() => {
+    if (!wantDrag) {
+      setOk(false);
+      return;
+    }
+    const mq = window.matchMedia("(pointer: fine)");
+    const sync = () => setOk(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, [wantDrag]);
+  return ok;
+}
+
 /** Touch long-press → context menu (mobile has no right-click). */
 function useLongPressContextMenu(
   onOpen: ((x: number, y: number) => void) | undefined,
@@ -195,6 +216,7 @@ function useLongPressContextMenu(
 ) {
   const timerRef = useRef<number | null>(null);
   const startRef = useRef<{ x: number; y: number } | null>(null);
+  const firedRef = useRef(false);
 
   const clearTimer = useCallback(() => {
     if (timerRef.current != null) {
@@ -211,17 +233,24 @@ function useLongPressContextMenu(
       if (!onOpen || e.touches.length !== 1) return;
       const t = e.touches[0];
       startRef.current = { x: t.clientX, y: t.clientY };
+      firedRef.current = false;
       clearTimer();
       timerRef.current = window.setTimeout(() => {
         timerRef.current = null;
         const pos = startRef.current;
         startRef.current = null;
         if (!pos) return;
+        firedRef.current = true;
         suppressClick.current = true;
+        try {
+          navigator.vibrate?.(12);
+        } catch {
+          /* ignore */
+        }
         onOpen(pos.x, pos.y);
         window.setTimeout(() => {
           suppressClick.current = false;
-        }, 400);
+        }, 500);
       }, LONG_PRESS_MS);
     },
     [clearTimer, onOpen, suppressClick],
@@ -241,9 +270,18 @@ function useLongPressContextMenu(
     [clearTimer],
   );
 
-  const onTouchEnd = useCallback(() => {
-    clearTimer();
-  }, [clearTimer]);
+  const onTouchEnd = useCallback(
+    (e: TouchEvent) => {
+      // Suppress the synthetic click/mousedown that would instantly dismiss the menu.
+      if (firedRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        firedRef.current = false;
+      }
+      clearTimer();
+    },
+    [clearTimer],
+  );
 
   if (!onOpen) return {};
   return {
@@ -405,6 +443,7 @@ function TreeRow({
 }: Props & { node: TreeNode; siblings: TreeNode[] }) {
   const { highlight, setHighlight, dragging, setDragging, clear } = useContext(DropHighlightCtx);
   const suppressClick = useRef(false);
+  const nativeDrag = useNativeDragEnabled(!!(onMove || onReorder));
   const longPress = useLongPressContextMenu(
     node.type === "folder"
       ? onFolderContextMenu
@@ -560,7 +599,7 @@ function TreeRow({
           <div
             className={`tree-item${isSelected ? " selected" : ""}${isFolderDrop ? " drop-over" : ""}${isInsertBefore ? " drop-insert-before" : ""}${isInsertAfter ? " drop-insert-after" : ""}`}
             style={{ paddingLeft: 10 + depth * 14 }}
-            draggable={!!(onMove || onReorder)}
+            draggable={nativeDrag}
             {...longPress}
             onDragStart={(e) => {
               if (!onMove && !onReorder) return;
@@ -698,7 +737,7 @@ function TreeRow({
     <div
       className={`tree-item${activePath === node.path ? " active" : ""}${isInsertBefore ? " drop-insert-before" : ""}${isInsertAfter ? " drop-insert-after" : ""}`}
       style={{ paddingLeft: 10 + depth * 14 + 14 }}
-      draggable={!!(onMove || onReorder)}
+      draggable={nativeDrag}
       {...longPress}
       onDragStart={(e) => {
         if (!onMove && !onReorder) return;
