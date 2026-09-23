@@ -26,6 +26,15 @@ export function GraphIcon() {
   );
 }
 
+export function RefreshIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <path d="M21 3v6h-6" />
+    </svg>
+  );
+}
+
 export function PlusFileIcon() {
   /* Obsidian-style: new note (file + pen) */
   return (
@@ -193,6 +202,27 @@ export function MicIcon() {
         fill="currentColor"
         d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11h-2z"
       />
+    </svg>
+  );
+}
+
+export function DocumentsIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 3h7l4 4v14H8z" />
+      <path d="M15 3v4h4" />
+      <path d="M11 12h5M11 16h5M11 8h2" />
+      <path d="M5 7h3v14H5a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z" opacity="0.55" />
     </svg>
   );
 }

@@ -15,6 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from application.api.routes_auth import bind_request_vault_user, router as auth_router
 from application.api.routes_agent import router as agent_router
+from application.api.routes_documents import router as documents_router
 from application.api.routes_files import router as files_router
 from application.api.routes_graph import router as graph_router
 from application.api.routes_search import router as search_router
@@ -115,6 +116,7 @@ app.add_middleware(VaultUserMiddleware)
 app.include_router(auth_router)
 app.include_router(files_router)
 app.include_router(agent_router)
+app.include_router(documents_router)
 app.include_router(share_api_router)
 app.include_router(share_public_router)
 app.include_router(search_router)

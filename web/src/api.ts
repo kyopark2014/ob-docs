@@ -351,6 +351,145 @@ export const api = {
   },
   agentModels: () =>
     request<{ models: string[]; default_model: string }>("/agent/models"),
+  getDocumentsStatus: () => request<DocumentsStatus>("/documents/status"),
+  getDocumentsConfig: () => request<DocumentsConfig>("/documents/config"),
+  putDocumentsConfig: (body: {
+    foundation_model_parser_enabled?: boolean;
+    parallel_processing_enabled?: boolean;
+  }) =>
+    request<DocumentsConfig>("/documents/config", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  getDocumentsProjectList: (publishMd = true) =>
+    request<DocumentsListResult>(
+      `/documents/project-list${publishMd ? "" : "?publish_md=0"}`,
+    ),
+  getDocumentsDrawingList: (publishMd = true) =>
+    request<DocumentsListResult>(
+      `/documents/drawing-list${publishMd ? "" : "?publish_md=0"}`,
+    ),
+  deleteDocumentsDocument: (
+    filename: string,
+    kind: "project" | "drawing" = "project",
+  ) =>
+    request<{ ok: boolean }>(
+      `/documents/documents/${encodeURIComponent(filename)}?kind=${encodeURIComponent(kind)}`,
+      { method: "DELETE" },
+    ),
+  copyDocumentsToVault: (
+    filename: string,
+    kind: "project" | "drawing" = "project",
+  ) =>
+    request<DocumentsCopyToVaultResult>(
+      `/documents/documents/${encodeURIComponent(filename)}/copy-to-vault?kind=${encodeURIComponent(kind)}`,
+      { method: "POST" },
+    ),
+  uploadDocumentsProjectFile: async (
+    file: File,
+  ): Promise<DocumentsUploadResult> => {
+    const presign = await request<DocumentsPresignResult>(
+      "/documents/projects/presign",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          file_name: file.name,
+          size: file.size,
+          content_type: file.type || undefined,
+        }),
+      },
+    );
+    if (!presign.upload_url || !presign.s3_key) {
+      throw new Error("Presign succeeded but no upload URL was returned");
+    }
+    let putRes: Response;
+    try {
+      putRes = await fetch(presign.upload_url, {
+        method: "PUT",
+        headers:
+          presign.headers || {
+            "Content-Type": file.type || "application/octet-stream",
+          },
+        body: file,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`S3 upload failed: ${detail}`);
+    }
+    if (!putRes.ok) {
+      const text = await putRes.text().catch(() => "");
+      const msgMatch = text.match(/<Message>([^<]+)<\/Message>/i);
+      throw new Error(
+        msgMatch?.[1] || `S3 upload failed (HTTP ${putRes.status})`,
+      );
+    }
+    return request<DocumentsUploadResult>("/documents/projects/complete", {
+      method: "POST",
+      body: JSON.stringify({
+        file_name: presign.file_name,
+        s3_key: presign.s3_key,
+        size: file.size,
+        original_filename: file.name,
+      }),
+    });
+  },
+  uploadDocumentsDrawingFile: async (
+    file: File,
+  ): Promise<DocumentsUploadResult> => {
+    const presign = await request<DocumentsPresignResult>(
+      "/documents/drawings/presign",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          file_name: file.name,
+          size: file.size,
+          content_type: file.type || undefined,
+        }),
+      },
+    );
+    if (!presign.upload_url || !presign.s3_key) {
+      throw new Error("Presign succeeded but no upload URL was returned");
+    }
+    let putRes: Response;
+    try {
+      putRes = await fetch(presign.upload_url, {
+        method: "PUT",
+        headers:
+          presign.headers || {
+            "Content-Type": file.type || "application/octet-stream",
+          },
+        body: file,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`S3 upload failed: ${detail}`);
+    }
+    if (!putRes.ok) {
+      const text = await putRes.text().catch(() => "");
+      const msgMatch = text.match(/<Message>([^<]+)<\/Message>/i);
+      throw new Error(
+        msgMatch?.[1] || `S3 upload failed (HTTP ${putRes.status})`,
+      );
+    }
+    return request<DocumentsUploadResult>("/documents/drawings/complete", {
+      method: "POST",
+      body: JSON.stringify({
+        file_name: presign.file_name,
+        s3_key: presign.s3_key,
+        size: file.size,
+        original_filename: file.name,
+      }),
+    });
+  },
+  syncDocuments: (full = false, model?: string) => {
+    const params = new URLSearchParams();
+    if (full) params.set("full", "1");
+    if (model) params.set("model", model);
+    const qs = params.toString();
+    return request<DocumentsStatus>(`/documents/sync${qs ? `?${qs}` : ""}`, {
+      method: "POST",
+    });
+  },
   agentChat: (
     body: {
       prompt: string;
@@ -386,6 +525,119 @@ export type AgentChatHandlers = {
     toolEvents?: AgentToolEvent[],
   ) => void;
   onError?: (message: string) => void;
+};
+
+export type DocumentsStatus = {
+  documents_dir: string;
+  projects_dir?: string;
+  drawings_dir?: string;
+  files?: Array<{ name: string; path: string; bytes: number; mtime?: number }>;
+  exists?: boolean;
+  status: "idle" | "queued" | "running" | "ready" | "error" | "unchanged" | string;
+  foundation_model_parser_enabled?: boolean;
+  parallel_processing_enabled?: boolean;
+  error?: string | null;
+  message?: string | null;
+  last_success_at?: string | null;
+  progress?: {
+    file?: string | null;
+    file_i?: number | null;
+    file_n?: number | null;
+    page?: number | null;
+    page_n?: number | null;
+    pct?: number | null;
+    aggregated?: boolean | null;
+  } | null;
+};
+
+export type DocumentsConfig = {
+  documents_dir: string;
+  projects_dir?: string;
+  drawings_dir?: string;
+  files?: Array<{ name: string; path: string; bytes: number; mtime?: number }>;
+  foundation_model_parser_enabled?: boolean;
+  parallel_processing_enabled?: boolean;
+};
+
+export type DocumentsDocument = {
+  filename?: string;
+  original_filename?: string;
+  display_name?: string;
+  md_file?: string;
+  md_path?: string;
+  source_path?: string;
+  status?: string;
+  bytes?: number;
+  title?: string;
+  pdf_available?: boolean;
+  md_available?: boolean;
+  md_bytes?: number | null;
+  pdf_url?: string | null;
+  pdf_api_url?: string | null;
+  md_url?: string | null;
+  md_workspace_path?: string | null;
+  md_local_artifacts?: string | null;
+  md_viewer_url?: string | null;
+  md_published?: boolean;
+  kind?: string;
+  created_at?: string;
+  updated_at?: string;
+  extracted_at?: string;
+};
+
+export type DocumentsListResult = {
+  documents_dir?: string;
+  docs_dir?: string;
+  projects_dir?: string;
+  drawings_dir?: string;
+  documents: DocumentsDocument[];
+  doc_count?: number;
+  doc_list?: string;
+  doc_list_updated_at?: string | null;
+  sharing_url?: string | null;
+};
+
+export type DocumentsPresignResult = {
+  ok?: boolean;
+  file_name: string;
+  original_filename?: string;
+  sanitized?: boolean;
+  s3_key: string;
+  content_type?: string;
+  upload_url: string;
+  headers?: Record<string, string>;
+  expires_in?: number;
+  docs_dir?: string;
+};
+
+export type DocumentsUploadResult = {
+  documents_dir: string;
+  docs_dir?: string;
+  projects_dir?: string;
+  drawings_dir?: string;
+  raw_dir?: string;
+  saved: {
+    name: string;
+    original_filename?: string;
+    sanitized?: boolean;
+    path: string;
+    bytes: number;
+    overwritten?: boolean;
+  };
+  count: number;
+  files?: Array<{ name: string; path: string; bytes: number; mtime?: number }>;
+  documents?: Array<Record<string, unknown>>;
+  doc_count?: number;
+  s3_key?: string;
+};
+
+export type DocumentsCopyToVaultResult = {
+  ok?: boolean;
+  path: string;
+  kind: "project" | "drawing" | string;
+  bytes: number;
+  source_md?: string;
+  note_id?: string | null;
 };
 
 async function streamAgentChat(

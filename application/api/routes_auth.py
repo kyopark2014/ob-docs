@@ -330,6 +330,12 @@ def _ensure_user_on_login(user_id: str) -> None:
         vault_db_persistence.ensure_user_notes_db(user_id, load_from_durable=True)
     except Exception:
         logger.exception("Failed to load notes.db from S3 Files for %s", user_id)
+    try:
+        from application import documents_support
+
+        documents_support.ensure_user_documents_dir(user_id)
+    except Exception:
+        logger.exception("Failed to ensure documents dir for %s", user_id)
 
 
 def require_user_id(request: Request) -> str:

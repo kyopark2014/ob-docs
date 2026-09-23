@@ -12,6 +12,8 @@ import { SharedListModal } from "./components/SharedListModal";
 import { GoogleLoginModal } from "./components/GoogleLoginModal";
 import { NotesConfigureModal } from "./components/NotesConfigureModal";
 import { NotesGraphModal } from "./components/NotesGraphModal";
+import { DocumentsConfigureModal } from "./components/DocumentsConfigureModal";
+import { DocumentsListModal } from "./components/DocumentsListModal";
 import {
   FolderContextMenu,
   type ContextMenuState,
@@ -25,6 +27,7 @@ import {
   AppearanceIcon,
   AgentIcon,
   BookIcon,
+  DocumentsIcon,
   EditIcon,
   FilesIcon,
   GraphIcon,
@@ -33,6 +36,7 @@ import {
   ModelIcon,
   PlusFileIcon,
   PlusFolderIcon,
+  RefreshIcon,
   SearchIcon,
   SettingsIcon,
   ShareListIcon,
@@ -97,6 +101,7 @@ import type {
 const THEME_OPTIONS = ["Light", "Dark"] as const;
 const VIEW_OPTIONS = ["Images"] as const;
 const GRAPH_OPTIONS = ["Sync", "Rebuild", "Graph", "Configure"] as const;
+const DOCUMENTS_OPTIONS = ["Projects", "Drawings", "Configure"] as const;
 const SHARE_PERMISSION_OPTIONS = [
   "Current",
   "1-hop",
@@ -400,6 +405,7 @@ export default function App() {
   );
   const meeting = useMeetingLog(userId);
   const [tree, setTree] = useState<TreeNode[]>([]);
+  const [treeRefreshing, setTreeRefreshing] = useState(false);
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
@@ -439,6 +445,17 @@ export default function App() {
   const [notesSyncProgress, setNotesSyncProgress] = useState<SyncProgressInfo | null>(
     null,
   );
+  const [documentsMenuOpen, setDocumentsMenuOpen] = useState(false);
+  const [documentsConfigureOpen, setDocumentsConfigureOpen] = useState(false);
+  const [documentsListOpen, setDocumentsListOpen] = useState(false);
+  const [documentsListKind, setDocumentsListKind] = useState<"project" | "drawing">(
+    "project",
+  );
+  const [documentsSyncBusy, setDocumentsSyncBusy] = useState(false);
+  const [documentsSyncPopupOpen, setDocumentsSyncPopupOpen] = useState(false);
+  const [documentsSyncMsg, setDocumentsSyncMsg] = useState<string | null>(null);
+  const [documentsSyncProgress, setDocumentsSyncProgress] =
+    useState<SyncProgressInfo | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncPopupOpen, setSyncPopupOpen] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
@@ -485,6 +502,7 @@ export default function App() {
   const viewBtnRef = useRef<HTMLButtonElement>(null);
   const graphBtnRef = useRef<HTMLButtonElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
+  const documentsBtnRef = useRef<HTMLButtonElement>(null);
   const settingsFlyoutRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   /** Serializes H1↔filename renames so save never races a half-finished rename. */
@@ -728,6 +746,16 @@ export default function App() {
     setTree(t.children);
   }, []);
 
+  const handleRefreshTree = useCallback(async () => {
+    if (treeRefreshing) return;
+    setTreeRefreshing(true);
+    try {
+      await refreshTree();
+    } finally {
+      setTreeRefreshing(false);
+    }
+  }, [refreshTree, treeRefreshing]);
+
   const refreshSyncStatus = useCallback(async () => {
     try {
       const s = await api.getSyncStatus();
@@ -859,7 +887,11 @@ export default function App() {
       if (settingsBtnRef.current?.contains(target)) return;
       if (settingsFlyoutRef.current?.contains(target)) return;
       if ((target as Element).closest?.(".config-popover")) return;
-      if ((target as Element).closest?.(".knowledge-graph-modal, .notes-configure-modal")) {
+      if (
+        (target as Element).closest?.(
+          ".knowledge-graph-modal, .notes-configure-modal, .documents-configure-modal, .documents-doc-list-modal, .sync-progress-modal",
+        )
+      ) {
         return;
       }
       setSettingsOpen(false);
@@ -1271,6 +1303,104 @@ export default function App() {
     },
     [startNotesSync],
   );
+
+  const startDocumentsSync = useCallback(async () => {
+    setDocumentsSyncPopupOpen(true);
+    setDocumentsSyncBusy(true);
+    setDocumentsSyncMsg("Documents 동기화를 시작합니다…");
+    setDocumentsSyncProgress(null);
+    try {
+      const result = await api.syncDocuments(false, agentModel || undefined);
+      if (result.status === "error") {
+        setDocumentsSyncBusy(false);
+        setDocumentsSyncMsg(result.error || "Documents 동기화에 실패했습니다.");
+      } else if (result.status === "unchanged" || result.status === "ready") {
+        setDocumentsSyncBusy(false);
+        setDocumentsSyncMsg(
+          result.message || "Documents가 이미 최신 상태입니다.",
+        );
+      } else {
+        setDocumentsSyncBusy(true);
+        setDocumentsSyncMsg(
+          result.message || "Documents 동기화를 백그라운드에서 실행 중입니다.",
+        );
+        if (result.progress) setDocumentsSyncProgress(result.progress);
+      }
+    } catch (err) {
+      setDocumentsSyncBusy(false);
+      setDocumentsSyncMsg(
+        err instanceof Error ? err.message : "Documents 동기화에 실패했습니다.",
+      );
+    }
+  }, [agentModel]);
+
+  const handleDocumentsAction = useCallback(
+    (choice: string) => {
+      setDocumentsMenuOpen(false);
+      setSettingsOpen(false);
+      if (choice === "Configure") {
+        setDocumentsConfigureOpen(true);
+        return;
+      }
+      if (choice === "Projects") {
+        setDocumentsListKind("project");
+        setDocumentsListOpen(true);
+        return;
+      }
+      if (choice === "Drawings") {
+        setDocumentsListKind("drawing");
+        setDocumentsListOpen(true);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!documentsSyncBusy && !documentsSyncPopupOpen) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function pollDocumentsSync() {
+      try {
+        const next = await api.getDocumentsStatus();
+        if (cancelled) return;
+        const busy = next.status === "queued" || next.status === "running";
+        setDocumentsSyncBusy(busy);
+        if (next.progress) {
+          setDocumentsSyncProgress(next.progress);
+        }
+        if (busy) {
+          setDocumentsSyncMsg(
+            next.message || "Documents 동기화를 백그라운드에서 실행 중입니다.",
+          );
+          timer = setTimeout(pollDocumentsSync, 1500);
+          return;
+        }
+        if (next.status === "ready" || next.status === "unchanged") {
+          setDocumentsSyncMsg(
+            next.message || "Documents 동기화가 완료되었습니다.",
+          );
+        } else if (next.status === "idle") {
+          setDocumentsSyncMsg(
+            next.message || "Documents 동기화가 완료되었습니다.",
+          );
+        } else if (next.status === "error") {
+          setDocumentsSyncMsg(next.error || "Documents 동기화에 실패했습니다.");
+        }
+      } catch {
+        if (cancelled) return;
+        if (documentsSyncBusy) {
+          timer = setTimeout(pollDocumentsSync, 4000);
+        }
+      }
+    }
+
+    void pollDocumentsSync();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [documentsSyncBusy, documentsSyncPopupOpen]);
 
   useEffect(() => {
     if (!notesSyncBusy) return;
@@ -2146,6 +2276,7 @@ export default function App() {
               setAppearanceOpen(false);
               setViewOpen(false);
               setSharePermissionOpen(false);
+              setDocumentsMenuOpen(false);
               void runVaultSync();
             }}
           >
@@ -2165,12 +2296,32 @@ export default function App() {
               setAppearanceOpen(false);
               setViewOpen(false);
               setSharePermissionOpen(false);
+              setDocumentsMenuOpen(false);
               setSettingsOpen(false);
               setSharedListOpen(true);
             }}
           >
             <ShareListIcon />
             <span>Shared List</span>
+          </button>
+          <button
+            ref={documentsBtnRef}
+            type="button"
+            className={`rail-settings-btn${documentsMenuOpen || documentsSyncBusy || documentsConfigureOpen || documentsListOpen ? " is-active" : ""}`}
+            aria-expanded={documentsMenuOpen}
+            aria-haspopup="dialog"
+            title={documentsSyncMsg ?? "Documents"}
+            onClick={() => {
+              setAppearanceOpen(false);
+              setViewOpen(false);
+              setSharePermissionOpen(false);
+              setDocumentsMenuOpen((v) => !v);
+            }}
+          >
+            <DocumentsIcon />
+            <span>
+              {documentsSyncBusy ? "Documents (Syncing…)" : "Documents"}
+            </span>
           </button>
           <button
             ref={sharePermissionBtnRef}
@@ -2182,6 +2333,7 @@ export default function App() {
             onClick={() => {
               setAppearanceOpen(false);
               setViewOpen(false);
+              setDocumentsMenuOpen(false);
               setSharePermissionOpen((v) => !v);
             }}
           >
@@ -2197,6 +2349,7 @@ export default function App() {
             onClick={() => {
               setAppearanceOpen(false);
               setSharePermissionOpen(false);
+              setDocumentsMenuOpen(false);
               setViewOpen((v) => !v);
             }}
           >
@@ -2212,6 +2365,7 @@ export default function App() {
             onClick={() => {
               setViewOpen(false);
               setSharePermissionOpen(false);
+              setDocumentsMenuOpen(false);
               setAppearanceOpen((v) => !v);
             }}
           >
@@ -2252,6 +2406,15 @@ export default function App() {
           onClose={() => setNotesSyncPopupOpen(false)}
         />
       )}
+      {documentsSyncPopupOpen && (
+        <SyncProgressModal
+          title="Documents Sync"
+          busy={documentsSyncBusy}
+          message={documentsSyncMsg}
+          progress={documentsSyncProgress}
+          onClose={() => setDocumentsSyncPopupOpen(false)}
+        />
+      )}
       <SharedListModal open={sharedListOpen} onClose={() => setSharedListOpen(false)} />
       {notesGraphOpen && (
         <NotesGraphModal
@@ -2261,6 +2424,24 @@ export default function App() {
       )}
       {notesConfigureOpen && (
         <NotesConfigureModal onClose={() => setNotesConfigureOpen(false)} />
+      )}
+      {documentsConfigureOpen && (
+        <DocumentsConfigureModal
+          onClose={() => setDocumentsConfigureOpen(false)}
+          onFileUploaded={() => {
+            void startDocumentsSync();
+          }}
+        />
+      )}
+      {documentsListOpen && (
+        <DocumentsListModal
+          kind={documentsListKind}
+          onClose={() => setDocumentsListOpen(false)}
+          onCopied={async (path) => {
+            await refreshTree();
+            await openFile(path);
+          }}
+        />
       )}
       {graphMenuOpen && (
         <ConfigDrawer
@@ -2274,6 +2455,19 @@ export default function App() {
             if (next[0]) handleGraphAction(next[0]);
           }}
           onClose={() => setGraphMenuOpen(false)}
+        />
+      )}
+      {documentsMenuOpen && (
+        <ConfigDrawer
+          title="Documents"
+          options={[...DOCUMENTS_OPTIONS]}
+          selected={[]}
+          mode="single"
+          anchorEl={documentsBtnRef.current}
+          onChange={(next) => {
+            if (next[0]) handleDocumentsAction(next[0]);
+          }}
+          onClose={() => setDocumentsMenuOpen(false)}
         />
       )}
       {modelMenuOpen && (
@@ -2346,6 +2540,16 @@ export default function App() {
           <>
             <div className="sidebar-header">
               <div className="sidebar-actions">
+                <button
+                  type="button"
+                  className={`icon-btn${treeRefreshing ? " is-refreshing" : ""}`}
+                  data-tooltip="Refresh"
+                  aria-label="Refresh"
+                  disabled={treeRefreshing}
+                  onClick={() => void handleRefreshTree()}
+                >
+                  <RefreshIcon />
+                </button>
                 <button
                   type="button"
                   className="icon-btn"

@@ -595,6 +595,21 @@ body.is-resizing-sidebar iframe {
   color: var(--text);
 }
 
+.icon-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.icon-btn.is-refreshing svg {
+  animation: tree-refresh-spin 0.8s linear infinite;
+}
+
+@keyframes tree-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .icon-btn[data-tooltip]::after {
   content: attr(data-tooltip);
   position: absolute;
@@ -3144,4 +3159,193 @@ html[data-theme="light"] .agent-loaded-file-remove:hover:not(:disabled) {
     z-index: 40;
     box-shadow: -8px 0 24px var(--shadow);
   }
+}
+
+/* —— Documents —— */
+.documents-configure-modal {
+  width: min(520px, 94vw);
+}
+
+.documents-doc-list-modal {
+  width: min(720px, 96vw);
+  max-height: min(80vh, 720px);
+  display: flex;
+  flex-direction: column;
+}
+
+.documents-doc-list-modal .modal-body {
+  overflow: auto;
+  flex: 1;
+}
+
+.documents-doc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.documents-doc-list-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.documents-doc-list-item:last-child {
+  border-bottom: none;
+}
+
+.documents-doc-list-meta {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.documents-doc-list-name {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.documents-doc-list-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.documents-doc-list-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.documents-doc-list-btn {
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated, transparent);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.documents-doc-list-btn:hover:not(:disabled) {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.08));
+}
+
+.documents-doc-list-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.documents-doc-list-btn-danger {
+  color: var(--danger, #e25555);
+  border-color: color-mix(in srgb, var(--danger, #e25555) 35%, var(--border));
+}
+
+.documents-doc-list-btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger, #e25555) 12%, transparent);
+}
+
+.documents-doc-list-btn-success {
+  color: var(--accent, #3d8b40);
+  border-color: color-mix(in srgb, var(--accent, #3d8b40) 35%, var(--border));
+}
+
+.documents-doc-list-btn-success:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent, #3d8b40) 12%, transparent);
+}
+
+.documents-configure-section-label {
+  margin: 14px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.documents-configure-doc-section + .documents-configure-doc-section {
+  margin-top: 4px;
+}
+
+.documents-configure-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  font-size: 14px;
+}
+
+.documents-configure-toggle-title {
+  font-weight: 500;
+}
+
+.documents-configure-modal .documents-configure-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.documents-configure-docs {
+  margin-top: 4px;
+}
+
+.documents-configure-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.documents-configure-docs-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.documents-configure-docs-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.documents-configure-docs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.documents-configure-docs-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 13px;
+}
+
+.documents-configure-docs-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.documents-configure-docs-meta {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.documents-configure-muted {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
 }
