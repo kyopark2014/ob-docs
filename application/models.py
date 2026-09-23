@@ -8,6 +8,7 @@ DEFAULT_MODEL = "Claude 4.6 Sonnet"
 
 # UI order (same family as harness-work routes_config.MODELS).
 MODEL_NAMES: list[str] = [
+    "Claude 5.5 Opus",
     "Claude 5.0 Sonnet",
     "Claude 5.0 Opus",
     "Claude 4.6 Sonnet",
@@ -21,6 +22,8 @@ MODEL_NAMES: list[str] = [
     "OpenAI GPT 5.4",
     "OpenAI GPT 5.5",
     "OpenAI GPT 6 Astra",
+    "OpenAI GPT 6 Sol",
+    "OpenAI GPT 6 Luna",
     "OpenAI GPT 5.6 Sol",
     "OpenAI GPT 5.6 Terra",
     "OpenAI GPT 5.6 Luna",
@@ -38,6 +41,10 @@ _MODEL_PROFILES: dict[str, dict[str, Any]] = {
     "Claude 5.0 Sonnet": {
         "model_type": "claude",
         "model_id": "us.anthropic.claude-sonnet-5",
+    },
+    "Claude 5.5 Opus": {
+        "model_type": "claude",
+        "model_id": "us.anthropic.claude-opus-5-5",
     },
     "Claude 5.0 Opus": {
         "model_type": "claude",
@@ -88,6 +95,14 @@ _MODEL_PROFILES: dict[str, dict[str, Any]] = {
     "OpenAI GPT 6 Astra": {
         "model_type": "openai",
         "model_id": "us.openai.gpt-6-astra",
+    },
+    "OpenAI GPT 6 Sol": {
+        "model_type": "openai",
+        "model_id": "us.openai.gpt-6-sol",
+    },
+    "OpenAI GPT 6 Luna": {
+        "model_type": "openai",
+        "model_id": "us.openai.gpt-6-luna",
     },
     "OpenAI GPT 5.6 Sol": {
         "model_type": "openai",
