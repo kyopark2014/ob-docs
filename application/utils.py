@@ -14,6 +14,9 @@ _CONFIG_PATHS = (
     _APP_DIR / "config.json",
 )
 
+# Absolute path used by bedrock_data_retention when persisting opt-in flags.
+config_path = str(_ROOT_DIR / "config.json")
+
 _config_cache: dict[str, Any] | None = None
 
 # Reserved top-level vault segments (not usable as user folders).
