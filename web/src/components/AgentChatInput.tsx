@@ -56,7 +56,7 @@ const MENU_VERTICAL_OFFSET = 8;
 const IMAGE_ACCEPT =
   "image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif";
 const LOAD_ACCEPT =
-  ".pdf,.txt,.md,.markdown,.csv,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.json,.py,.js,.ts,.tsx,.jsx,.yml,.yaml,.xml,.rst,.png,.jpg,.jpeg,.webp,.gif";
+  ".pdf,.txt,.md,.markdown,.csv,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.json,.py,.js,.ts,.tsx,.jsx,.yml,.yaml,.xml,.rst,.dxf,.png,.jpg,.jpeg,.webp,.gif";
 
 function formatFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "";

@@ -83,6 +83,7 @@ ALLOWED_UPLOAD_SUFFIXES = {
     ".html",
     ".htm",
     ".rst",
+    ".dxf",
     ".pdf",
     ".doc",
     ".docx",
