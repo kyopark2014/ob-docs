@@ -593,7 +593,7 @@ export function AgentPanel({
           {messages.length === 0 && !streaming && (
             <div className="agent-empty-state">
               <p>선택한 노트를 수정·요약하도록 요청하세요.</p>
-              <p>use-vault skill · websearch(exa) · VAULT_WRITE 저장</p>
+              <p>인터넷 검색 · 목차 추가</p>
             </div>
           )}
           {messages.map((m) => (
