@@ -8,6 +8,7 @@ import {
   type AgentNoteChip,
   type AgentSendPayload,
 } from "./AgentChatInput";
+import { RefreshIcon } from "./Icons";
 import { ToolCallCard } from "./ToolCallCard";
 
 export type AgentMessage = {
@@ -262,6 +263,7 @@ export function AgentPanel({
 }: Props) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [streamText, setStreamText] = useState("");
   const [streamEvents, setStreamEvents] = useState<AgentToolEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -360,6 +362,35 @@ export function AgentPanel({
     abortRef.current = null;
     setStreaming(false);
   }, []);
+
+  const clearHistory = useCallback(async () => {
+    if (clearing) return;
+    const noteId = sessionIdRef.current;
+    const path = (notePath || noteRef.current?.path || "").trim();
+    if (!noteId && !path) {
+      setMessages([]);
+      setStreamText("");
+      setStreamEvents([]);
+      setError(null);
+      return;
+    }
+    setClearing(true);
+    stop();
+    try {
+      await api.clearAgentMessages({
+        noteId: noteId || null,
+        notePath: path || null,
+      });
+      setMessages([]);
+      setStreamText("");
+      setStreamEvents([]);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setClearing(false);
+    }
+  }, [clearing, notePath, stop]);
 
   const send = useCallback(
     async (payload: AgentSendPayload) => {
@@ -532,22 +563,30 @@ export function AgentPanel({
       )}
       <header className="agent-panel-header">
         <span className="agent-panel-title">Agent</span>
-        {modelName ? (
-          <span className="agent-panel-model" title={modelName}>
-            {modelName}
-          </span>
-        ) : null}
-        <button
-          type="button"
-          className="agent-panel-close"
-          aria-label="에이전트 닫기"
-          onClick={() => {
-            stop();
-            onClose();
-          }}
-        >
-          ×
-        </button>
+        <div className="agent-panel-header-actions">
+          <button
+            type="button"
+            className={`icon-btn agent-panel-refresh${clearing ? " is-refreshing" : ""}`}
+            data-tooltip="Clear chat"
+            aria-label="대화 기록 지우기"
+            title="대화 기록 지우기"
+            disabled={clearing || streaming}
+            onClick={() => void clearHistory()}
+          >
+            <RefreshIcon />
+          </button>
+          <button
+            type="button"
+            className="agent-panel-close"
+            aria-label="에이전트 닫기"
+            onClick={() => {
+              stop();
+              onClose();
+            }}
+          >
+            ×
+          </button>
+        </div>
       </header>
       <div className="agent-chat-scroll">
         <div className="agent-chat-thread">
