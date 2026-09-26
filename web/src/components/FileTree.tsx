@@ -48,6 +48,23 @@ type DragPayload = {
   kind: "file" | "folder";
 };
 
+export function serializeVaultMove(path: string, kind: "file" | "folder" = "file"): string {
+  return `${DND_PREFIX}${kind}|${path}`;
+}
+
+/** Attach vault move payload so drops on folders call onMove (notes + images). */
+export function setVaultMoveDataTransfer(
+  dt: DataTransfer,
+  path: string,
+  kind: "file" | "folder" = "file",
+): void {
+  const serialized = serializeVaultMove(path, kind);
+  dt.setData(DND_TYPE, serialized);
+  dt.setData("text/plain", serialized);
+  // copyMove: tree/folder move + Agent chat attach (copy)
+  dt.effectAllowed = "copyMove";
+}
+
 type Props = {
   nodes: TreeNode[];
   activePath: string | null;
@@ -73,10 +90,6 @@ type Props = {
   pinnedPaths?: Set<string>;
   hidePinBadge?: boolean;
 };
-
-function serializeDrag(payload: DragPayload): string {
-  return `${DND_PREFIX}${payload.kind}|${payload.path}`;
-}
 
 export function parseVaultDrag(e: DragEvent): DragPayload | null {
   try {
@@ -186,6 +199,25 @@ export function isVaultMoveDrag(e: DragEvent): boolean {
 
 export function hasExternalFileDrag(e: DragEvent): boolean {
   return hasExternalFiles(e);
+}
+
+/** Clear editor selection/focus so tree HTML5 drag is not stolen by textarea text drag. */
+function prepareTreeRowDrag(e: { button: number }) {
+  if (e.button !== 0) return;
+  try {
+    window.getSelection()?.removeAllRanges();
+  } catch {
+    /* ignore */
+  }
+  const active = document.activeElement;
+  if (
+    active instanceof HTMLElement &&
+    (active.tagName === "TEXTAREA" ||
+      active.tagName === "INPUT" ||
+      active.isContentEditable)
+  ) {
+    active.blur();
+  }
 }
 
 /** True only for fine pointers (mouse); HTML5 drag steals long-press on touch. */
@@ -601,15 +633,13 @@ function TreeRow({
             style={{ paddingLeft: 10 + depth * 14 }}
             draggable={nativeDrag}
             {...longPress}
+            onMouseDown={prepareTreeRowDrag}
             onDragStart={(e) => {
               if (!onMove && !onReorder) return;
+              prepareTreeRowDrag(e);
               suppressClick.current = true;
               const payload: DragPayload = { path: node.path, kind: "folder" };
-              const serialized = serializeDrag(payload);
-              e.dataTransfer.setData(DND_TYPE, serialized);
-              e.dataTransfer.setData("text/plain", serialized);
-              // copyMove: tree move + Agent chat attach (copy)
-              e.dataTransfer.effectAllowed = "copyMove";
+              setVaultMoveDataTransfer(e.dataTransfer, payload.path, payload.kind);
               setDragging(payload);
               setHighlight(null);
             }}
@@ -617,7 +647,7 @@ function TreeRow({
               clear();
               window.setTimeout(() => {
                 suppressClick.current = false;
-              }, 0);
+              }, 50);
             }}
             onDragOver={(e) => handleSiblingDragOver(e, true)}
             onDragLeave={(e) => {
@@ -739,23 +769,22 @@ function TreeRow({
       style={{ paddingLeft: 10 + depth * 14 + 14 }}
       draggable={nativeDrag}
       {...longPress}
+      onMouseDown={prepareTreeRowDrag}
       onDragStart={(e) => {
         if (!onMove && !onReorder) return;
+        prepareTreeRowDrag(e);
         suppressClick.current = true;
         const payload: DragPayload = { path: node.path, kind: "file" };
-        const serialized = serializeDrag(payload);
-        e.dataTransfer.setData(DND_TYPE, serialized);
-        e.dataTransfer.setData("text/plain", serialized);
-        // copyMove: tree move + Agent chat attach (copy)
-        e.dataTransfer.effectAllowed = "copyMove";
+        setVaultMoveDataTransfer(e.dataTransfer, payload.path, payload.kind);
         setDragging(payload);
         setHighlight(null);
       }}
       onDragEnd={() => {
         clear();
+        // Keep suppress a beat so the synthetic click after drag does not open the file.
         window.setTimeout(() => {
           suppressClick.current = false;
-        }, 0);
+        }, 50);
       }}
       onDragOver={canDnD ? (e) => handleSiblingDragOver(e, false) : undefined}
       onDragLeave={

@@ -152,7 +152,12 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
   rename: (from_path: string, to_path: string) =>
-    request<{ ok: boolean; from: string; to: string }>("/files/rename", {
+    request<{
+      ok: boolean;
+      from: string;
+      to: string;
+      companion_images?: "queued" | null;
+    }>("/files/rename", {
       method: "POST",
       body: JSON.stringify({ from_path, to_path }),
     }),
@@ -295,8 +300,11 @@ export const api = {
   agentHealth: () =>
     request<{
       status: string;
-      harnessConfigured: boolean;
+      backend?: string;
+      agentConfigured?: boolean;
+      harnessConfigured?: boolean;
       harnessArn?: string | null;
+      tools?: string[];
     }>("/agent/health"),
   agentNoteMeta: (path: string) =>
     request<{

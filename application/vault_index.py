@@ -17,12 +17,21 @@ from application import vault_backend
 
 logger = logging.getLogger("vault_index")
 
-WIKI_LINK_RE = re.compile(
-    r"(!)?\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]"
-)
+# Obsidian-style: [[Note]], [[Note|alias]], [[Note#Heading]], [[#Heading]]
+WIKI_LINK_RE = re.compile(r"(!)?\[\[([^\]|]*?)(?:\|([^\]]+))?\]\]")
 WORD_RE = re.compile(r"\S+")
 FENCE_RE = re.compile(r"```[\s\S]*?```")
 INLINE_CODE_RE = re.compile(r"`[^`]+`")
+
+
+def _wiki_note_target(raw: str) -> str:
+    """Note path/title from a wiki target; empty for heading-only ``[[#…]]``."""
+    value = (raw or "").strip()
+    if not value or value.startswith("#"):
+        return ""
+    if "#" in value:
+        value = value.split("#", 1)[0].strip()
+    return value
 
 
 def _strip_code(text: str) -> str:
@@ -122,7 +131,9 @@ def _parse_note(rel: str, path: Path) -> NoteMeta:
     embeds: list[str] = []
     for m in WIKI_LINK_RE.finditer(_strip_code(text)):
         is_embed = bool(m.group(1))
-        target = m.group(2).strip()
+        target = _wiki_note_target(m.group(2) or "")
+        if not target:
+            continue
         if is_embed:
             embeds.append(target)
         else:

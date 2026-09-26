@@ -1,8 +1,7 @@
-"""Bedrock AgentCore InvokeHarness client for ob-note Open Agent.
+"""Legacy helpers for Open Agent (attachments, VAULT_WRITE marker parse).
 
-Tools: websearch (Exa) + code interpreter.
-Skill: use-vault (S3). Attachments: S3 + presigned URL (no full body inline).
-Note edits: VAULT_WRITE markers (server-side).
+Chat execution moved to ``application.open_agent`` (in-process LangGraph).
+``iter_harness_events`` / InvokeHarness remain only for reference/rollback.
 """
 
 from __future__ import annotations

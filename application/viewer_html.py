@@ -84,6 +84,20 @@ def linkify_toc_in_markdown(text: str) -> str:
             lm = re.match(r"^([ \t]*(?:[-*+]|\d+\.))(\s+)(.*)$", line)
             if lm:
                 bullet, sp, item = lm.group(1), lm.group(2), lm.group(3).strip()
+                # Obsidian same-doc heading: [[#Heading]] or [[#Heading|alias]]
+                wiki_heading = re.match(
+                    r"^\[\[#([^\]|]+)(?:\|([^\]]+))?\]\]$", item
+                )
+                if wiki_heading:
+                    heading_text = wiki_heading.group(1).strip()
+                    alias = (wiki_heading.group(2) or heading_text).strip()
+                    key = unicodedata.normalize(
+                        "NFC", _strip_md_inline(heading_text).lower()
+                    )
+                    title = heading_by_key.get(key, heading_text)
+                    slug = slugify_heading(title)
+                    out.append(f"{bullet}{sp}[{alias}](#{slug})")
+                    continue
                 if (
                     re.match(r"^\[.+\]\([^)]+\)$", item)
                     or item.startswith("[[")

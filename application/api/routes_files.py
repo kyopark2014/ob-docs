@@ -14,7 +14,16 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from application.api.routes_auth import require_user_id
-from application import notes_db, vault_backend, vault_index, vault_order, vault_share, vault_sync, viewer_html
+from application import (
+    notes_db,
+    vault_backend,
+    vault_companion_assets,
+    vault_index,
+    vault_order,
+    vault_share,
+    vault_sync,
+    viewer_html,
+)
 
 logger = logging.getLogger("routes_files")
 
@@ -157,25 +166,8 @@ def _tree_node(path: Path, root: Path) -> dict[str, Any]:
     return node
 
 
-@router.get("/tree")
-def get_tree(request: Request) -> dict:
-    require_user_id(request)
-    notes_db.ensure_db()
-    mode = vault_backend.backend_mode()
-    if mode == "s3":
-        # Tree from S3 object keys only — never await sync/flush here.
-        # A stuck S3 sync was freezing the UI on "Loading vault…".
-        try:
-            rels = vault_sync.list_remote_vault_rels()
-            children = vault_sync.build_tree_from_rels(rels)
-            return {
-                "root": ".",
-                "mode": mode,
-                "source": "s3",
-                "children": children,
-            }
-        except Exception:
-            logger.exception("S3 tree list failed; falling back to local disk")
+def _local_tree_children() -> list[dict[str, Any]]:
+    """Build the file panel tree from the on-disk vault."""
     # Keep SQLite registry aligned before serving the local tree.
     try:
         notes_db.ensure_db()
@@ -189,12 +181,43 @@ def get_tree(request: Request) -> dict:
         if child.name in HIDDEN_SKIP or child.name == ".vault":
             continue
         children.append(_tree_node(child, root))
-    children = vault_order.apply_order("", children)
+    return vault_order.apply_order("", children)
+
+
+@router.get("/tree")
+def get_tree(request: Request) -> dict:
+    require_user_id(request)
+    notes_db.ensure_db()
+    mode = vault_backend.backend_mode()
+    if mode == "s3":
+        # While local→S3 ops are in flight, local disk is ahead of remote keys.
+        # Serving S3-only here made renames/moves briefly disappear from the sidebar
+        # (delete lands before put finishes). Prefer local until the queue drains.
+        try:
+            if vault_sync.pending_count() > 0:
+                return {
+                    "root": ".",
+                    "mode": mode,
+                    "source": "local-pending",
+                    "children": _local_tree_children(),
+                }
+            # Tree from S3 object keys only — never await sync/flush here.
+            # A stuck S3 sync was freezing the UI on "Loading vault…".
+            rels = vault_sync.list_remote_vault_rels()
+            children = vault_sync.build_tree_from_rels(rels)
+            return {
+                "root": ".",
+                "mode": mode,
+                "source": "s3",
+                "children": children,
+            }
+        except Exception:
+            logger.exception("S3 tree list failed; falling back to local disk")
     return {
         "root": ".",
         "mode": mode,
         "source": "local" if mode != "s3" else "local-fallback",
-        "children": children,
+        "children": _local_tree_children(),
     }
 
 
@@ -608,28 +631,43 @@ def rename(request: Request, body: RenameBody) -> dict:
     vault_index.rebuild_index()
     # Keep public shares pointing at the new path and republish content to S3.
     vault_share.rewrite_share_paths(body.from_path, body.to_path)
-    try:
-        if was_file:
-            vault_share.publish_vault_file_to_s3(body.to_path)
-            vault_share.delete_vault_from_s3(body.from_path)
-        else:
-            vault_share.delete_vault_tree_from_s3(body.from_path)
-            if vault_backend.backend_mode() == "s3":
-                vault_sync.enqueue_put_tree(body.to_path)
+    if vault_backend.backend_mode() == "s3":
+        # enqueue_delete_tree (above) + enqueue_put_tree flush together so the
+        # file panel never loses the path between remote delete and re-upload.
+        vault_sync.enqueue_put_tree(body.to_path)
+        vault_sync.schedule_flush_pending(reconcile_casing=True)
+    else:
+        try:
+            if was_file:
+                vault_share.publish_vault_file_to_s3(body.to_path)
+                vault_share.delete_vault_from_s3(body.from_path)
             else:
+                vault_share.delete_vault_tree_from_s3(body.from_path)
                 root = vault_backend.vault_root()
                 target = vault_backend.resolve_vault_path(body.to_path)
                 if target.is_dir():
                     for p in target.rglob("*.md"):
                         rel = p.resolve().relative_to(root.resolve()).as_posix()
                         vault_share.publish_vault_file_to_s3(rel)
-    except Exception:
-        pass
-    if vault_backend.backend_mode() == "s3":
-        vault_sync.enqueue_put_tree(body.to_path)
-        vault_sync.schedule_flush_pending(reconcile_casing=True)
+        except Exception:
+            pass
     vault_order.notify_renamed(body.from_path, body.to_path)
-    return {"ok": True, "from": body.from_path, "to": body.to_path}
+    companion_images: str | None = None
+    if (
+        was_file
+        and notes_db.is_markdown_path(body.to_path)
+        and vault_companion_assets.parents_differ(body.from_path, body.to_path)
+    ):
+        if vault_companion_assets.schedule_move_companion_images(
+            body.from_path, body.to_path
+        ):
+            companion_images = "queued"
+    return {
+        "ok": True,
+        "from": body.from_path,
+        "to": body.to_path,
+        "companion_images": companion_images,
+    }
 
 
 @router.post("/delete")

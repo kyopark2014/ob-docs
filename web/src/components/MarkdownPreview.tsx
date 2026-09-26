@@ -11,20 +11,44 @@ import type { Components } from "react-markdown";
 import { api } from "../api";
 import { MermaidBlock } from "./MermaidBlock";
 
-const WIKI_RE = /(!)?\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]/g;
+/**
+ * Obsidian-style wiki links:
+ *   [[Note]] · [[Note|alias]] · [[Note#Heading]] · [[#Heading]] · [[#Heading|alias]]
+ * Target may be empty only when a heading fragment is present (`[[#…]]`).
+ */
+const WIKI_RE = /(!)?\[\[([^\]|]*?)(?:\|([^\]]+))?\]\]/g;
 
 /** Hash prefix — relative URLs survive react-markdown's defaultUrlTransform
  *  (custom schemes like wiki:// are stripped to ""). */
 export const WIKI_HASH_PREFIX = "#__wiki__/";
 
 function expandWikiLinks(text: string): string {
-  return text.replace(WIKI_RE, (_m, embed, target, _hash, alias) => {
-    const label = alias || target.trim();
-    if (embed) {
-      return `*(embed: ${label})*`;
+  return text.replace(WIKI_RE, (_m, embed, rawTarget, alias) => {
+    const target = (rawTarget || "").trim();
+    if (!target) return _m as string;
+
+    // Same-document heading: [[#Heading]] or [[#Heading|alias]]
+    if (target.startsWith("#")) {
+      const heading = target.slice(1).trim();
+      if (!heading) return _m as string;
+      const label = ((alias as string | undefined) || heading).trim();
+      if (embed) return `*(embed: ${label})*`;
+      const slug = slugifyHeading(heading);
+      // Angle brackets keep spaces/parens safe for CommonMark.
+      return `[${label}](<#${encodeURIComponent(slug)}>)`;
     }
-    // Angle-bracket destination keeps spaces/parens safe for CommonMark.
-    const dest = `${WIKI_HASH_PREFIX}${encodeURIComponent(target.trim())}`;
+
+    const hashIdx = target.indexOf("#");
+    const note =
+      hashIdx >= 0 ? target.slice(0, hashIdx).trim() : target;
+    if (!note) return _m as string;
+
+    const label = ((alias as string | undefined) || note).trim();
+    if (embed) return `*(embed: ${label})*`;
+
+    // Cross-note: open via wiki resolver. Heading fragment is ignored for now
+    // (same-doc TOC uses [[#Heading]] → #slug path above).
+    const dest = `${WIKI_HASH_PREFIX}${encodeURIComponent(note)}`;
     return `[${label}](<${dest}>)`;
   });
 }

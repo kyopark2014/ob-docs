@@ -35,12 +35,8 @@ from urllib.parse import urlparse
 import boto3
 from botocore.exceptions import ClientError
 
-from harness_provision import (
-    create_harness_execution_role,
-    create_or_get_harness,
-    ensure_ecs_invoke_harness,
-    upload_skills_to_s3,
-)
+# Legacy AgentCore Harness provisioning is unused by Open Agent
+# (replaced by in-process LangGraph). harness_provision.py remains for cleanup.
 from s3_files_app_data import (
     APP_DATA_MOUNT_PATH,
     S3FilesAppDataProvisioner,
@@ -842,8 +838,7 @@ def register_task_definition(
         or ("google" if cfg.get("google_client_id") else "cognito"),
         "google_client_id": cfg.get("google_client_id", ""),
         "sharing_url": cfg.get("sharing_url") or "",
-        "HARNESS_ARN": cfg.get("HARNESS_ARN") or "",
-        "harnessName": cfg.get("harnessName") or "",
+        "open_agent_backend": "langgraph",
     }
     for key in (
         "cognito_user_pool_id",
@@ -1324,56 +1319,22 @@ def main() -> int:
     session_arn = get_secret_arn(c["sm"], SESSION_SECRET)
     vault_agent_arn = ensure_vault_agent_token(c["sm"])
 
-    account = str(cfg["accountId"])
-    region = str(cfg["region"])
-
-    logger.info("[1/7] Upload skills (use-vault) → s3://%s/skills/", bucket)
-    n_skills = upload_skills_to_s3(
-        bucket,
-        sharing_url=sharing_url,
-        region=region,
-        project=PROJECT,
-    )
-    logger.info("Uploaded %d skill files", n_skills)
-
-    logger.info("[2/7] AgentCore Harness (use-vault + websearch + code interpreter)")
-    exec_role_arn = create_harness_execution_role(
-        account,
-        region,
-        PROJECT,
-        s3_bucket=bucket,
-        project_secret_prefix=PROJECT,
-    )
-    harness_info = create_or_get_harness(
-        account=account,
-        region=region,
-        project=PROJECT,
-        execution_role_arn=exec_role_arn,
-        s3_bucket=bucket,
-        sharing_url=sharing_url,
-        project_secret_prefix=PROJECT,
-    )
-    cfg["HARNESS_ARN"] = harness_info["harness_arn"]
-    cfg["harnessName"] = harness_info["harness_name"]
+    # Open Agent runs LangGraph in-process (vault_* tools). No Harness / S3 skills.
+    cfg["open_agent_backend"] = "langgraph"
+    cfg.pop("HARNESS_ARN", None)
+    cfg.pop("harnessName", None)
     save_config(cfg)
-    ensure_ecs_invoke_harness(
-        c["iam"],
-        project=PROJECT,
-        region=region,
-        account=account,
-        harness_arn=harness_info["harness_arn"],
-    )
-    logger.info("Harness ARN: %s", harness_info["harness_arn"])
+    logger.info("[1/5] Open Agent backend=langgraph (InvokeHarness skipped)")
 
-    logger.info("[3/7] ECR")
+    logger.info("[2/5] ECR")
     repo_uri = ensure_ecr(c["ecr"])
     docker_login(c["ecr"], repo_uri)
 
     tag = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    logger.info("[4/7] Build & push image tag=%s", tag)
+    logger.info("[3/5] Build & push image tag=%s", tag)
     image_uri = build_and_push(repo_uri, tag)
 
-    logger.info("[5/7] Target group + listener rule")
+    logger.info("[4/5] Target group + listener rule")
     ensure_log_group(c["logs"])
     tg_arn = ensure_target_group(c["elbv2"], network.vpc_id)
     require_header = _uses_cloudfront(sharing_url, network.alb_dns)
@@ -1387,7 +1348,7 @@ def main() -> int:
     if not require_header:
         logger.info("ALB-only mode: /* listener rule without origin header")
 
-    logger.info("[6/7] Task definition + service")
+    logger.info("[5/5] Task definition + service")
     task_arn = register_task_definition(
         c["ecs"],
         image_uri,
@@ -1406,7 +1367,7 @@ def main() -> int:
         assign_public_ip=network.assign_public_ip,
     )
 
-    logger.info("[7/7] Wait for ECS PRIMARY deployment")
+    logger.info("Wait for ECS PRIMARY deployment")
     wait_service(
         c["ecs"],
         c["elbv2"],

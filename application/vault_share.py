@@ -869,9 +869,21 @@ def rewrite_md_assets_for_share(
     return re.sub(r"!\[([^\]]*)\]\(([^)\n]+)\)", repl, text or "")
 
 
-_WIKI_LINK_RE = re.compile(
-    r"(!)?\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]"
-)
+# Obsidian-style: [[Note]], [[Note|alias]], [[Note#Heading]], [[#Heading]], [[#Heading|alias]]
+_WIKI_LINK_RE = re.compile(r"(!)?\[\[([^\]|]*?)(?:\|([^\]]+))?\]\]")
+
+
+def _split_wiki_target(raw: str) -> tuple[str, str]:
+    """Return ``(note_target, heading)``. Heading-only → ``("", heading)``."""
+    value = (raw or "").strip()
+    if not value:
+        return "", ""
+    if value.startswith("#"):
+        return "", value[1:].strip()
+    if "#" in value:
+        note, heading = value.split("#", 1)
+        return note.strip(), heading.strip()
+    return value, ""
 
 
 def _norm_wiki_key(name: str) -> str:
@@ -1117,9 +1129,14 @@ def rewrite_wiki_links_for_folder_share(
     """Turn ``[[Note]]`` into ``/n/`` (sibling) or ``/w/`` (allowed) links."""
 
     def repl(match: re.Match[str]) -> str:
-        target = (match.group(2) or "").strip()
-        heading = (match.group(3) or "").strip()
-        alias = (match.group(4) or "").strip()
+        raw = (match.group(2) or "").strip()
+        alias = (match.group(3) or "").strip()
+        target, heading = _split_wiki_target(raw)
+        if not target and heading:
+            label = alias or heading
+            return f"[{label}](#{_slugify_heading(heading)})"
+        if not target:
+            return alias or raw or match.group(0)
         label = alias or target
         resolved = resolve_folder_share_link_target(
             target,
@@ -1241,10 +1258,11 @@ def note_share_public_path(token: str, rel_path: str, *, root_path: str) -> str:
 
 
 def extract_wiki_link_targets(text: str) -> list[str]:
-    """Return raw ``[[target]]`` strings (no aliases/headings) from markdown."""
+    """Return note targets from ``[[target]]`` (no aliases; heading-only skipped)."""
     out: list[str] = []
     for match in _WIKI_LINK_RE.finditer(text or ""):
-        target = (match.group(2) or "").strip()
+        raw = (match.group(2) or "").strip()
+        target, _heading = _split_wiki_target(raw)
         if target:
             out.append(target)
     return out
@@ -1328,9 +1346,14 @@ def rewrite_wiki_links_for_note_share(
     """Turn ``[[Note]]`` into links under the same note-share token (allowed set only)."""
 
     def repl(match: re.Match[str]) -> str:
-        target = (match.group(2) or "").strip()
-        heading = (match.group(3) or "").strip()
-        alias = (match.group(4) or "").strip()
+        raw = (match.group(2) or "").strip()
+        alias = (match.group(3) or "").strip()
+        target, heading = _split_wiki_target(raw)
+        if not target and heading:
+            label = alias or heading
+            return f"[{label}](#{_slugify_heading(heading)})"
+        if not target:
+            return alias or raw or match.group(0)
         label = alias or target
         resolved = resolve_note_share_wiki_target(
             target, from_path=from_path, allowed_paths=allowed_paths

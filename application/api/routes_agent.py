@@ -1,4 +1,4 @@
-"""Open Agent chat — SSE over InvokeHarness (exa + code interpreter + use-vault)."""
+"""Open Agent chat — SSE over in-process LangGraph (vault tools + code)."""
 
 from __future__ import annotations
 
@@ -13,14 +13,20 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from application.api.routes_auth import require_user_id
 from application import (
     agent_chat_db,
-    harness_client,
     models as model_catalog,
     notes_db,
     vault_backend,
-    vault_index,
+)
+from application.api.routes_auth import require_user_id
+from application.harness_client import parse_vault_writes, strip_write_markers
+from application.open_agent import vault_ops
+from application.open_agent.prompt import build_user_prompt
+from application.open_agent.runner import (
+    agent_ready,
+    iter_agent_events,
+    normalize_session_id,
 )
 
 logger = logging.getLogger("routes_agent")
@@ -47,39 +53,8 @@ def _sse_keepalive() -> str:
     return ": keepalive\n\n"
 
 
-def _read_note(path: str) -> tuple[str, int]:
-    from application import vault_sync
-
-    target = vault_sync.ensure_local_file(path)
-    if target is None or not target.is_file():
-        raise HTTPException(status_code=404, detail=f"Note not found: {path}")
-    content = target.read_text(encoding="utf-8", errors="replace")
-    size = target.stat().st_size
-    return content, size
-
-
 def _apply_vault_write(path: str, content: str) -> dict[str, Any]:
-    try:
-        target = vault_backend.resolve_vault_path(path)
-    except ValueError as e:
-        raise ValueError(str(e)) from e
-    if target.suffix.lower() not in {".md", ".txt", ".markdown"}:
-        raise ValueError(f"Only markdown/text notes can be written: {path}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    note_row = None
-    if target.suffix.lower() in {".md", ".markdown"}:
-        note_row = notes_db.on_note_written(path, content=content)
-        vault_index.update_note(path)
-        vault_index.rebuild_index()
-    if vault_backend.backend_mode() == "s3":
-        vault_backend.sync_to_s3(path)
-    return {
-        "path": path,
-        "bytes": len(content.encode("utf-8")),
-        "note_id": (note_row or {}).get("note_id"),
-        "created": (note_row or {}).get("created"),
-    }
+    return vault_ops.apply_vault_write(path, content)
 
 
 def _upsert_tool_event(timeline: list[dict[str, Any]], event: dict[str, Any]) -> None:
@@ -134,7 +109,7 @@ def _sanitize_timeline_text(timeline: list[dict[str, Any]]) -> None:
         if ev.get("type") != "text":
             cleaned.append(ev)
             continue
-        data = harness_client.strip_write_markers(ev.get("data") or "").strip()
+        data = strip_write_markers(ev.get("data") or "").strip()
         if data:
             cleaned.append({**ev, "data": data})
     timeline[:] = cleaned
@@ -142,15 +117,17 @@ def _sanitize_timeline_text(timeline: list[dict[str, Any]]) -> None:
 
 @router.get("/health")
 def agent_health() -> dict:
-    arn = harness_client.resolve_harness_arn()
     catalog = model_catalog.list_models()
+    ready = agent_ready()
     return {
         "status": "ok",
-        "harnessConfigured": bool(arn),
-        "harnessArn": arn or None,
-        "skills": ["use-vault"],
-        "mcp": ["websearch"],
-        "tools": ["exa", "code"],
+        "backend": "langgraph",
+        "agentConfigured": ready,
+        "harnessConfigured": False,
+        "harnessArn": None,
+        "skills": [],
+        "mcp": [],
+        "tools": ["vault_read", "vault_write", "vault_search", "vault_list", "execute_code", "bash"],
         "models": catalog["models"],
         "default_model": catalog["default_model"],
     }
@@ -166,7 +143,7 @@ def agent_models(request: Request) -> dict:
 def note_meta(request: Request, path: str) -> dict:
     """Filename + size for the agent input chip (includes durable note_id)."""
     require_user_id(request)
-    content, size = _read_note(path)
+    content, size = vault_ops.read_note(path)
     name = Path(path).name
     row = notes_db.ensure_note_for_path(path) if path.lower().endswith(".md") else None
     return {
@@ -250,21 +227,13 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
         else:
             prompt = "이 노트의 내용을 요약해 주세요."
 
-    if not harness_client.resolve_harness_arn():
+    if not agent_ready():
         raise HTTPException(
             status_code=503,
-            detail=(
-                "HARNESS_ARN이 설정되지 않았습니다. "
-                "`python installer.py`로 ob-note harness를 프로비저닝하세요."
-            ),
+            detail="Open Agent(LangGraph)를 초기화할 수 없습니다. Bedrock 권한/리전을 확인하세요.",
         )
 
-    note_content: Optional[str] = None
-    # Bodies are not inlined anymore (S3 + presigned URL). Skip reading the full note.
-    if note_path:
-        note_content = None
-
-    # Conversation room id = durable note_id. Always bind harness session to the open note.
+    # Conversation room id = durable note_id.
     session_raw = (body.session_id or "").strip() or None
     note_id: Optional[str] = None
     if note_path and note_path.lower().endswith((".md", ".markdown")):
@@ -279,9 +248,8 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
                     note_path,
                 )
             session_raw = note_id
-    session_id = harness_client.normalize_session_id(session_raw)
+    session_id = normalize_session_id(session_raw)
 
-    # Attachments stored with the user turn (agentic-work style transcript).
     attach_paths: list[str] = []
     seen_attach: set[str] = set()
     for p in [note_path, *image_paths, *file_paths]:
@@ -304,7 +272,8 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
             user_content = "(빈 메시지)"
     model_name = model_catalog.normalize_model_name(body.model_name)
     logger.info(
-        "agent chat note_path=%r model=%s images=%d files=%d prompt_chars=%d session=%s",
+        "agent chat backend=langgraph note_path=%r model=%s images=%d files=%d "
+        "prompt_chars=%d session=%s",
         note_path,
         model_name,
         len(image_paths),
@@ -312,16 +281,16 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
         len(prompt),
         session_id,
     )
-    full_prompt = harness_client.build_user_prompt(
+    # Prompt is built inside iter_agent_events; log preview size here.
+    preview = build_user_prompt(
         prompt,
         note_path=note_path,
-        note_content=note_content,
         image_paths=image_paths,
         file_paths=file_paths,
     )
     logger.info(
         "agent chat built_prompt_chars=%d note_path=%r files=%d",
-        len(full_prompt),
+        len(preview),
         note_path,
         len(file_paths),
     )
@@ -330,10 +299,9 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
         q: queue.Queue[Any] = queue.Queue()
 
         def worker() -> None:
-            # ContextVar does not propagate to bare threads (same as vault_sync).
-            # Bind the signed-in user so resolve_vault_path / sync_to_s3 work.
             with vault_backend.user_scope(user_id):
                 tool_events: list[dict[str, Any]] = []
+                history_rows: list[dict[str, Any]] = []
                 if note_id:
                     try:
                         agent_chat_db.add_message(
@@ -342,16 +310,23 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
                             user_content,
                             attachments=attach_paths,
                         )
+                        history_rows = agent_chat_db.list_messages(note_id)
                     except Exception:
                         logger.exception(
                             "failed to persist user agent message note_id=%s", note_id
                         )
+                updated_paths: set[str] = set()
                 try:
-                    gen = harness_client.iter_harness_events(
-                        full_prompt,
+                    gen = iter_agent_events(
+                        prompt,
                         session_id=session_id,
                         actor_id=user_id,
                         model_name=model_name,
+                        note_path=note_path,
+                        image_paths=image_paths,
+                        file_paths=file_paths,
+                        history_rows=history_rows,
+                        allowed_write_paths={note_path} if note_path else None,
                     )
                     final = ""
                     try:
@@ -363,9 +338,7 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
                                 final = text
                                 q.put(("token", text))
                             elif etype == "text":
-                                data = harness_client.strip_write_markers(
-                                    event.get("data") or ""
-                                )
+                                data = strip_write_markers(event.get("data") or "")
                                 if data:
                                     cleaned = {"type": "text", "data": data}
                                     _upsert_tool_event(tool_events, cleaned)
@@ -373,11 +346,17 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
                             elif etype in ("tool", "tool_result", "info"):
                                 _upsert_tool_event(tool_events, event)
                                 q.put((etype, event))
+                            elif etype == "note_updated":
+                                path = event.get("path") or ""
+                                if path:
+                                    updated_paths.add(path)
+                                q.put(("note_updated", event))
                     except StopIteration as stop:
                         if isinstance(stop.value, str) and stop.value:
                             final = stop.value
 
-                    writes = harness_client.parse_vault_writes(final)
+                    # Fallback: VAULT_WRITE markers (legacy / model habit).
+                    writes = parse_vault_writes(final)
                     updated: list[dict[str, Any]] = []
                     for path, content in writes:
                         if note_path and path != note_path:
@@ -387,9 +366,12 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
                                 note_path,
                             )
                             continue
+                        if path in updated_paths:
+                            continue
                         try:
                             meta = _apply_vault_write(path, content)
                             updated.append(meta)
+                            updated_paths.add(path)
                             write_event = {
                                 "type": "tool",
                                 "tool": "vault_write",
@@ -421,15 +403,12 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
                             logger.exception("vault write failed for %s", path)
                             q.put(("error", f"노트 저장 실패 ({path}): {e}"))
 
-                    visible_final = harness_client.strip_write_markers(final).strip()
+                    visible_final = strip_write_markers(final).strip()
                     _sanitize_timeline_text(tool_events)
-                    # Final assistant reply must come AFTER tool cards (harness-work order).
                     _set_final_text_in_timeline(tool_events, visible_final)
 
                     if note_id:
                         try:
-                            # Persist full timeline (including final text event) so reload
-                            # matches the live transcript order.
                             agent_chat_db.add_message(
                                 note_id,
                                 "assistant",
@@ -448,7 +427,8 @@ def agent_chat(request: Request, body: ChatBody) -> StreamingResponse:
                             {
                                 "session_id": session_id,
                                 "result": visible_final,
-                                "updated": updated,
+                                "updated": updated
+                                or [{"path": p} for p in sorted(updated_paths)],
                                 "tool_events": tool_events,
                             },
                         )

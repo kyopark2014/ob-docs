@@ -128,7 +128,7 @@ data/vault/                      # working copy (계정별 하위 폴더)
 | PATCH | `/api/graph/pattern` | 그래프 뷰 패턴 전환 |
 | GET/PUT | `/api/graph/sources` | Notes Configure (포함 폴더) |
 | GET | `/api/graph/backlinks` | 백링크 |
-| GET | `/api/agent/health` | Open Agent harness 설정 여부 |
+| GET | `/api/agent/health` | Open Agent(LangGraph) 준비 여부 |
 | GET | `/api/agent/models` | 선택 가능한 모델 목록 |
 | GET | `/api/agent/note-meta?path=` | 에이전트 칩용 노트 메타 |
 | POST | `/api/agent/chat` | Open Agent SSE (`token` / `tool` / `note_updated` / `done`) |
@@ -145,9 +145,11 @@ Open Agent 사용법·동작은 [Agent로 Note 수정하기](#agent로-note-수�
 
 ## Agent로 Note 수정하기
 
-선택한 마크다운 노트를 **Bedrock AgentCore InvokeHarness**로 요약·수정합니다.  
-웹 검색(Exa)·code interpreter를 쓸 수 있고, vault 저장은 **`VAULT_WRITE` 마커**(서버 파싱)를 사용합니다.  
-첨부/선택 노트는 **본문 전체를 넣지 않고** S3 업로드 후 **presigned URL·s3 URI**만 전달합니다.
+선택한 마크다운 노트를 **ECS 인프로세스 LangGraph** 에이전트로 요약·수정합니다.  
+(이전 AgentCore InvokeHarness + Code Interpreter 경로는 제거되었습니다 — CI 샌드박스 권한으로 노트 저장이 실패하던 문제를 해결하기 위함입니다.)
+
+노트 I/O는 **`vault_read` / `vault_write` / `vault_search` / `vault_list`** 도구가 같은 프로세스에서 vault를 직접 읽고 씁니다.  
+계산용으로 `execute_code` / `bash`도 제공하지만, **노트 저장에는 쓰지 않습니다.**
 
 ### 여는 방법
 
@@ -158,39 +160,42 @@ Open Agent 사용법·동작은 [Agent로 Note 수정하기](#agent로-note-수�
 
 패널 UI는 타임라인 · tool 카드 · 입력창 구성입니다.
 
-### 구성 (Harness)
+### 구성 (LangGraph)
 
 | 항목 | 내용 |
 |---|---|
-| Runtime | AgentCore **InvokeHarness** (`HARNESS_ARN`, installer가 `ob_note` harness 생성) |
-| Skill | **use-vault** — vault 경로·본문 규칙·`VAULT_WRITE` 형식 (S3 `skills/use-vault/`) |
-| MCP / tools | **websearch** (Exa `remote_mcp`) + **code interpreter** (일반 계산; skill 스크립트 경로 실행은 비권장) |
-| 모델 | 좌측 rail 하단 **Model** 아이콘(Settings 바로 위)에서 선택 (기본 `Claude 4.6 Sonnet`, localStorage 저장) |
-| 세션 | 채팅 `session_id`로 harness 대화 이어가기 |
+| Runtime | ECS 앱 프로세스 내 LangGraph StateGraph (`application/open_agent/`) |
+| Tools | `vault_*` (직접 vault 쓰기) + `execute_code` / `bash` (계산 전용) |
+| 모델 | 좌측 rail 하단 **Model** 아이콘에서 선택 (기본 `Claude 4.6 Sonnet`) |
+| 세션 | 채팅 `session_id` = 노트 `note_id` (대화방); 히스토리는 SQLite |
 
-`python installer.py`가 skill을 S3에 올리고 harness를 프로비저닝한 뒤 `HARNESS_ARN`을 config/ECS에 넣습니다.
+첨부/선택 노트 본문은 프롬프트에 넣지 않고, 에이전트가 `vault_read`로 가져옵니다.  
+레거시 `<<<VAULT_WRITE>>>` 마커가 응답에 남아 있으면 서버가 파싱해 저장하는 폴백도 유지합니다.
+
+배포 시 `python installer.py`는 Open Agent를 **langgraph** 백엔드로 설정합니다 (InvokeHarness 프로비저닝 없음).
 
 ### 요청 흐름
 
 ```text
 UI (Agent 패널)
   → POST /api/agent/chat  (SSE)
-  → build_user_prompt (선택 노트 본문 + 첨부)
-  → InvokeHarness (model override + exa + code + use-vault)
-  → 스트림: token / text / tool / tool_result
-  → 응답의 VAULT_WRITE 파싱 → vault 파일 저장
-  → note_updated → 열린 탭 다시 로드
+  → LangGraph StateGraph (agent ↔ tools)
+  → vault_read / vault_write / vault_search / …
+  → 스트림: token / text / tool / tool_result / note_updated
+  → 에디터 탭 다시 로드
 ```
 
-1. **선택 노트**: 입력창 칩으로 경로·크기가 보이고, 본문 전체가 프롬프트에 포함됩니다.
-2. **모델**: rail Model에서 고른 display name이 `model_name`으로 전달되고, 서버가 Bedrock `modelId`로 변환해 InvokeHarness `model`에 넣습니다.
-3. **웹 검색 / code**: 필요 시 Exa MCP 또는 code interpreter를 호출합니다. UI에는 harness-work 스타일 **tool / tool_result** 카드가 타임라인에 표시됩니다.
+1. **선택 노트**: 입력창 칩으로 경로·크기가 보이고, 본문은 `vault_read`로 가져옵니다.
+2. **모델**: rail Model에서 고른 display name이 `model_name`으로 전달되고, 서버가 Bedrock `modelId`로 변환합니다.
+3. **도구**: 노트 수정은 `vault_write`, 계산은 `execute_code`/`bash`. UI에는 **tool / tool_result** 카드가 타임라인에 표시됩니다.
 4. **최종 답변**: tool 카드 **아래**에 텍스트가 오도록 서버·클라이언트가 타임라인을 맞춥니다.
 
-### 노트 저장 (`VAULT_WRITE`)
+### 노트 저장 (`vault_write`)
 
-응답에 아래 마커를 넣으면 **ob-note 서버**가 선택 노트 경로만 덮어씁니다.  
-(CI 샌드박스에는 harness skill 마운트가 없을 수 있어, Open Agent는 스크립트 절대 경로 실행 대신 이 마커를 씁니다.)
+에이전트가 `vault_write(path, content)`를 호출하면 **같은 ECS 프로세스**에서 vault 파일을 덮어쓰고 인덱스를 갱신합니다.  
+(Code Interpreter 샌드박스 ACL과 무관합니다.)
+
+레거시 폴백으로 응답에 아래 마커가 있으면 서버가 파싱해 저장합니다.
 
 ```text
 <<<VAULT_WRITE Meeting/Weekly-Sync.md>>>
@@ -200,10 +205,8 @@ UI (Agent 패널)
 <<<END_VAULT_WRITE>>>
 ```
 
-- 경로에 공백이 있어도 파싱됩니다.
-- 선택 노트와 **다른 경로**로의 WRITE는 무시됩니다.
-- 저장 후 UI에 `vault_write` tool 카드가 보이고, Preview/Edit 탭이 갱신됩니다.
-- 스트리밍 중 불완전 마커·완성 마커 본문은 채팅에 노출되지 않습니다.
+- 선택된 노트 경로만 쓰기가 허용됩니다 (다른 path는 도구가 거부).
+- 저장 후 UI에 `vault_write` tool 카드와 `note_updated`가 보이고 Preview/Edit 탭이 갱신됩니다.
 
 ### 첨부 (사진 / Load files)
 

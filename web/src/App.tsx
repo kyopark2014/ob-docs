@@ -22,6 +22,7 @@ import {
   type PanelMenuAction,
 } from "./components/FolderContextMenu";
 import { TabContextMenu, type TabContextMenuState, type TabMenuAction } from "./components/TabContextMenu";
+import { ImagePreview } from "./components/ImagePreview";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import {
   AppearanceIcon,
@@ -746,6 +747,31 @@ export default function App() {
     setTree(t.children);
   }, []);
 
+  /** Refresh now, then again shortly after (S3 pending / eventual consistency). */
+  const refreshTreeAfterMutation = useCallback(async () => {
+    await refreshTree();
+    window.setTimeout(() => {
+      void refreshTree();
+    }, 800);
+    window.setTimeout(() => {
+      void refreshTree();
+    }, 2500);
+  }, [refreshTree]);
+
+  const removeTreePath = useCallback((targetPath: string, asFolder: boolean) => {
+    const prune = (nodes: TreeNode[]): TreeNode[] =>
+      nodes
+        .filter((n) => {
+          if (n.path === targetPath) return false;
+          if (asFolder && n.path.startsWith(targetPath + "/")) return false;
+          return true;
+        })
+        .map((n) =>
+          n.children ? { ...n, children: prune(n.children) } : n,
+        );
+    setTree((prev) => prune(prev));
+  }, []);
+
   const handleRefreshTree = useCallback(async () => {
     if (treeRefreshing) return;
     setTreeRefreshing(true);
@@ -950,10 +976,18 @@ export default function App() {
 
   const openFile = useCallback(
     async (path: string): Promise<boolean> => {
-      // Notes only — images/binaries are moved via drag-and-drop, not opened as markdown
-      if (!/\.md$/i.test(path)) return false;
+      const isMd = /\.md$/i.test(path);
+      const isImage = isImageFileName(path);
+      // Notes and images open in the main pane; other binaries stay drag/move-only.
+      if (!isMd && !isImage) return false;
       const currentPath = activePathRef.current;
-      if (currentPath && path !== currentPath && dirty && draftRef.current !== file?.content) {
+      if (
+        currentPath &&
+        path !== currentPath &&
+        /\.md$/i.test(currentPath) &&
+        dirty &&
+        draftRef.current !== file?.content
+      ) {
         try {
           const { finalPath } = await persistNote(currentPath, draftRef.current);
           if (finalPath !== currentPath) {
@@ -966,6 +1000,31 @@ export default function App() {
           return false;
         }
       }
+
+      if (isImage) {
+        setFile(null);
+        setDraft("");
+        setDirty(false);
+        setActivePath(path);
+        setTabs((prev) => {
+          if (prev.some((t) => t.path === path)) return prev;
+          return [
+            ...prev,
+            {
+              path,
+              title: path.split("/").pop() || path,
+            },
+          ];
+        });
+        if (window.matchMedia(NARROW_LAYOUT_MQ).matches) {
+          setPanel("hidden");
+        } else {
+          setPanel("files");
+        }
+        setViewMode("preview");
+        return true;
+      }
+
       let payload;
       try {
         payload = await api.readFile(path);
@@ -1143,7 +1202,7 @@ export default function App() {
     // Wait out any H1 auto-rename, then use the live path (not a stale closure).
     await renameChainRef.current;
     const path = resolveLatestPath(activePathRef.current || "");
-    if (!path) return;
+    if (!path || !/\.md$/i.test(path)) return;
     setSaving(true);
     try {
       const { finalPath } = await persistNote(path, draftRef.current);
@@ -1164,58 +1223,16 @@ export default function App() {
     }
   }, [persistNote, resolveLatestPath, showAlert]);
 
-  // Live tab label + debounced file rename when H1 changes
+  // Live tab label from H1 while editing — filename only changes on Save.
   useEffect(() => {
-    if (!activePath) return;
+    if (!activePath || !/\.md$/i.test(activePath)) return;
     const title = extractH1(draft);
     if (!title) return;
     const label = sanitizeFilename(title);
     setTabs((prev) =>
       prev.map((t) => (t.path === activePath ? { ...t, title: label } : t)),
     );
-
-    const currentStem =
-      activePath.split("/").pop()?.replace(/\.md$/i, "") || "";
-    if (label === currentStem) return;
-
-    const pathWhenScheduled = activePath;
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        const path = activePathRef.current;
-        const content = draftRef.current;
-        if (!path) return;
-        const liveTitle = extractH1(content);
-        if (!liveTitle) return;
-        const liveLabel = sanitizeFilename(liveTitle);
-        const stemNow = path.split("/").pop()?.replace(/\.md$/i, "") || "";
-        if (liveLabel === stemNow) return;
-        try {
-          const dest = await syncFilenameToH1(path, content, treeRef.current);
-          setActivePath((prev) =>
-            prev === path || prev === pathWhenScheduled ? dest : prev,
-          );
-          writeLastNotePath(dest);
-          setTabs((prev) =>
-            prev.map((t) =>
-              t.path === path || t.path === pathWhenScheduled
-                ? { ...t, path: dest, title: liveLabel }
-                : t,
-            ),
-          );
-          setFile((prev) =>
-            prev && (prev.path === path || prev.path === pathWhenScheduled)
-              ? { ...prev, path: dest, title: liveLabel, content }
-              : prev,
-          );
-          if (draftRef.current === content) setDirty(false);
-          await refreshTree();
-        } catch {
-          /* ignore transient rename errors while typing */
-        }
-      })();
-    }, 400);
-    return () => window.clearTimeout(timer);
-  }, [activePath, draft, refreshTree, syncFilenameToH1]);
+  }, [activePath, draft]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -1619,46 +1636,94 @@ export default function App() {
       const parent = parts.slice(0, -1).join("/");
       const to = parent ? `${parent}/${safe}` : safe;
       if (to === path) return;
+      const rewritePath = (p: string) =>
+        p === path ? to : p.startsWith(path + "/") ? to + p.slice(path.length) : p;
+      const rewriteTreeNodes = (nodes: TreeNode[]): TreeNode[] =>
+        nodes.map((n) => {
+          if (n.path === path) {
+            return {
+              ...n,
+              name: safe,
+              path: to,
+              children: n.children
+                ? n.children.map(function mapChild(c): TreeNode {
+                    return {
+                      ...c,
+                      path: rewritePath(c.path),
+                      children: c.children ? c.children.map(mapChild) : c.children,
+                    };
+                  })
+                : n.children,
+            };
+          }
+          if (n.children) {
+            return { ...n, children: rewriteTreeNodes(n.children) };
+          }
+          return n;
+        });
       try {
         await api.rename(path, to);
         renamedFromRef.current.set(path, to);
-        if (activePathRef.current === path) activePathRef.current = to;
+        if (activePathRef.current === path || activePathRef.current?.startsWith(path + "/")) {
+          activePathRef.current = rewritePath(activePathRef.current!);
+        }
         updatePinnedPaths(rewritePinnedPaths(pinnedPaths, path, to));
         rewriteOpenFolders(path, to);
-        if (selectedFolder === path) setSelectedFolder(to);
-        if (activePath === path || activePathRef.current === to) {
-          setActivePath(to);
-          writeLastNotePath(to);
-          setTabs((prev) =>
-            prev.map((t) =>
-              t.path === path
-                ? { ...t, path: to, title: safe.replace(/\.md$/i, "") }
-                : t,
-            ),
-          );
-          try {
-            const payload = await api.readFile(to);
-            setFile(payload);
-            setDraft(payload.content);
-            setDirty(false);
-          } catch {
-            /* ignore */
-          }
-        } else {
-          setTabs((prev) =>
-            prev.map((t) =>
-              t.path === path
-                ? { ...t, path: to, title: safe.replace(/\.md$/i, "") }
-                : t,
-            ),
-          );
+        if (selectedFolder === path || selectedFolder?.startsWith(path + "/")) {
+          setSelectedFolder(rewritePath(selectedFolder!));
         }
+        // Optimistic sidebar update so the new name is visible immediately.
+        setTree((prev) => rewriteTreeNodes(prev));
+
+        setTabs((prev) =>
+          prev.map((t) => {
+            const next = rewritePath(t.path);
+            if (next === t.path) return t;
+            return {
+              ...t,
+              path: next,
+              title: next.split("/").pop()?.replace(/\.md$/i, "") || t.title,
+            };
+          }),
+        );
+
+        if (activePath === path || activePath?.startsWith(path + "/")) {
+          const nextActive = rewritePath(activePath!);
+          setActivePath(nextActive);
+          writeLastNotePath(nextActive);
+          if (activePath === path && /\.md$/i.test(nextActive)) {
+            try {
+              const payload = await api.readFile(nextActive);
+              setFile(payload);
+              setDraft(payload.content);
+              setDirty(false);
+            } catch {
+              /* ignore */
+            }
+          } else if (file?.path === path || file?.path.startsWith(path + "/")) {
+            setFile((prev) => (prev ? { ...prev, path: rewritePath(prev.path) } : prev));
+          }
+        }
+
         await refreshTree();
+        // S3 flush may lag; a second refresh catches the settled remote tree.
+        window.setTimeout(() => {
+          void refreshTree();
+        }, 800);
       } catch (err) {
         void showAlert(err instanceof Error ? err.message : String(err));
+        await refreshTree();
       }
     },
-    [activePath, pinnedPaths, refreshTree, selectedFolder, showAlert, updatePinnedPaths],
+    [
+      activePath,
+      file?.path,
+      pinnedPaths,
+      refreshTree,
+      selectedFolder,
+      showAlert,
+      updatePinnedPaths,
+    ],
   );
 
   const movePath = useCallback(
@@ -1674,8 +1739,10 @@ export default function App() {
         void showAlert("폴더를 자기 자신이나 하위로 옮길 수 없습니다.", "Move failed");
         return;
       }
+      let companionQueued = false;
       try {
-        await api.rename(fromPath, to);
+        const result = await api.rename(fromPath, to);
+        companionQueued = result.companion_images === "queued";
       } catch (err) {
         // Duplicate drop handlers can race; if source is already gone, treat as done.
         const status = (err as { status?: number } | null)?.status;
@@ -1719,7 +1786,9 @@ export default function App() {
         if (activePath === fromPath || activePath?.startsWith(fromPath + "/")) {
           const nextActive = rewrite(activePath!);
           setActivePath(nextActive);
-          writeLastNotePath(nextActive);
+          if (/\.md$/i.test(nextActive)) {
+            writeLastNotePath(nextActive);
+          }
           if (activePath === fromPath && /\.md$/i.test(nextActive)) {
             try {
               const payload = await api.readFile(nextActive);
@@ -1734,12 +1803,27 @@ export default function App() {
           }
         }
 
+        // Moving an image into the tree — keep Images view on so it stays visible.
+        if (isImageFileName(fromPath) && !showImages) {
+          persistShowImages(true);
+          setShowImages(true);
+        }
+
         await refreshTree();
+        // S3 / companion-image moves settle asynchronously; refresh again.
+        if (companionQueued || isImageFileName(fromPath) || isImageFileName(to)) {
+          window.setTimeout(() => {
+            void refreshTree();
+          }, 1200);
+          window.setTimeout(() => {
+            void refreshTree();
+          }, 4000);
+        }
       } catch (err) {
         void showAlert(err instanceof Error ? err.message : String(err), "Move failed");
       }
     },
-    [activePath, file?.path, pinnedPaths, refreshTree, selectedFolder, showAlert, updatePinnedPaths],
+    [activePath, file?.path, pinnedPaths, refreshTree, selectedFolder, showAlert, showImages, updatePinnedPaths],
   );
 
   const reorderInFolder = useCallback(
@@ -1883,14 +1967,26 @@ export default function App() {
             setActivePath(null);
             setFile(null);
             setDraft("");
+            setDirty(false);
           }
-          await refreshTree();
+          removeTreePath(path, false);
+          await refreshTreeAfterMutation();
         } catch (err) {
           void showAlert(err instanceof Error ? err.message : String(err));
+          await refreshTreeAfterMutation();
         }
       }
     },
-    [activePath, askConfirm, openFile, pinnedPaths, refreshTree, showAlert, updatePinnedPaths],
+    [
+      activePath,
+      askConfirm,
+      openFile,
+      pinnedPaths,
+      refreshTreeAfterMutation,
+      removeTreePath,
+      showAlert,
+      updatePinnedPaths,
+    ],
   );
 
   const onFolderMenuAction = useCallback(
@@ -1952,16 +2048,21 @@ export default function App() {
           await api.deletePath(path);
           updatePinnedPaths(removePinnedPaths(pinnedPaths, path));
           removeOpenFolders(path);
-          if (selectedFolder === path) setSelectedFolder(null);
-          if (activePath?.startsWith(path + "/")) {
+          if (selectedFolder === path || selectedFolder?.startsWith(path + "/")) {
+            setSelectedFolder(null);
+          }
+          if (activePath === path || activePath?.startsWith(path + "/")) {
             setActivePath(null);
             setFile(null);
             setDraft("");
+            setDirty(false);
           }
           setTabs((prev) => prev.filter((t) => !t.path.startsWith(path + "/") && t.path !== path));
-          await refreshTree();
+          removeTreePath(path, true);
+          await refreshTreeAfterMutation();
         } catch (err) {
           void showAlert(err instanceof Error ? err.message : String(err));
+          await refreshTreeAfterMutation();
         }
       }
     },
@@ -1970,7 +2071,8 @@ export default function App() {
       askConfirm,
       createNoteIn,
       pinnedPaths,
-      refreshTree,
+      refreshTreeAfterMutation,
+      removeTreePath,
       selectedFolder,
       showAlert,
       startCreateFolder,
@@ -2079,6 +2181,9 @@ export default function App() {
   const crumbs = useMemo(() => {
     if (!activePath) return [];
     const parts = activePath.split("/");
+    if (isImageFileName(activePath)) {
+      return parts;
+    }
     const h1 = extractH1(draft);
     const last = h1
       ? sanitizeFilename(h1)
@@ -2737,7 +2842,47 @@ export default function App() {
               ))}
             </div>
 
-            {activePath && file ? (
+            {activePath && isImageFileName(activePath) ? (
+              <>
+                <div className="toolbar">
+                  <div className="breadcrumb">
+                    {crumbs.map((c, i) => (
+                      <span key={`${c}-${i}`}>
+                        {i > 0 ? " / " : ""}
+                        {c}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="toolbar-actions">
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="Open agent"
+                      aria-label="Open agent"
+                      onClick={() => {
+                        if (!activePath) return;
+                        void onFileMenuAction("open-agent", activePath);
+                      }}
+                      style={{
+                        color:
+                          agentOpen && agentNotePath === activePath
+                            ? "var(--accent)"
+                            : undefined,
+                      }}
+                    >
+                      <AgentIcon />
+                    </button>
+                  </div>
+                </div>
+                <div className="content">
+                  <ImagePreview path={activePath} />
+                </div>
+                <div className="status-bar">
+                  <span>Image</span>
+                  <span>{activePath.split("/").pop()}</span>
+                </div>
+              </>
+            ) : activePath && file ? (
               <>
                 <div className="toolbar">
                   <div className="breadcrumb">
